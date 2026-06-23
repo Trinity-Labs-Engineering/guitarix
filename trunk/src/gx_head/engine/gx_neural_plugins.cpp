@@ -27,7 +27,60 @@
 #include "engine.h"
 #include "gx_faust_support.h"
 
+#include <algorithm>
+#include <cmath>
+#include <exception>
+#include <filesystem>
+
 namespace gx_engine {
+
+/****************************************************************
+ ** NAM Core v0.5 adapter
+ **
+ ** Guitarix NAM modules are mono. NAM Core v0.5 processes arrays
+ ** of channel pointers, so model loading validates the channel count
+ ** and this adapter supplies the single Guitarix input/output channel.
+ */
+
+namespace {
+
+constexpr int kMaxNamHostBlockFrames = 8192;
+
+// Allow for resampler rounding while preallocating the largest NAM block.
+int max_nam_model_block_frames(int host_sample_rate, int model_sample_rate) {
+    const double ratio = static_cast<double>(model_sample_rate) /
+        static_cast<double>(std::max(1, host_sample_rate));
+    return static_cast<int>(std::ceil(kMaxNamHostBlockFrames * ratio)) + 64;
+}
+
+bool initialize_nam_model(nam::DSP* model, int host_sample_rate,
+                          int model_sample_rate, const char* module_name,
+                          const Glib::ustring& filename) {
+    if (model->NumInputChannels() != 1 || model->NumOutputChannels() != 1) {
+        gx_print_info(module_name, "unsupported non-mono NAM model " +
+                      std::string(filename));
+        return false;
+    }
+
+    try {
+        // Reset and prewarm outside the audio callback to avoid allocations there.
+        model->Reset(model_sample_rate,
+                     max_nam_model_block_frames(host_sample_rate, model_sample_rate));
+        return true;
+    } catch (const std::exception& error) {
+        gx_print_info(module_name, "fail to initialize " + std::string(filename) +
+                      ": " + error.what());
+        return false;
+    }
+}
+
+inline void process_nam_mono(nam::DSP* model, float* input, float* output, int frames) {
+    float* inputs[] = {input};
+    float* outputs[] = {output};
+    model->process(inputs, outputs, frames);
+}
+
+} // namespace
 
 
 /****************************************************************
@@ -170,7 +223,7 @@ void always_inline NeuralAmp::compute(int count, float *input0, float *output0)
                 memcpy(buf, output0, ReCount * sizeof(float));
             }
 
-            model->process(buf, buf, ReCount);
+            process_nam_mono(model, buf, buf, ReCount);
 
             if (need_resample == 1) {
                 smp.down(buf, output0);
@@ -178,7 +231,7 @@ void always_inline NeuralAmp::compute(int count, float *input0, float *output0)
                 smp.up(ReCount, buf, output0);
             }
         } else {
-            model->process(output0, output0, count);
+            process_nam_mono(model, output0, output0, count);
         }
     }
     for (int i0 = 0; i0 < count; i0 = i0 + 1) {
@@ -218,34 +271,32 @@ void NeuralAmp::load_nam_file() {
         model = nullptr;
         need_resample = 0;
         clear_state_f();
-        int32_t warmUpSize = 4096;
         try {
-            model = nam::get_dsp(std::string(load_file)).release();
+            model = nam::get_dsp(std::filesystem::path{std::string(load_file)}).release();
         } catch (const std::exception&) {
             gx_print_info("Neural Amp Modeler", "fail to load " + load_file);
             load_file = "None";
         }
         
         if (model) {
-            current_file = load_file;
-            if (model->HasLoudness()) loudness = model->GetLoudness();
             mSampleRate = static_cast<int>(model->GetExpectedSampleRate());
-            //model->SetLoudness(-15.0);
             if (mSampleRate <= 0) mSampleRate = 48000;
-            if (mSampleRate > fSampleRate) {
-                smp.setup(fSampleRate, mSampleRate);
-                need_resample = 1;
-            } else if (mSampleRate < fSampleRate) {
-                smp.setup(mSampleRate, fSampleRate);
-                need_resample = 2;
-            } 
-            float* buffer = new float[warmUpSize];
-            memset(buffer, 0, warmUpSize * sizeof(float));
-
-            model->process(buffer, buffer, warmUpSize);
-
-            delete[] buffer;
-            //fprintf(stderr, "model %f %s inputGain %f outputGain %f\n", filelist, load_file.c_str(), fVslider0, fVslider1);
+            if (!initialize_nam_model(model, fSampleRate, mSampleRate,
+                                      "Neural Amp Modeler", load_file)) {
+                delete model;
+                model = nullptr;
+                load_file = "None";
+            } else {
+                current_file = load_file;
+                if (model->HasLoudness()) loudness = model->GetLoudness();
+                if (mSampleRate > fSampleRate) {
+                    smp.setup(fSampleRate, mSampleRate);
+                    need_resample = 1;
+                } else if (mSampleRate < fSampleRate) {
+                    smp.setup(mSampleRate, fSampleRate);
+                    need_resample = 2;
+                }
+            }
         }
         gx_system::atomic_set(&ready, 1);
     }
@@ -464,7 +515,7 @@ void always_inline NeuralAmpMulti::processModelA(int count, float *bufa) {
                 memcpy(bufa1, bufa, ReCounta * sizeof(float));
             }
 
-            modela->process(bufa1, bufa1, ReCounta);
+            process_nam_mono(modela, bufa1, bufa1, ReCounta);
 
             if (need_aresample == 1) {
                 smpa.down(bufa1, bufa);
@@ -472,7 +523,7 @@ void always_inline NeuralAmpMulti::processModelA(int count, float *bufa) {
                 smpa.up(ReCounta, bufa1, bufa);
             }
         } else {
-            modela->process(bufa, bufa, count);
+            process_nam_mono(modela, bufa, bufa, count);
         }
         if (rampA.mode == rampA.DOWN || rampA.mode == rampA.DEAD) rampA.rampDown(count, bufa);
         else if (rampA.mode == rampA.UP) rampA.rampUp(count, bufa);
@@ -508,7 +559,7 @@ void always_inline NeuralAmpMulti::processModelB() {
                 memcpy(buf1, buf, ReCountb * sizeof(float));
             }
 
-            modelb->process(buf1, buf1, ReCountb);
+            process_nam_mono(modelb, buf1, buf1, ReCountb);
 
             if (need_bresample == 1) {
                 smpb.down(buf1, buf);
@@ -516,7 +567,7 @@ void always_inline NeuralAmpMulti::processModelB() {
                 smpb.up(ReCountb, buf1, buf);
             }
         } else {
-            modelb->process(buf, buf, nframes);
+            process_nam_mono(modelb, buf, buf, nframes);
         }
         if (rampB.mode == rampB.DOWN || rampB.mode == rampB.DEAD) rampB.rampDown(nframes, buf);
         else if (rampB.mode == rampA.UP) rampB.rampUp(nframes, buf);
@@ -601,35 +652,32 @@ void NeuralAmpMulti::load_nam_afile() {
         modela = nullptr;
         need_aresample = 0;
         clear_state_f();
-        int32_t warmUpSize = 4096;
         try {
-            modela = nam::get_dsp(std::string(load_afile)).release();
+            modela = nam::get_dsp(std::filesystem::path{std::string(load_afile)}).release();
         } catch (const std::exception&) {
             gx_print_info("Neural Multi Amp Modeler", "fail to load " + load_afile);
             load_afile = "None";
         }
         
         if (modela) {
-            current_afile = load_afile;
-            if (modela->HasLoudness()) loudnessa = modela->GetLoudness();
             maSampleRate = static_cast<int>(modela->GetExpectedSampleRate());
-            //model->SetLoudness(-15.0);
             if (maSampleRate <= 0) maSampleRate = 48000;
-            if (maSampleRate > fSampleRate) {
-                smpa.setup(fSampleRate, maSampleRate);
-                need_aresample = 1;
-            } else if (maSampleRate < fSampleRate) {
-                smpa.setup(maSampleRate, fSampleRate);
-                need_aresample = 2;
-            } 
-            float* buffer = new float[warmUpSize];
-            memset(buffer, 0, warmUpSize * sizeof(float));
-
-            modela->process(buffer, buffer, warmUpSize);
-
-            delete[] buffer;
-            //fprintf(stderr, "sample rate = %i file = %i l = %f\n",fSampleRate, maSampleRate, loudness);
-            //fprintf(stderr, "%s\n", load_file.c_str());
+            if (!initialize_nam_model(modela, fSampleRate, maSampleRate,
+                                      "Neural Multi Amp Modeler", load_afile)) {
+                delete modela;
+                modela = nullptr;
+                load_afile = "None";
+            } else {
+                current_afile = load_afile;
+                if (modela->HasLoudness()) loudnessa = modela->GetLoudness();
+                if (maSampleRate > fSampleRate) {
+                    smpa.setup(fSampleRate, maSampleRate);
+                    need_aresample = 1;
+                } else if (maSampleRate < fSampleRate) {
+                    smpa.setup(maSampleRate, fSampleRate);
+                    need_aresample = 2;
+                }
+            }
         }
         gx_system::atomic_set(&ready, 1);
     }
@@ -659,35 +707,32 @@ void NeuralAmpMulti::load_nam_bfile() {
         modelb = nullptr;
         need_bresample = 0;
         clear_state_f();
-        int32_t warmUpSize = 4096;
         try {
-            modelb = nam::get_dsp(std::string(load_bfile)).release();
+            modelb = nam::get_dsp(std::filesystem::path{std::string(load_bfile)}).release();
         } catch (const std::exception&) {
             gx_print_info("Neural Multi Amp Modeler", "fail to load " + load_bfile);
             load_bfile = "None";
         }
         
         if (modelb) {
-            current_bfile = load_bfile;
-            if (modelb->HasLoudness()) loudnessb = modelb->GetLoudness();
             mbSampleRate = static_cast<int>(modelb->GetExpectedSampleRate());
-            //model->SetLoudness(-15.0);
             if (mbSampleRate <= 0) mbSampleRate = 48000;
-            if (mbSampleRate > fSampleRate) {
-                smpb.setup(fSampleRate, mbSampleRate);
-                need_bresample = 1;
-            } else if (mbSampleRate < fSampleRate) {
-                smpb.setup(maSampleRate, fSampleRate);
-                need_bresample = 2;
-            } 
-            float* buffer = new float[warmUpSize];
-            memset(buffer, 0, warmUpSize * sizeof(float));
-
-            modelb->process(buffer, buffer, warmUpSize);
-
-            delete[] buffer;
-            //fprintf(stderr, "sample rate = %i file = %i l = %f\n",fSampleRate, mbSampleRate, loudness);
-            //fprintf(stderr, "%s\n", load_file.c_str());
+            if (!initialize_nam_model(modelb, fSampleRate, mbSampleRate,
+                                      "Neural Multi Amp Modeler", load_bfile)) {
+                delete modelb;Keeps all existing NAM module IDs, preset 
+                modelb = nullptr;
+                load_bfile = "None";
+            } else {
+                current_bfile = load_bfile;
+                if (modelb->HasLoudness()) loudnessb = modelb->GetLoudness();
+                if (mbSampleRate > fSampleRate) {
+                    smpb.setup(fSampleRate, mbSampleRate);
+                    need_bresample = 1;
+                } else if (mbSampleRate < fSampleRate) {
+                    smpb.setup(mbSampleRate, fSampleRate);
+                    need_bresample = 2;
+                }
+            }
         }
         gx_system::atomic_set(&ready, 1);
     }
