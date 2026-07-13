@@ -29,6 +29,7 @@
 #include "container.h"
 #include "lstm.h"
 #include "model_config.h"
+#include "slimmable.h"
 #include "wavenet/model.h"
 
 #include <algorithm>
@@ -52,6 +53,7 @@ namespace {
 
 constexpr int kMaxNamHostBlockFrames = 8192;
 constexpr int kNamSelectorSlots = 128;
+constexpr float kDefaultNamSlimmableSize = 0.49f;
 constexpr const char* kNamNone = "None";
 
 void ensure_nam_builtin_parsers_registered() {
@@ -103,10 +105,46 @@ bool initialize_nam_model(nam::DSP* model, int host_sample_rate,
     }
 }
 
+bool nam_model_is_slimmable(nam::DSP* model) {
+    return dynamic_cast<nam::SlimmableModel*>(model) != nullptr;
+}
+
+float clamp_nam_size(float size) {
+    return std::max<float>(0.0f, std::min<float>(1.0f, size));
+}
+
+bool set_nam_slimmable_size(nam::DSP* model, float size, int host_sample_rate,
+                            int model_sample_rate, const char* module_name,
+                            const Glib::ustring& filename, const char* slot_name) {
+    auto* slimmable = dynamic_cast<nam::SlimmableModel*>(model);
+    if (!slimmable) {
+        return false;
+    }
+
+    const float clamped_size = clamp_nam_size(size);
+    try {
+        slimmable->SetSlimmableSize(clamped_size);
+        model->ResetAndPrewarm(model_sample_rate,
+                               max_nam_model_block_frames(host_sample_rate, model_sample_rate));
+        gx_print_info(module_name, std::string("set ") + slot_name + " size " +
+                      std::to_string(clamped_size) + " for " + std::string(filename));
+        return true;
+    } catch (const std::exception& error) {
+        gx_print_info(module_name, std::string("fail to set ") + slot_name +
+                      " size for " + std::string(filename) + ": " + error.what());
+    } catch (...) {
+        gx_print_info(module_name, std::string("fail to set ") + slot_name +
+                      " size for " + std::string(filename));
+    }
+    return false;
+}
+
 std::unique_ptr<nam::DSP> load_nam_model(const Glib::ustring& filename,
                                          int host_sample_rate,
                                          int* model_sample_rate,
-                                         const char* module_name) {
+                                         const char* module_name,
+                                         float model_size,
+                                         const char* slot_name) {
     try {
         ensure_nam_builtin_parsers_registered();
         std::unique_ptr<nam::DSP> next =
@@ -119,6 +157,19 @@ std::unique_ptr<nam::DSP> load_nam_model(const Glib::ustring& filename,
         *model_sample_rate = static_cast<int>(next->GetExpectedSampleRate());
         if (*model_sample_rate <= 0) {
             *model_sample_rate = 48000;
+        }
+        if (auto* slimmable = dynamic_cast<nam::SlimmableModel*>(next.get())) {
+            try {
+                const float clamped_size = clamp_nam_size(model_size);
+                slimmable->SetSlimmableSize(clamped_size);
+                gx_print_info(module_name, std::string("selected ") + slot_name +
+                              " size " + std::to_string(clamped_size) +
+                              " for " + std::string(filename));
+            } catch (const std::exception& error) {
+                gx_print_info(module_name, std::string("fail to select ") + slot_name +
+                              " size for " + std::string(filename) + ": " + error.what());
+                return nullptr;
+            }
         }
         if (!initialize_nam_model(next.get(), host_sample_rate, *model_sample_rate,
                                   module_name, filename)) {
@@ -205,6 +256,7 @@ bool get_selected_nam_file(float selector, const Glib::ustring& load_path,
 }
 
 inline void process_nam_mono(nam::DSP* model, float* input, float* output, int frames) {
+    AVOIDDENORMALS();
     float* inputs[] = {input};
     float* outputs[] = {output};
     model->process(inputs, outputs, frames);
@@ -289,6 +341,7 @@ NeuralAmp::NeuralAmp(ParamMap& param_, std::string id_, sigc::slot<void> sync_)
     is_inited = false;
     loudness = 0.0;
     filelist = 0.0;
+    fVslider2 = kDefaultNamSlimmableSize;
     gx_system::atomic_set(&ready, 0);
  }
 
@@ -406,7 +459,8 @@ void NeuralAmp::load_nam_file() {
         int next_sample_rate = 0;
         if (has_selection) {
             next_model = load_nam_model(selected_file, fSampleRate,
-                                        &next_sample_rate, "Neural Amp Modeler");
+                                        &next_sample_rate, "Neural Amp Modeler",
+                                        fVslider2, "model");
         }
 
         ramp.mode = ramp.DOWN;
@@ -436,6 +490,23 @@ void NeuralAmp::load_nam_file() {
     ramp.mode = model ? ramp.UP : ramp.OFF;
 }
 
+void NeuralAmp::set_nam_size() {
+    if (!model || !nam_model_is_slimmable(model)) {
+        return;
+    }
+
+    if (gx_system::atomic_get(ready) && ramp.mode == ramp.OFF) {
+        ramp.startRampDown();
+    }
+    gx_system::atomic_set(&ready, 0);
+    sync();
+
+    set_nam_slimmable_size(model, fVslider2, fSampleRate, mSampleRate,
+                           "Neural Amp Modeler", current_file, "model");
+    gx_system::atomic_set(&ready, model ? 1 : 0);
+    ramp.mode = model ? ramp.UP : ramp.OFF;
+}
+
 // non rt callback
 void NeuralAmp::create_nam_filelist() {
     populate_nam_filelist(load_path, nam_file_names);
@@ -446,6 +517,7 @@ int NeuralAmp::register_par(const ParamReg& reg)
 {
     reg.registerFloatVar((idstring + ".input").c_str(),N_("Input"),"S",N_("gain (dB)"),&fVslider0, 0.0, -40.0, 20.0, 0.1, 0);
     reg.registerFloatVar((idstring + ".output").c_str(),N_("Output"),"S",N_("gain (dB)"),&fVslider1, 0.0, -40.0, 20.0, 0.1, 0);
+    reg.registerFloatVar((idstring + ".size").c_str(),N_("Size"),"S",N_("slimmable NAM model size"),&fVslider2, kDefaultNamSlimmableSize, 0.0, 1.0, 0.01, 0);
     param.reg_string((idstring + ".loadpath").c_str(), "", &load_path, "", true)->set_desc(N_("load path for *.nam files"));
     param.reg_string((idstring + ".loadfile").c_str(), "", &load_file, "*.nam", true)->set_desc(N_("import *.nam file"));
     reg.registerFloatVar((idstring + ".flist").c_str(),N_("select NAM File"),"S",N_("Select NAM file"),&filelist, 0, 0, 127, 1, 0);
@@ -454,6 +526,8 @@ int NeuralAmp::register_par(const ParamReg& reg)
         sigc::hide(sigc::mem_fun(this, &NeuralAmp::create_nam_filelist)));
     param[(idstring + ".flist").c_str()].signal_changed_float().connect(
         sigc::hide(sigc::mem_fun(this, &NeuralAmp::load_nam_file_impl)));
+    param[(idstring + ".size").c_str()].signal_changed_float().connect(
+        sigc::hide(sigc::mem_fun(this, &NeuralAmp::set_nam_size)));
     
 //    param[(idstring + ".loadfile").c_str()].signal_changed_string().connect(
 //        sigc::hide(sigc::mem_fun(this, &NeuralAmp::load_nam_file)));
@@ -480,6 +554,7 @@ inline int NeuralAmp::load_ui_f(const UiBuilder& b, int form)
 
             b.create_mid_rackknob((idstring + ".input").c_str(), "Input");
             b.create_fload_switch(sw_button, nullptr, (idstring + ".loadfile").c_str());
+            b.create_mid_rackknob((idstring + ".size").c_str(), "Size");
             b.create_mid_rackknob((idstring + ".output").c_str(), "Output");
 
         b.closeBox();
@@ -529,6 +604,8 @@ NeuralAmpMulti::NeuralAmpMulti(ParamMap& param_, std::string id_, ParallelThread
     is_inited = false;
     afilelist = 0.0;
     bfilelist = 0.0;
+    fVslider3 = kDefaultNamSlimmableSize;
+    fVslider4 = kDefaultNamSlimmableSize;
     gx_system::atomic_set(&ready, 0);
  }
 
@@ -816,7 +893,8 @@ void NeuralAmpMulti::load_nam_afile() {
         int next_sample_rate = 0;
         if (has_selection) {
             next_model = load_nam_model(selected_file, fSampleRate,
-                                        &next_sample_rate, "Neural Multi Amp Modeler");
+                                        &next_sample_rate, "Neural Multi Amp Modeler",
+                                        fVslider3, "A");
         }
 
         rampA.mode = rampA.DOWN;
@@ -870,7 +948,8 @@ void NeuralAmpMulti::load_nam_bfile() {
         int next_sample_rate = 0;
         if (has_selection) {
             next_model = load_nam_model(selected_file, fSampleRate,
-                                        &next_sample_rate, "Neural Multi Amp Modeler");
+                                        &next_sample_rate, "Neural Multi Amp Modeler",
+                                        fVslider4, "B");
         }
 
         rampB.mode = rampB.DOWN;
@@ -900,6 +979,40 @@ void NeuralAmpMulti::load_nam_bfile() {
     rampB.mode = modelb ? rampB.UP : rampB.OFF;
 }
 
+void NeuralAmpMulti::set_nam_asize() {
+    if (!modela || !nam_model_is_slimmable(modela)) {
+        return;
+    }
+
+    if (gx_system::atomic_get(ready) && rampA.mode == rampA.OFF) {
+        rampA.startRampDown();
+    }
+    gx_system::atomic_set(&ready, 0);
+    sync();
+
+    set_nam_slimmable_size(modela, fVslider3, fSampleRate, maSampleRate,
+                           "Neural Multi Amp Modeler", current_afile, "A");
+    gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
+    rampA.mode = modela ? rampA.UP : rampA.OFF;
+}
+
+void NeuralAmpMulti::set_nam_bsize() {
+    if (!modelb || !nam_model_is_slimmable(modelb)) {
+        return;
+    }
+
+    if (gx_system::atomic_get(ready) && rampB.mode == rampB.OFF) {
+        rampB.startRampDown();
+    }
+    gx_system::atomic_set(&ready, 0);
+    sync();
+
+    set_nam_slimmable_size(modelb, fVslider4, fSampleRate, mbSampleRate,
+                           "Neural Multi Amp Modeler", current_bfile, "B");
+    gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
+    rampB.mode = modelb ? rampB.UP : rampB.OFF;
+}
+
 // non rt callback
 void NeuralAmpMulti::create_nam_afilelist() {
     populate_nam_filelist(load_apath, nam_afile_names);
@@ -919,6 +1032,8 @@ int NeuralAmpMulti::register_par(const ParamReg& reg)
     reg.registerFloatVar((idstring + ".cdelay").c_str(),N_("Delta Delay"),"S",N_("Delay A/B"),&fVslider02, 0.0, -4096.0, 4096.0, 1.0, 0);
     reg.registerFloatVar((idstring + ".output").c_str(),N_("Output"),"S",N_("gain (dB)"),&fVslider1, 0.0, -20.0, 20.0, 0.1, 0);
     reg.registerFloatVar((idstring + ".mix").c_str(),N_("Mix"),"S",N_("mix models"),&fVslider2, 0.5, 0.0, 1.0, 0.01, 0);
+    reg.registerFloatVar((idstring + ".sizea").c_str(),N_("Size A"),"S",N_("slimmable NAM model size A"),&fVslider3, kDefaultNamSlimmableSize, 0.0, 1.0, 0.01, 0);
+    reg.registerFloatVar((idstring + ".sizeb").c_str(),N_("Size B"),"S",N_("slimmable NAM model size B"),&fVslider4, kDefaultNamSlimmableSize, 0.0, 1.0, 0.01, 0);
     param.reg_string((idstring + ".loadapath").c_str(), "", &load_apath, "", true)->set_desc(N_("load path for A *.nam files"));
     param.reg_string((idstring + ".loadbpath").c_str(), "", &load_bpath, "", true)->set_desc(N_("load path for B *.nam files"));
     param.reg_string((idstring + ".loadafile").c_str(), "", &load_afile, "*.nam", true)->set_desc(N_("import *.nam file"));
@@ -934,6 +1049,10 @@ int NeuralAmpMulti::register_par(const ParamReg& reg)
         sigc::hide(sigc::mem_fun(this, &NeuralAmpMulti::load_nam_afile_impl)));
     param[(idstring + ".fblist").c_str()].signal_changed_float().connect(
         sigc::hide(sigc::mem_fun(this, &NeuralAmpMulti::load_nam_bfile_impl)));
+    param[(idstring + ".sizea").c_str()].signal_changed_float().connect(
+        sigc::hide(sigc::mem_fun(this, &NeuralAmpMulti::set_nam_asize)));
+    param[(idstring + ".sizeb").c_str()].signal_changed_float().connect(
+        sigc::hide(sigc::mem_fun(this, &NeuralAmpMulti::set_nam_bsize)));
 
 //    param[(idstring + ".loadafile").c_str()].signal_changed_string().connect(
 //        sigc::hide(sigc::mem_fun(this, &NeuralAmpMulti::load_nam_afile)));
@@ -962,6 +1081,10 @@ inline int NeuralAmpMulti::load_ui_f(const UiBuilder& b, int form)
             b.openVerticalBox("");
             b.create_mid_rackknob((idstring + ".input").c_str(), "Input A");
             b.create_mid_rackknob((idstring + ".inputb").c_str(), "Input B");
+            b.closeBox();
+            b.openVerticalBox("");
+            b.create_mid_rackknob((idstring + ".sizea").c_str(), "Size A");
+            b.create_mid_rackknob((idstring + ".sizeb").c_str(), "Size B");
             b.closeBox();
             b.openVerticalBox("");
                 b.create_fload_switch(sw_button, nullptr, (idstring + ".loadafile").c_str());
