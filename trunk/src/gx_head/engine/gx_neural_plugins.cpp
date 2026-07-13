@@ -712,38 +712,72 @@ void always_inline NeuralAmpMulti::compute(int count, float *input0, float *outp
         return;
     }
 
-    float* bufa = scratcha.data();
-    memcpy(bufa, output0, count*sizeof(float));
-    float* bufb = scratchb.data();
-    memcpy(bufb, output0, count*sizeof(float));
+    constexpr double kMixEndpointEpsilon = 1.0e-4;
+    const double mix_target = std::max<double>(0.0, std::min<double>(1.0, double(fVslider2)));
+    const bool mix_settled_a = mix_target <= kMixEndpointEpsilon &&
+                               fRec2[1] <= kMixEndpointEpsilon;
+    const bool mix_settled_b = mix_target >= 1.0 - kMixEndpointEpsilon &&
+                               fRec2[1] >= 1.0 - kMixEndpointEpsilon;
+    const bool process_a_only = modela && (!modelb || mix_settled_a);
+    const bool process_b_only = modelb && (!modela || mix_settled_b);
 
-    if (int(fVslider02) > 0) processDelay(count, bufb);
-    else processDelay(count, bufa);
+    if (process_a_only) {
+        float* bufa = scratcha.data();
+        memcpy(bufa, output0, count*sizeof(float));
+        if (int(fVslider02) <= 0) processDelay(count, bufa);
+        processModelA(count, bufa);
 
-    nframes = count;
-    buf = bufb;
-
-    if (pro->getProcess()) {
-        pro->setProcessor(1);
-        pro->runProcess();
-    } else {
-        processModelB();
-    }
-
-    processModelA(count, bufa);
-
-    pro->processWait();
-
-    if (modela && modelb && gx_system::atomic_get(ready)) {
-        for (int i0 = 0; i0 < count; i0 = i0 + 1) {
-            fRec2[0] = fSlow2 + 0.999 * fRec2[1];
-            output0[i0] = bufa[i0] * (1.0 - fRec2[0]) + bufb[i0] * fRec2[0];
-            fRec2[1] = fRec2[0];
+        if (modela && gx_system::atomic_get(ready)) {
+            memcpy(output0, bufa, count*sizeof(float));
         }
-    } else if (modela && gx_system::atomic_get(ready)) {
-        memcpy(output0, bufa, count*sizeof(float));
-    } else if (modelb && gx_system::atomic_get(ready)) {
-        memcpy(output0, bufb, count*sizeof(float));
+        fRec2[0] = fRec2[1] = 0.0;
+    } else if (process_b_only) {
+        float* bufb = scratchb.data();
+        memcpy(bufb, output0, count*sizeof(float));
+        if (int(fVslider02) > 0) processDelay(count, bufb);
+
+        nframes = count;
+        buf = bufb;
+        processModelB();
+
+        if (modelb && gx_system::atomic_get(ready)) {
+            memcpy(output0, bufb, count*sizeof(float));
+        }
+        fRec2[0] = fRec2[1] = 1.0;
+    } else {
+        float* bufa = scratcha.data();
+        memcpy(bufa, output0, count*sizeof(float));
+        float* bufb = scratchb.data();
+        memcpy(bufb, output0, count*sizeof(float));
+
+        if (int(fVslider02) > 0) processDelay(count, bufb);
+        else processDelay(count, bufa);
+
+        nframes = count;
+        buf = bufb;
+
+        if (pro->getProcess()) {
+            pro->setProcessor(1);
+            pro->runProcess();
+        } else {
+            processModelB();
+        }
+
+        processModelA(count, bufa);
+
+        pro->processWait();
+
+        if (modela && modelb && gx_system::atomic_get(ready)) {
+            for (int i0 = 0; i0 < count; i0 = i0 + 1) {
+                fRec2[0] = fSlow2 + 0.999 * fRec2[1];
+                output0[i0] = bufa[i0] * (1.0 - fRec2[0]) + bufb[i0] * fRec2[0];
+                fRec2[1] = fRec2[0];
+            }
+        } else if (modela && gx_system::atomic_get(ready)) {
+            memcpy(output0, bufa, count*sizeof(float));
+        } else if (modelb && gx_system::atomic_get(ready)) {
+            memcpy(output0, bufb, count*sizeof(float));
+        }
     }
     
     for (int i0 = 0; i0 < count; i0 = i0 + 1) {
