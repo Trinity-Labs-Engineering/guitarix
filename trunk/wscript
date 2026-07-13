@@ -17,7 +17,7 @@ srcdir = '.'
 blddir = 'build'
 
 # used by waf dist and waf build
-VERSION='0.47.0'
+VERSION='0.47.1'
 APPNAME='guitarix'
 
 Options.OptionsContext.gxload = \
@@ -233,6 +233,29 @@ def check_boost(conf):
     #        msg = msg % "-mt",fragment=code, lib="boost_thread-mt",
     #        uselib_store="BOOST_THREAD", mandatory=1)
 
+def check_std_filesystem(conf):
+    code = """
+    #include <filesystem>
+    int main() {
+        std::filesystem::path p(".");
+        return p.empty();
+    }
+    """
+    if conf.check_cxx(msg="Checking for std::filesystem",
+                      fragment=code,
+                      cxxflags=["-std=c++20"],
+                      mandatory=False):
+        conf.env['CXXFLAGS_STDCXXFS'] = []
+        conf.env['LINKFLAGS_STDCXXFS'] = []
+        conf.env['LIB_STDCXXFS'] = []
+        return
+    conf.check_cxx(msg="Checking for std::filesystem with stdc++fs",
+                   fragment=code,
+                   cxxflags=["-std=c++20"],
+                   lib=["stdc++fs"],
+                   uselib_store="STDCXXFS",
+                   mandatory=1)
+
 
 ################################################################
 # guitarix waf configuration
@@ -293,6 +316,7 @@ def configure(conf):
     # compiler
     conf.load('compiler_cxx')
     conf.gxload('compile-extra')
+    check_std_filesystem(conf)
     if opt.with_gcov:
         conf.find_program('gcov')
         conf.env['CXXFLAGS'] = conf.env['CFLAGS'] = ['-fprofile-arcs', '-ftest-coverage']

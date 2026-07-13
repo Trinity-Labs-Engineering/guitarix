@@ -32,6 +32,8 @@
 #include "RTNeural.h"
 #pragma GCC diagnostic pop
 
+#include <vector>
+
 namespace gx_jack { class GxJack; }
 
 namespace gx_engine {
@@ -83,6 +85,7 @@ private:
     float loudness;
     bool is_inited;
     float filelist;
+    std::vector<float> scratch;
     Glib::ustring load_file;
     Glib::ustring current_file;
     Glib::ustring load_path;
@@ -154,6 +157,10 @@ private:
     bool is_inited;
     float afilelist;
     float bfilelist;
+    std::vector<float> scratcha;
+    std::vector<float> scratchb;
+    std::vector<float> scratch_modela;
+    std::vector<float> scratch_modelb;
     Glib::ustring load_afile;
     Glib::ustring current_afile;
     Glib::ustring load_bfile;

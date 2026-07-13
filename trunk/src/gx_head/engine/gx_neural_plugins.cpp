@@ -26,11 +26,17 @@
 
 #include "engine.h"
 #include "gx_faust_support.h"
+#include "container.h"
+#include "lstm.h"
+#include "model_config.h"
+#include "wavenet/model.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <exception>
 #include <filesystem>
+#include <memory>
 
 namespace gx_engine {
 
@@ -45,11 +51,34 @@ namespace gx_engine {
 namespace {
 
 constexpr int kMaxNamHostBlockFrames = 8192;
+constexpr int kNamSelectorSlots = 128;
+constexpr const char* kNamNone = "None";
+
+void ensure_nam_builtin_parsers_registered() {
+    static const bool registered = [] {
+        auto& registry = nam::ConfigParserRegistry::instance();
+        if (!registry.has("Linear")) {
+            registry.registerParser("Linear", nam::linear::create_config);
+        }
+        if (!registry.has("LSTM")) {
+            registry.registerParser("LSTM", nam::lstm::create_config);
+        }
+        if (!registry.has("WaveNet")) {
+            registry.registerParser("WaveNet", nam::wavenet::create_config);
+        }
+        if (!registry.has("SlimmableContainer")) {
+            registry.registerParser("SlimmableContainer", nam::container::create_config);
+        }
+        return true;
+    }();
+    (void)registered;
+}
 
 // Allow for resampler rounding while preallocating the largest NAM block.
 int max_nam_model_block_frames(int host_sample_rate, int model_sample_rate) {
+    const int safe_host_sample_rate = host_sample_rate > 0 ? host_sample_rate : 1;
     const double ratio = static_cast<double>(model_sample_rate) /
-        static_cast<double>(std::max(1, host_sample_rate));
+        static_cast<double>(safe_host_sample_rate);
     return static_cast<int>(std::ceil(kMaxNamHostBlockFrames * ratio)) + 64;
 }
 
@@ -64,14 +93,115 @@ bool initialize_nam_model(nam::DSP* model, int host_sample_rate,
 
     try {
         // Reset and prewarm outside the audio callback to avoid allocations there.
-        model->Reset(model_sample_rate,
-                     max_nam_model_block_frames(host_sample_rate, model_sample_rate));
+        model->ResetAndPrewarm(model_sample_rate,
+                               max_nam_model_block_frames(host_sample_rate, model_sample_rate));
         return true;
     } catch (const std::exception& error) {
         gx_print_info(module_name, "fail to initialize " + std::string(filename) +
                       ": " + error.what());
         return false;
     }
+}
+
+std::unique_ptr<nam::DSP> load_nam_model(const Glib::ustring& filename,
+                                         int host_sample_rate,
+                                         int* model_sample_rate,
+                                         const char* module_name) {
+    try {
+        ensure_nam_builtin_parsers_registered();
+        std::unique_ptr<nam::DSP> next =
+            nam::get_dsp(std::filesystem::path{std::string(filename)});
+        if (!next) {
+            gx_print_info(module_name, "fail to load " + std::string(filename));
+            return nullptr;
+        }
+
+        *model_sample_rate = static_cast<int>(next->GetExpectedSampleRate());
+        if (*model_sample_rate <= 0) {
+            *model_sample_rate = 48000;
+        }
+        if (!initialize_nam_model(next.get(), host_sample_rate, *model_sample_rate,
+                                  module_name, filename)) {
+            return nullptr;
+        }
+        return next;
+    } catch (const std::exception& error) {
+        gx_print_info(module_name, "fail to load " + std::string(filename) +
+                      ": " + error.what());
+    } catch (...) {
+        gx_print_info(module_name, "fail to load " + std::string(filename));
+    }
+    return nullptr;
+}
+
+int setup_nam_resampler(gx_resample::FixedRateResampler& smp,
+                        int host_sample_rate, int model_sample_rate) {
+    if (model_sample_rate > host_sample_rate) {
+        smp.setup(host_sample_rate, model_sample_rate);
+        return 1;
+    }
+    if (model_sample_rate < host_sample_rate) {
+        smp.setup(model_sample_rate, host_sample_rate);
+        return 2;
+    }
+    return 0;
+}
+
+void reset_nam_filelist(std::vector<Glib::ustring>& names) {
+    names.clear();
+    names.reserve(kNamSelectorSlots);
+    for (int i = 0; i < kNamSelectorSlots; ++i) {
+        names.push_back(kNamNone);
+    }
+}
+
+void populate_nam_filelist(const Glib::ustring& load_path,
+                           std::vector<Glib::ustring>& names) {
+    reset_nam_filelist(names);
+    if (load_path.empty()) {
+        return;
+    }
+
+    Glib::RefPtr<Gio::File> file = Gio::File::create_for_path(load_path);
+    if (!file->query_exists()) {
+        return;
+    }
+
+    Glib::RefPtr<Gio::FileEnumerator> child_enumeration =
+          file->enumerate_children(G_FILE_ATTRIBUTE_STANDARD_NAME
+                    "," G_FILE_ATTRIBUTE_STANDARD_DISPLAY_NAME
+                    "," G_FILE_ATTRIBUTE_STANDARD_FAST_CONTENT_TYPE);
+    Glib::RefPtr<Gio::FileInfo> file_info;
+    int index = 1;
+    while ((file_info = child_enumeration->next_file())) {
+        std::string name = file_info->get_name();
+        if (name.compare(std::max<int>(0, name.size()-4), 4, ".nam") == 0) {
+            names[index++] = file_info->get_name();
+            if (index >= kNamSelectorSlots) {
+                break;
+            }
+        }
+    }
+}
+
+bool get_selected_nam_file(float selector, const Glib::ustring& load_path,
+                           const std::vector<Glib::ustring>& names,
+                           Glib::ustring* selected_file,
+                           const char* module_name) {
+    const int index = static_cast<int>(selector);
+    if (index <= 0) {
+        *selected_file = kNamNone;
+        return false;
+    }
+    if (index >= static_cast<int>(names.size()) || names[index] == kNamNone ||
+        load_path.empty()) {
+        gx_print_info(module_name, "no NAM model at selector index " +
+                      std::to_string(index));
+        *selected_file = kNamNone;
+        return false;
+    }
+    *selected_file = load_path + "/" + names[index];
+    return true;
 }
 
 inline void process_nam_mono(nam::DSP* model, float* input, float* output, int frames) {
@@ -158,6 +288,7 @@ NeuralAmp::NeuralAmp(ParamMap& param_, std::string id_, sigc::slot<void> sync_)
     need_resample = 0;
     is_inited = false;
     loudness = 0.0;
+    filelist = 0.0;
     gx_system::atomic_set(&ready, 0);
  }
 
@@ -180,7 +311,8 @@ inline void NeuralAmp::init(unsigned int sample_rate)
 {
     fSampleRate = sample_rate;
     clear_state_f();
-    for (int l0 = 0; l0 < 127; l0 = l0 + 1) nam_file_names.push_back("None");
+    reset_nam_filelist(nam_file_names);
+    scratch.resize(max_nam_model_block_frames(fSampleRate, fSampleRate));
     ramp.init(fSampleRate);
     is_inited = true;
     load_nam_file();
@@ -212,23 +344,25 @@ void always_inline NeuralAmp::compute(int count, float *input0, float *output0)
                 ReCount = static_cast<int>(ceil((count*static_cast<double>(mSampleRate))/fSampleRate));
             }
 
-            float buf[ReCount];
-            memset(buf, 0, ReCount*sizeof(float));
+            if (static_cast<size_t>(ReCount) <= scratch.size()) {
+                float* buf = scratch.data();
+                memset(buf, 0, ReCount*sizeof(float));
 
-            if (need_resample == 1) {
-                ReCount = smp.up(count, output0, buf);
-            } else if (need_resample == 2) {
-                smp.down(output0, buf);
-            } else {
-                memcpy(buf, output0, ReCount * sizeof(float));
-            }
+                if (need_resample == 1) {
+                    ReCount = smp.up(count, output0, buf);
+                } else if (need_resample == 2) {
+                    smp.down(output0, buf);
+                } else {
+                    memcpy(buf, output0, ReCount * sizeof(float));
+                }
 
-            process_nam_mono(model, buf, buf, ReCount);
+                process_nam_mono(model, buf, buf, ReCount);
 
-            if (need_resample == 1) {
-                smp.down(buf, output0);
-            } else if (need_resample == 2) {
-                smp.up(ReCount, buf, output0);
+                if (need_resample == 1) {
+                    smp.down(buf, output0);
+                } else if (need_resample == 2) {
+                    smp.up(ReCount, buf, output0);
+                }
             }
         } else {
             process_nam_mono(model, output0, output0, count);
@@ -250,82 +384,62 @@ void NeuralAmp::compute_static(int count, float *input0, float *output0, PluginD
 
 // non rt callback
 void NeuralAmp::load_nam_file_impl() {
-    if (ramp.mode == ramp.OFF) ramp.startRampDown();
-    Glib::signal_timeout().connect_once(
-        sigc::mem_fun(*this, &NeuralAmp::load_nam_file), 3);
+    if (model && gx_system::atomic_get(ready) && ramp.mode == ramp.OFF) {
+        ramp.startRampDown();
+    }
+    load_nam_file();
 }
 
 // non rt callback
 void NeuralAmp::load_nam_file() {
     if (is_inited) {
-        if (nam_file_names.size() < 1 || filelist < 1.0) return;
-        load_file = load_path + "/" + nam_file_names[filelist];
-        if (!current_file.empty() && (current_file.compare(load_file) == 0)) {
+        Glib::ustring selected_file;
+        const bool has_selection = get_selected_nam_file(filelist, load_path,
+            nam_file_names, &selected_file, "Neural Amp Modeler");
+
+        if (has_selection && model && (current_file.compare(selected_file) == 0)) {
             if (ramp.mode == ramp.DOWN) ramp.mode = ramp.UP;
             return;
         }
+
+        std::unique_ptr<nam::DSP> next_model;
+        int next_sample_rate = 0;
+        if (has_selection) {
+            next_model = load_nam_model(selected_file, fSampleRate,
+                                        &next_sample_rate, "Neural Amp Modeler");
+        }
+
         ramp.mode = ramp.DOWN;
         gx_system::atomic_set(&ready, 0);
         sync();
+
         delete model;
         model = nullptr;
         need_resample = 0;
+        loudness = 0.0;
+        load_file = kNamNone;
+        current_file.clear();
         clear_state_f();
-        try {
-            model = nam::get_dsp(std::filesystem::path{std::string(load_file)}).release();
-        } catch (const std::exception&) {
-            gx_print_info("Neural Amp Modeler", "fail to load " + load_file);
-            load_file = "None";
+
+        if (next_model) {
+            model = next_model.release();
+            mSampleRate = next_sample_rate;
+            scratch.resize(max_nam_model_block_frames(fSampleRate, mSampleRate));
+            need_resample = setup_nam_resampler(smp, fSampleRate, mSampleRate);
+            load_file = selected_file;
+            current_file = selected_file;
+            if (model->HasLoudness()) loudness = model->GetLoudness();
+            gx_print_info("Neural Amp Modeler", "loaded " + std::string(selected_file));
         }
-        
-        if (model) {
-            mSampleRate = static_cast<int>(model->GetExpectedSampleRate());
-            if (mSampleRate <= 0) mSampleRate = 48000;
-            if (!initialize_nam_model(model, fSampleRate, mSampleRate,
-                                      "Neural Amp Modeler", load_file)) {
-                delete model;
-                model = nullptr;
-                load_file = "None";
-            } else {
-                current_file = load_file;
-                if (model->HasLoudness()) loudness = model->GetLoudness();
-                if (mSampleRate > fSampleRate) {
-                    smp.setup(fSampleRate, mSampleRate);
-                    need_resample = 1;
-                } else if (mSampleRate < fSampleRate) {
-                    smp.setup(mSampleRate, fSampleRate);
-                    need_resample = 2;
-                }
-            }
-        }
-        gx_system::atomic_set(&ready, 1);
+        gx_system::atomic_set(&ready, model ? 1 : 0);
     }
-    ramp.mode = ramp.UP;
+    ramp.mode = model ? ramp.UP : ramp.OFF;
 }
 
 // non rt callback
 void NeuralAmp::create_nam_filelist() {
-    if (load_path.empty()) return;
-    Glib::RefPtr<Gio::File> file = Gio::File::create_for_path(load_path);
-    nam_file_names.clear();
-    int i = 0;
-    if (file->query_exists()) {
-        Glib::RefPtr<Gio::FileEnumerator> child_enumeration =
-              file->enumerate_children(G_FILE_ATTRIBUTE_STANDARD_NAME
-                        "," G_FILE_ATTRIBUTE_STANDARD_DISPLAY_NAME
-                        "," G_FILE_ATTRIBUTE_STANDARD_FAST_CONTENT_TYPE);
-        Glib::RefPtr<Gio::FileInfo> file_info;
-        nam_file_names.push_back("None");
-        while ((file_info = child_enumeration->next_file())) {
-            std::string name = file_info->get_name();
-            if (name.compare(std::max<int>(0, name.size()-4), 4, ".nam") == 0) {
-                nam_file_names.push_back(file_info->get_name());
-                i++;
-                if ( i > 126) break;
-            }
-        }
-    }
-    for (;i<127;i++) nam_file_names.push_back("None");
+    populate_nam_filelist(load_path, nam_file_names);
+    load_nam_file_impl();
 }
 
 int NeuralAmp::register_par(const ParamReg& reg)
@@ -413,6 +527,8 @@ NeuralAmpMulti::NeuralAmpMulti(ParamMap& param_, std::string id_, ParallelThread
     need_aresample = 0;
     need_bresample = 0;
     is_inited = false;
+    afilelist = 0.0;
+    bfilelist = 0.0;
     gx_system::atomic_set(&ready, 0);
  }
 
@@ -433,8 +549,6 @@ inline void NeuralAmpMulti::clear_state_f()
     for (int l3 = 0; l3 < 2; l3 = l3 + 1) fDel1[l3] = 0.0;
     for (int l4 = 0; l4 < 2; l4 = l4 + 1) fDel2[l4] = 0.0;
     for (int l5 = 0; l5 < 2; l5 = l5 + 1) fDel3[l5] = 0.0;
-    for (int l0 = 0; l0 < 127; l0 = l0 + 1) nam_afile_names.push_back("None");
-    for (int l0 = 0; l0 < 127; l0 = l0 + 1) nam_bfile_names.push_back("None");
 }
 
 void NeuralAmpMulti::clear_state_f_static(PluginDef *p)
@@ -446,6 +560,12 @@ inline void NeuralAmpMulti::init(unsigned int sample_rate)
 {
     fSampleRate = sample_rate;
     clear_state_f();
+    reset_nam_filelist(nam_afile_names);
+    reset_nam_filelist(nam_bfile_names);
+    scratcha.resize(kMaxNamHostBlockFrames);
+    scratchb.resize(kMaxNamHostBlockFrames);
+    scratch_modela.resize(max_nam_model_block_frames(fSampleRate, fSampleRate));
+    scratch_modelb.resize(max_nam_model_block_frames(fSampleRate, fSampleRate));
     is_inited = true;
     buf = nullptr;
     IOTA0 = 0;
@@ -504,23 +624,25 @@ void always_inline NeuralAmpMulti::processModelA(int count, float *bufa) {
                 ReCounta = static_cast<int>(ceil((count*static_cast<double>(maSampleRate))/fSampleRate));
             }
 
-            float bufa1[ReCounta];
-            memset(bufa1, 0, ReCounta*sizeof(float));
+            if (static_cast<size_t>(ReCounta) <= scratch_modela.size()) {
+                float* bufa1 = scratch_modela.data();
+                memset(bufa1, 0, ReCounta*sizeof(float));
 
-            if (need_aresample == 1) {
-                ReCounta = smpa.up(count, bufa, bufa1);
-            } else if (need_aresample == 2) {
-                smpa.down(bufa, bufa1);
-            } else {
-                memcpy(bufa1, bufa, ReCounta * sizeof(float));
-            }
+                if (need_aresample == 1) {
+                    ReCounta = smpa.up(count, bufa, bufa1);
+                } else if (need_aresample == 2) {
+                    smpa.down(bufa, bufa1);
+                } else {
+                    memcpy(bufa1, bufa, ReCounta * sizeof(float));
+                }
 
-            process_nam_mono(modela, bufa1, bufa1, ReCounta);
+                process_nam_mono(modela, bufa1, bufa1, ReCounta);
 
-            if (need_aresample == 1) {
-                smpa.down(bufa1, bufa);
-            } else if (need_aresample == 2) {
-                smpa.up(ReCounta, bufa1, bufa);
+                if (need_aresample == 1) {
+                    smpa.down(bufa1, bufa);
+                } else if (need_aresample == 2) {
+                    smpa.up(ReCounta, bufa1, bufa);
+                }
             }
         } else {
             process_nam_mono(modela, bufa, bufa, count);
@@ -548,29 +670,31 @@ void always_inline NeuralAmpMulti::processModelB() {
                 ReCountb = static_cast<int>(ceil((nframes*static_cast<double>(mbSampleRate))/fSampleRate));
             }
 
-            float buf1[ReCountb];
-            memset(buf1, 0, ReCountb*sizeof(float));
+            if (static_cast<size_t>(ReCountb) <= scratch_modelb.size()) {
+                float* buf1 = scratch_modelb.data();
+                memset(buf1, 0, ReCountb*sizeof(float));
 
-            if (need_bresample == 1) {
-                ReCountb = smpb.up(nframes, buf, buf1);
-            } else if (need_bresample == 2) {
-                smpb.down(buf, buf1);
-            } else {
-                memcpy(buf1, buf, ReCountb * sizeof(float));
-            }
+                if (need_bresample == 1) {
+                    ReCountb = smpb.up(nframes, buf, buf1);
+                } else if (need_bresample == 2) {
+                    smpb.down(buf, buf1);
+                } else {
+                    memcpy(buf1, buf, ReCountb * sizeof(float));
+                }
 
-            process_nam_mono(modelb, buf1, buf1, ReCountb);
+                process_nam_mono(modelb, buf1, buf1, ReCountb);
 
-            if (need_bresample == 1) {
-                smpb.down(buf1, buf);
-            } else if (need_bresample == 2) {
-                smpb.up(ReCountb, buf1, buf);
+                if (need_bresample == 1) {
+                    smpb.down(buf1, buf);
+                } else if (need_bresample == 2) {
+                    smpb.up(ReCountb, buf1, buf);
+                }
             }
         } else {
             process_nam_mono(modelb, buf, buf, nframes);
         }
         if (rampB.mode == rampB.DOWN || rampB.mode == rampB.DEAD) rampB.rampDown(nframes, buf);
-        else if (rampB.mode == rampA.UP) rampB.rampUp(nframes, buf);
+        else if (rampB.mode == rampB.UP) rampB.rampUp(nframes, buf);
     }
 }
 
@@ -583,9 +707,14 @@ void always_inline NeuralAmpMulti::compute(int count, float *input0, float *outp
     double fSlow1 = 0.0010000000000000009 * std::pow(1e+01, 0.05 * double(fVslider1));
     double fSlow2 = 0.0010000000000000009 * double(fVslider2);
 
-    float bufa[count];
+    if (static_cast<size_t>(count) > scratcha.size() ||
+        static_cast<size_t>(count) > scratchb.size()) {
+        return;
+    }
+
+    float* bufa = scratcha.data();
     memcpy(bufa, output0, count*sizeof(float));
-    float bufb[count];
+    float* bufb = scratchb.data();
     memcpy(bufb, output0, count*sizeof(float));
 
     if (int(fVslider02) > 0) processDelay(count, bufb);
@@ -631,162 +760,122 @@ void NeuralAmpMulti::compute_static(int count, float *input0, float *output0, Pl
 
 // non rt callback
 void NeuralAmpMulti::load_nam_afile_impl() {
-    if (rampA.mode == rampA.OFF) rampA.startRampDown();
-    Glib::signal_timeout().connect_once(
-        sigc::mem_fun(*this, &NeuralAmpMulti::load_nam_afile), 3);
+    if (modela && gx_system::atomic_get(ready) && rampA.mode == rampA.OFF) {
+        rampA.startRampDown();
+    }
+    load_nam_afile();
 }
 
 // non rt callback
 void NeuralAmpMulti::load_nam_afile() {
     if (is_inited) {
-        if (nam_afile_names.size() < 1 || afilelist < 1.0) return;
-        load_afile = load_apath + "/" + nam_afile_names[afilelist];
-        if (!current_afile.empty() && (current_afile.compare(load_afile) == 0)) {
+        Glib::ustring selected_file;
+        const bool has_selection = get_selected_nam_file(afilelist, load_apath,
+            nam_afile_names, &selected_file, "Neural Multi Amp Modeler");
+
+        if (has_selection && modela && (current_afile.compare(selected_file) == 0)) {
             if (rampA.mode == rampA.DOWN) rampA.mode = rampA.UP;
             return;
         }
+
+        std::unique_ptr<nam::DSP> next_model;
+        int next_sample_rate = 0;
+        if (has_selection) {
+            next_model = load_nam_model(selected_file, fSampleRate,
+                                        &next_sample_rate, "Neural Multi Amp Modeler");
+        }
+
         rampA.mode = rampA.DOWN;
         gx_system::atomic_set(&ready, 0);
         sync();
+
         delete modela;
         modela = nullptr;
         need_aresample = 0;
+        loudnessa = 0.0;
+        load_afile = kNamNone;
+        current_afile.clear();
         clear_state_f();
-        try {
-            modela = nam::get_dsp(std::filesystem::path{std::string(load_afile)}).release();
-        } catch (const std::exception&) {
-            gx_print_info("Neural Multi Amp Modeler", "fail to load " + load_afile);
-            load_afile = "None";
+
+        if (next_model) {
+            modela = next_model.release();
+            maSampleRate = next_sample_rate;
+            scratch_modela.resize(max_nam_model_block_frames(fSampleRate, maSampleRate));
+            need_aresample = setup_nam_resampler(smpa, fSampleRate, maSampleRate);
+            load_afile = selected_file;
+            current_afile = selected_file;
+            if (modela->HasLoudness()) loudnessa = modela->GetLoudness();
+            gx_print_info("Neural Multi Amp Modeler", "loaded A " + std::string(selected_file));
         }
-        
-        if (modela) {
-            maSampleRate = static_cast<int>(modela->GetExpectedSampleRate());
-            if (maSampleRate <= 0) maSampleRate = 48000;
-            if (!initialize_nam_model(modela, fSampleRate, maSampleRate,
-                                      "Neural Multi Amp Modeler", load_afile)) {
-                delete modela;
-                modela = nullptr;
-                load_afile = "None";
-            } else {
-                current_afile = load_afile;
-                if (modela->HasLoudness()) loudnessa = modela->GetLoudness();
-                if (maSampleRate > fSampleRate) {
-                    smpa.setup(fSampleRate, maSampleRate);
-                    need_aresample = 1;
-                } else if (maSampleRate < fSampleRate) {
-                    smpa.setup(maSampleRate, fSampleRate);
-                    need_aresample = 2;
-                }
-            }
-        }
-        gx_system::atomic_set(&ready, 1);
+        gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
     }
-    rampA.mode = rampA.UP;
+    rampA.mode = modela ? rampA.UP : rampA.OFF;
 }
 
 // non rt callback
 void NeuralAmpMulti::load_nam_bfile_impl() {
-    if (rampB.mode == rampB.OFF) rampB.startRampDown();
-    Glib::signal_timeout().connect_once(
-        sigc::mem_fun(*this, &NeuralAmpMulti::load_nam_bfile), 3);
+    if (modelb && gx_system::atomic_get(ready) && rampB.mode == rampB.OFF) {
+        rampB.startRampDown();
+    }
+    load_nam_bfile();
 }
 
 // non rt callback
 void NeuralAmpMulti::load_nam_bfile() {
     if (is_inited) {
-        if (nam_bfile_names.size() < 1 || bfilelist < 1.0) return;
-        load_bfile = load_bpath + "/" + nam_bfile_names[bfilelist];
-        if (!current_bfile.empty() && (current_bfile.compare(load_bfile) == 0)) {
+        Glib::ustring selected_file;
+        const bool has_selection = get_selected_nam_file(bfilelist, load_bpath,
+            nam_bfile_names, &selected_file, "Neural Multi Amp Modeler");
+
+        if (has_selection && modelb && (current_bfile.compare(selected_file) == 0)) {
             if (rampB.mode == rampB.DOWN) rampB.mode = rampB.UP;
             return;
         }
+
+        std::unique_ptr<nam::DSP> next_model;
+        int next_sample_rate = 0;
+        if (has_selection) {
+            next_model = load_nam_model(selected_file, fSampleRate,
+                                        &next_sample_rate, "Neural Multi Amp Modeler");
+        }
+
         rampB.mode = rampB.DOWN;
         gx_system::atomic_set(&ready, 0);
         sync();
+
         delete modelb;
         modelb = nullptr;
         need_bresample = 0;
+        loudnessb = 0.0;
+        load_bfile = kNamNone;
+        current_bfile.clear();
         clear_state_f();
-        try {
-            modelb = nam::get_dsp(std::filesystem::path{std::string(load_bfile)}).release();
-        } catch (const std::exception&) {
-            gx_print_info("Neural Multi Amp Modeler", "fail to load " + load_bfile);
-            load_bfile = "None";
+
+        if (next_model) {
+            modelb = next_model.release();
+            mbSampleRate = next_sample_rate;
+            scratch_modelb.resize(max_nam_model_block_frames(fSampleRate, mbSampleRate));
+            need_bresample = setup_nam_resampler(smpb, fSampleRate, mbSampleRate);
+            load_bfile = selected_file;
+            current_bfile = selected_file;
+            if (modelb->HasLoudness()) loudnessb = modelb->GetLoudness();
+            gx_print_info("Neural Multi Amp Modeler", "loaded B " + std::string(selected_file));
         }
-        
-        if (modelb) {
-            mbSampleRate = static_cast<int>(modelb->GetExpectedSampleRate());
-            if (mbSampleRate <= 0) mbSampleRate = 48000;
-            if (!initialize_nam_model(modelb, fSampleRate, mbSampleRate,
-                                      "Neural Multi Amp Modeler", load_bfile)) {
-                delete modelb;Keeps all existing NAM module IDs, preset 
-                modelb = nullptr;
-                load_bfile = "None";
-            } else {
-                current_bfile = load_bfile;
-                if (modelb->HasLoudness()) loudnessb = modelb->GetLoudness();
-                if (mbSampleRate > fSampleRate) {
-                    smpb.setup(fSampleRate, mbSampleRate);
-                    need_bresample = 1;
-                } else if (mbSampleRate < fSampleRate) {
-                    smpb.setup(mbSampleRate, fSampleRate);
-                    need_bresample = 2;
-                }
-            }
-        }
-        gx_system::atomic_set(&ready, 1);
+        gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
     }
-    rampB.mode = rampB.UP;
+    rampB.mode = modelb ? rampB.UP : rampB.OFF;
 }
 
 // non rt callback
 void NeuralAmpMulti::create_nam_afilelist() {
-    if (load_apath.empty()) return;
-    Glib::RefPtr<Gio::File> file = Gio::File::create_for_path(load_apath);
-    nam_afile_names.clear();
-    int i = 0;
-    if (file->query_exists()) {
-        Glib::RefPtr<Gio::FileEnumerator> child_enumeration =
-              file->enumerate_children(G_FILE_ATTRIBUTE_STANDARD_NAME
-                        "," G_FILE_ATTRIBUTE_STANDARD_DISPLAY_NAME
-                        "," G_FILE_ATTRIBUTE_STANDARD_FAST_CONTENT_TYPE);
-        Glib::RefPtr<Gio::FileInfo> file_info;
-        nam_afile_names.push_back("None");
-        while ((file_info = child_enumeration->next_file())) {
-            std::string name = file_info->get_name();
-            if (name.compare(std::max<int>(0, name.size()-4), 4, ".nam") == 0) {
-                nam_afile_names.push_back(file_info->get_name());
-                i++;
-                if ( i > 126) break;
-            }
-        }
-    }
-    for (;i<127;i++) nam_afile_names.push_back("None");
+    populate_nam_filelist(load_apath, nam_afile_names);
+    load_nam_afile_impl();
 }
 
 // non rt callback
 void NeuralAmpMulti::create_nam_bfilelist() {
-    if (load_bpath.empty()) return;
-    Glib::RefPtr<Gio::File> file = Gio::File::create_for_path(load_bpath);
-    nam_bfile_names.clear();
-    int i = 0;
-    if (file->query_exists()) {
-        Glib::RefPtr<Gio::FileEnumerator> child_enumeration =
-              file->enumerate_children(G_FILE_ATTRIBUTE_STANDARD_NAME
-                        "," G_FILE_ATTRIBUTE_STANDARD_DISPLAY_NAME
-                        "," G_FILE_ATTRIBUTE_STANDARD_FAST_CONTENT_TYPE);
-        Glib::RefPtr<Gio::FileInfo> file_info;
-        nam_bfile_names.push_back("None");
-        while ((file_info = child_enumeration->next_file())) {
-            std::string name = file_info->get_name();
-            if (name.compare(std::max<int>(0, name.size()-4), 4, ".nam") == 0) {
-                nam_bfile_names.push_back(file_info->get_name());
-                i++;
-                if ( i > 126) break;
-            }
-        }
-    }
-    for (;i<127;i++) nam_bfile_names.push_back("None");
+    populate_nam_filelist(load_bpath, nam_bfile_names);
+    load_nam_bfile_impl();
 }
 
 int NeuralAmpMulti::register_par(const ParamReg& reg)
@@ -833,7 +922,7 @@ inline int NeuralAmpMulti::load_ui_f(const UiBuilder& b, int form)
     if (form & UI_FORM_STACK) {
 
         b.openHorizontalhideBox("");
-            b.create_master_slider((idstring + "output").c_str(), "output");
+            b.create_master_slider((idstring + ".output").c_str(), "output");
         b.closeBox();
         b.openHorizontalBox("");
             b.openVerticalBox("");

@@ -19,6 +19,7 @@
 #include "jsonrpc.h"
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <ctime>
 #include <sys/types.h>
 #include <sys/socket.h>
 #if HAVE_BLUEZ
@@ -66,6 +67,22 @@ public:
     virtual const char* what() const throw() { return message.c_str(); }
 };
 
+static std::string rpc_log_timestamp() {
+    char buf[32];
+    time_t now = time(0);
+    struct tm tm_now;
+    if (localtime_r(&now, &tm_now)) {
+        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_now);
+        return std::string(buf);
+    }
+    return "unknown-time";
+}
+
+static void trim_line_end(std::string& s) {
+    while (!s.empty() && (s[s.size() - 1] == '\n' || s[s.size() - 1] == '\r')) {
+        s.erase(s.size() - 1);
+    }
+}
 
 class JsonString: public JsonValue {
 private:
@@ -1366,6 +1383,11 @@ void CmdConnection::send(gx_system::JsonStringWriter& jw) {
 
 void CmdConnection::process(gx_system::JsonStringParser& jp) {
     try {
+        if (serv.settings.get_options().get_rpc_listen()) {
+            std::string request = jp.get_string();
+            trim_line_end(request);
+            cerr << "[" << rpc_log_timestamp() << "] JSON-RPC IN " << request << endl;
+        }
         gx_system::JsonStringWriter jw;
         bool resp = false;
         // jp.peek() doesn't work at start of stream

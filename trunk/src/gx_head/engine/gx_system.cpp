@@ -532,6 +532,7 @@ CmdlineOptions::CmdlineOptions()
       watchdog_warning(true),
       xrun_watchdog(false),
       lterminal(false),
+      rpc_listen(false),
       a_save(false),
       auto_save(false),
 #ifndef NDEBUG
@@ -808,6 +809,10 @@ CmdlineOptions::CmdlineOptions()
     opt_log_terminal.set_long_name("log-terminal");
     opt_log_terminal.set_description(_("print log on terminal"));
     optgroup_debug.add_entry(opt_log_terminal, lterminal);
+    Glib::OptionEntry opt_rpc_listen;
+    opt_rpc_listen.set_long_name("rpc-listen");
+    opt_rpc_listen.set_description(_("print incoming JSON-RPC requests on terminal"));
+    optgroup_debug.add_entry(opt_rpc_listen, rpc_listen);
 #ifndef NDEBUG
     Glib::OptionEntry opt_dump_parameter;
     opt_dump_parameter.set_short_name('d');
