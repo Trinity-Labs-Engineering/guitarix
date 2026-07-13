@@ -32,6 +32,8 @@
 #include "RTNeural.h"
 #pragma GCC diagnostic pop
 
+#include <vector>
+
 namespace gx_jack { class GxJack; }
 
 namespace gx_engine {
@@ -77,12 +79,14 @@ private:
     int mSampleRate;
     float fVslider0;
     float fVslider1;
+    float fVslider2;
     double fRec0[2];
     double fRec1[2];
     int need_resample;
     float loudness;
     bool is_inited;
     float filelist;
+    std::vector<float> scratch;
     Glib::ustring load_file;
     Glib::ustring current_file;
     Glib::ustring load_path;
@@ -94,6 +98,7 @@ private:
     void compute(int count, float *input0, float *output0);
     void load_nam_file();
     void load_nam_file_impl();
+    void set_nam_size();
     void create_nam_filelist();
     int register_par(const ParamReg& reg);
 
@@ -135,6 +140,8 @@ private:
     float fVslider01;
     float fVslider1;
     float fVslider2;
+    float fVslider3;
+    float fVslider4;
     int IOTA0;
     double fDec0[16384];
     float fVslider02;
@@ -154,6 +161,10 @@ private:
     bool is_inited;
     float afilelist;
     float bfilelist;
+    std::vector<float> scratcha;
+    std::vector<float> scratchb;
+    std::vector<float> scratch_modela;
+    std::vector<float> scratch_modelb;
     Glib::ustring load_afile;
     Glib::ustring current_afile;
     Glib::ustring load_bfile;
@@ -173,6 +184,8 @@ private:
     void load_nam_afile_impl();
     void load_nam_bfile();
     void load_nam_bfile_impl();
+    void set_nam_asize();
+    void set_nam_bsize();
     void create_nam_afilelist();
     void create_nam_bfilelist();
     int register_par(const ParamReg& reg);

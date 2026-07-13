@@ -36,7 +36,8 @@ def build(bld):
         ]
 
     # Use NAM's optimized A2 standard and A2 nano dispatcher.
-    cxx_flags = ["-DNAM_ENABLE_A2_FAST", "-Wno-deprecated-declarations", "-Wno-sign-compare", "-Ofast"]
+    cxx_flags = ["-DNAM_SAMPLE_FLOAT", "-DNAM_ENABLE_A2_FAST", "-std=c++20",
+                 "-Wno-deprecated-declarations", "-Wno-sign-compare", "-Ofast"]
 
     if not bld.env['LTO']:
         if any('clang' not in s for s in bld.env["CXX"]):

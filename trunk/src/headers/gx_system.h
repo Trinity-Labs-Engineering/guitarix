@@ -442,6 +442,7 @@ private:
     bool watchdog_warning;
     bool xrun_watchdog;
     bool lterminal;
+    bool rpc_listen;
     bool a_save;
     bool auto_save;
     std::string get_opskin();
@@ -532,6 +533,7 @@ public:
     void set_rpcport(int port) { rpcport = port; }
     const Glib::ustring& get_rpcaddress() { return rpcaddress; }
     void set_rpcaddress(const Glib::ustring& address) { rpcaddress = address; }
+    bool get_rpc_listen() const { return rpc_listen; }
     const std::string& get_loadfile() const { return load_file; }
     const Glib::ustring& get_jack_instancename() const { return jack_instance; }
     void set_jack_instancename(std::string name) {  jack_instance = name; }
