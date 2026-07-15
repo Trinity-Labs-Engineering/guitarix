@@ -1,0 +1,127 @@
+name: Feature Request
+description: Propose a new feature or improvement.
+title: "[FEATURE] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user need, desired behaviour, and completion criteria for the proposed feature.
+
+  - type: dropdown
+    id: status
+    attributes:
+      label: Status
+      description: Select the current state of the request.
+      options:
+        - Open
+        - In progress
+        - Blocked
+        - Solved
+      default: 0
+    validations:
+      required: true
+
+  - type: textarea
+    id: feature-description
+    attributes:
+      label: Feature Description
+      description: Describe the feature and the problem it solves.
+      placeholder: Explain what should be added and why it is useful.
+    validations:
+      required: true
+
+  - type: textarea
+    id: involves
+    attributes:
+      label: Involves
+      description: List the repositories, applications, services, firmware modules, or hardware involved.
+      placeholder: |
+        - Houston
+        - Artemis OS
+        - JACK
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-behaviour
+    attributes:
+      label: Current Behaviour
+      description: Describe the existing behaviour or limitation.
+      placeholder: Explain how the system currently works.
+
+  - type: textarea
+    id: desired-behaviour
+    attributes:
+      label: Desired Behaviour
+      description: Describe exactly how the completed feature should behave.
+      placeholder: Explain the intended user experience and system behaviour.
+    validations:
+      required: true
+
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Requirements
+      description: List the functional and technical requirements.
+      placeholder: |
+        - Requirement 1
+        - Requirement 2
+        - Requirement 3
+    validations:
+      required: true
+
+  - type: textarea
+    id: ui-ux
+    attributes:
+      label: User Interface / Experience
+      description: Describe any relevant controls, screens, messages, or user flows.
+      placeholder: Describe the expected interface and interaction.
+
+  - type: textarea
+    id: possible-implementation
+    attributes:
+      label: Possible Implementation
+      description: Outline a suggested technical approach.
+      placeholder: Describe services, APIs, state machines, configuration, or integration points.
+
+  - type: textarea
+    id: failure-handling
+    attributes:
+      label: Failure Handling
+      description: Describe how errors, invalid states, rollback, and recovery should work.
+      placeholder: Explain how the feature should fail safely.
+
+  - type: textarea
+    id: persistence
+    attributes:
+      label: Persistence and Compatibility
+      description: Note any persistence, migration, update, or backwards-compatibility requirements.
+      placeholder: Describe what should persist across restarts, reboots, or updates.
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Define the conditions that must be met before this feature can be closed.
+      placeholder: |
+        - [ ] The feature works on target hardware.
+        - [ ] The setting persists after reboot.
+        - [ ] Failure cases recover safely.
+    validations:
+      required: true
+
+  - type: input
+    id: assign-to
+    attributes:
+      label: Assign To
+      description: Enter the suggested assignee.
+      placeholder: GitHub username or team member name
+
+  - type: textarea
+    id: comments
+    attributes:
+      label: Comments
+      description: Add any other relevant notes, context, screenshots, or links.
+      placeholder: Additional information.
