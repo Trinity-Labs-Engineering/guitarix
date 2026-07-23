@@ -252,6 +252,7 @@ const jsonrpc_method_def jsonrpc_method_list[] = {
 	{ "getstate", true },
 	{ "setstate", false },
 	{ "jack_cpu_load", true },
+	{ "jack_performance_status", true },
 	{ "set_jack_insert", false },
 	{ "get", true },
 	{ "set", false },

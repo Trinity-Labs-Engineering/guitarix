@@ -23,6 +23,11 @@
  */
 
 #include <errno.h>              // NOLINT
+#include <algorithm>
+#include <vector>
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
 #ifndef GUITARIX_AS_PLUGIN
 #include <jack/statistics.h>    // NOLINT
 #include <jack/jack.h>          // NOLINT
@@ -37,6 +42,19 @@
 
 namespace gx_jack {
 #ifndef GUITARIX_AS_PLUGIN
+
+static_assert(ATOMIC_INT_LOCK_FREE == 2,
+              "JACK telemetry requires lock-free 32-bit atomics");
+static_assert(ATOMIC_LLONG_LOCK_FREE == 2,
+              "JACK telemetry requires lock-free 64-bit atomics");
+
+static inline void set_jack_thread_name(const char *name) {
+#if defined(__linux__)
+    prctl(PR_SET_NAME, reinterpret_cast<unsigned long>(name), 0, 0, 0);
+#else
+    (void)name;
+#endif
+}
 
 /****************************************************************
  ** class GxRtCheck
@@ -208,9 +226,9 @@ GxJack::GxJack(gx_engine::GxEngine& engine_)
       jack_sr(),
       jack_bs(),
       insert_buffer(NULL),
-      xrun(),
-      last_xrun(0),
-      xrun_msg_blocked(false),
+      xrun_count(0),
+      last_xrun_usecs(0),
+      reported_xrun_count(0),
       ports(),
       client(0),
       client_insert(0),
@@ -221,11 +239,15 @@ GxJack::GxJack(gx_engine::GxEngine& engine_)
       shutdown(),
       connection(),
       single_client(false) {
+    reset_performance_telemetry();
     connection_queue.new_data.connect(sigc::mem_fun(*this, &GxJack::fetch_connection_data));
     client_change_rt.connect(client_change);
     GxExit::get_instance().signal_exit().connect(
 	sigc::mem_fun(*this, &GxJack::cleanup_slot));
-    xrun.connect(sigc::mem_fun(this, &GxJack::report_xrun));
+    static_assert(performance_poll_interval_ms >= 1000,
+                  "performance reporting must be batched at no more than 1 Hz");
+    Glib::signal_timeout().connect(
+        sigc::mem_fun(this, &GxJack::poll_xrun), performance_poll_interval_ms);
 }
 
 GxJack::~GxJack() {
@@ -451,26 +473,31 @@ bool GxJack::gx_jack_init(bool startserver, int wait_after_connect, const gx_sys
     if (wait_after_connect) {
 	usleep(wait_after_connect);
     }
-    jack_sr = jack_get_sample_rate(client); // jack sample rate
+    // A reconnect starts a new measurement window. Both JACK clients are
+    // inactive here, so no callback can race the reset.
+    reset_performance_telemetry();
+    const jack_nframes_t sample_rate = jack_get_sample_rate(client);
+    jack_sr.store(sample_rate, std::memory_order_release);
     gx_print_info(
 	_("Jack init"),
-	boost::format(_("The jack sample rate is %1%/sec")) % jack_sr);
+	boost::format(_("The jack sample rate is %1%/sec")) % sample_rate);
 
-    jack_bs = jack_get_buffer_size(client); // jack buffer size
-	if (!is_power_of_two(jack_bs)) {
+    const jack_nframes_t buffer_size = jack_get_buffer_size(client);
+    jack_bs.store(buffer_size, std::memory_order_release);
+	if (!is_power_of_two(buffer_size)) {
     gx_print_warning(
 	_("Jack init"),
 	boost::format(_("The jack buffer size is %1%/frames is not power of two, Convolver won't run"))
-	% jack_bs);
+	% buffer_size);
 	} else {
     gx_print_info(
 	_("Jack init"),
 	boost::format(_("The jack buffer size is %1%/frames ... "))
-	% jack_bs);
+	% buffer_size);
 	}
 		
 	// create buffer to bypass the insert ports
-    insert_buffer = new float[jack_bs];
+    insert_buffer = new float[buffer_size];
     if (IS_RT) IS_RT = jack_is_realtime(client) ? true : false;
     gx_jack_callbacks();
     client_change(); // might load port connection definitions
@@ -479,7 +506,7 @@ bool GxJack::gx_jack_init(bool startserver, int wait_after_connect, const gx_sys
 	gx_jack_init_port_connection(opt);
     }
     set_jack_exit(false);
-	if (jack_sr > 96000) {
+	if (sample_rate > 96000) {
     gx_print_fatal(
 		    _("Jack Init"),
 		    _("Sample rates above 96kHz ain't be supported"));
@@ -720,6 +747,16 @@ void GxJack::gx_jack_init_port_connection(const gx_system::CmdlineOptions& opt) 
 // ----- set gxjack.client callbacks and activate gxjack.client
 void GxJack::gx_jack_callbacks() {
     // ----- set the jack callbacks
+    // JACK invokes these initializers in each newly-created client thread,
+    // before process callbacks begin. Keep thread naming out of the first RT
+    // audio period so startup telemetry cannot itself cause or hide an XRUN.
+    if (jack_set_thread_init_callback(client, gx_jack_thread_init_main, this) != 0) {
+        gx_print_warning(_("Jack Init"), _("Can't install gx_amp thread initializer"));
+    }
+    if (!single_client &&
+        jack_set_thread_init_callback(client_insert, gx_jack_thread_init_insert, this) != 0) {
+        gx_print_warning(_("Jack Init"), _("Can't install gx_amp_fx thread initializer"));
+    }
     jack_set_xrun_callback(client, gx_jack_xrun_callback, this);
     jack_set_sample_rate_callback(client, gx_jack_srate_callback, this);
     jack_on_shutdown(client, shutdown_callback_client, this);
@@ -767,8 +804,11 @@ void GxJack::gx_jack_callbacks() {
           client_insert, "out_1", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
     }
 
-    engine.init(jack_sr, jack_bs, get_is_rt() ? SCHED_FIFO : SCHED_OTHER,
+    engine.init(get_jack_sr(), get_jack_bs(), get_is_rt() ? SCHED_FIFO : SCHED_OTHER,
 		get_is_rt() ? jack_client_real_time_priority(client) : 0);
+    // Resolve and fault in the JACK clock path before the first measured audio
+    // period. Otherwise telemetry can create the startup outlier it reports.
+    (void)jack_get_time();
     jack_set_process_callback(client, gx_jack_process, this);
     if (!single_client) jack_set_process_callback(client_insert, gx_jack_insert_process, this);
     if (jack_activate(client) != 0) {
@@ -788,6 +828,14 @@ void GxJack::gx_jack_callbacks() {
 /****************************************************************
  ** jack process callbacks
  */
+
+void GxJack::gx_jack_thread_init_main(void*) {
+    set_jack_thread_name("gx-jack-main");
+}
+
+void GxJack::gx_jack_thread_init_insert(void*) {
+    set_jack_thread_name("gx-jack-insert");
+}
 
 void __rt_func GxJack::process_midi_cc(void *buf, jack_nframes_t nframes) {
     // midi CC output processing
@@ -816,7 +864,9 @@ static inline float *get_float_buf(jack_port_t *port, jack_nframes_t nframes) {
 }
 
 inline void GxJack::check_overload() {
-    if (!rt_watchdog_check_alive(jack_bs, jack_sr)) {
+    if (!rt_watchdog_check_alive(
+            jack_bs.load(std::memory_order_relaxed),
+            jack_sr.load(std::memory_order_relaxed))) {
 	engine.overload(gx_engine::EngineControl::ov_User, "watchdog thread");
     }
 }
@@ -824,6 +874,7 @@ inline void GxJack::check_overload() {
 // ----- main jack process method gx_amp, mono -> mono
 // RT process thread
 int __rt_func GxJack::gx_jack_process(jack_nframes_t nframes, void *arg) {
+    const jack_time_t callback_started_at = jack_get_time();
     gx_system::measure_start();
     GxJack& self = *static_cast<GxJack*>(arg);
     if (!self.is_jack_exit()) {
@@ -865,6 +916,9 @@ int __rt_func GxJack::gx_jack_process(jack_nframes_t nframes, void *arg) {
     if (self.single_client) {
         self.gx_jack_insert_process(nframes, arg);
     }
+    self.record_callback_time(
+        callback_stream_main,
+        static_cast<unsigned int>(jack_get_time() - callback_started_at));
     return 0;
 }
 
@@ -872,6 +926,7 @@ int __rt_func GxJack::gx_jack_process(jack_nframes_t nframes, void *arg) {
 // RT process_insert thread
 int __rt_func GxJack::gx_jack_insert_process(jack_nframes_t nframes, void *arg) {
     GxJack& self = *static_cast<GxJack*>(arg);
+    const jack_time_t callback_started_at = self.single_client ? 0 : jack_get_time();
     gx_system::measure_cont();
     if (!self.is_jack_exit()) {
 	if (!self.engine.stereo_chain.is_stopped()) {
@@ -891,7 +946,83 @@ int __rt_func GxJack::gx_jack_insert_process(jack_nframes_t nframes, void *arg) 
     }
     gx_system::measure_stop();
     self.engine.stereo_chain.post_rt_finished();
+    if (!self.single_client) {
+        self.record_callback_time(
+            callback_stream_insert,
+            static_cast<unsigned int>(jack_get_time() - callback_started_at));
+    }
     return 0;
+}
+
+void __rt_func GxJack::record_callback_time(
+    CallbackStream stream, unsigned int elapsed_usecs) {
+    // The main and insert JACK callbacks each own a separate ring. This keeps
+    // publication single-producer without a lock or retry loop in either RT
+    // thread. Sequence and duration are one atomic word so an RPC snapshot can
+    // never pair fields from different ring generations.
+    const unsigned long long sequence =
+        callback_rings[stream].count.load(std::memory_order_relaxed);
+    const unsigned long long sequence_tag =
+        static_cast<unsigned int>(sequence + 1);
+    const unsigned long long packed =
+        (sequence_tag << 32) | static_cast<unsigned long long>(elapsed_usecs);
+    callback_rings[stream].samples[sequence % callback_sample_capacity].store(
+        packed, std::memory_order_relaxed);
+    // Each ring has exactly one writer, so publishing with a release store is
+    // sufficient and avoids an unnecessary read-modify-write in the RT path.
+    callback_rings[stream].count.store(sequence + 1, std::memory_order_release);
+}
+
+void GxJack::reset_performance_telemetry() {
+    xrun_count.store(0, std::memory_order_relaxed);
+    last_xrun_usecs.store(0, std::memory_order_relaxed);
+    reported_xrun_count = 0;
+    for (unsigned int stream = 0; stream < callback_stream_count; ++stream) {
+        for (unsigned int i = 0; i < callback_sample_capacity; ++i) {
+            callback_rings[stream].samples[i].store(0, std::memory_order_relaxed);
+        }
+        callback_rings[stream].count.store(0, std::memory_order_release);
+    }
+}
+
+void GxJack::get_callback_performance(
+    unsigned long long& count,
+    unsigned int& sample_count,
+    unsigned int& p99_usecs,
+    unsigned int& p999_usecs,
+    unsigned int& max_usecs) const {
+    count = 0;
+    std::vector<unsigned int> samples;
+    samples.reserve(
+        static_cast<size_t>(callback_sample_capacity) *
+        static_cast<size_t>(callback_stream_count));
+    for (unsigned int stream = 0; stream < callback_stream_count; ++stream) {
+        const unsigned long long stream_count =
+            callback_rings[stream].count.load(std::memory_order_acquire);
+        count += stream_count;
+        const unsigned long long available =
+            std::min<unsigned long long>(stream_count, callback_sample_capacity);
+        const unsigned long long first = stream_count - available;
+        for (unsigned long long sequence = first; sequence < stream_count; ++sequence) {
+            const unsigned long long packed =
+                callback_rings[stream].samples[sequence % callback_sample_capacity].load(
+                    std::memory_order_acquire);
+            const unsigned int expected = static_cast<unsigned int>(sequence + 1);
+            if (static_cast<unsigned int>(packed >> 32) == expected) {
+                samples.push_back(static_cast<unsigned int>(packed));
+            }
+        }
+    }
+    sample_count = static_cast<unsigned int>(samples.size());
+    if (samples.empty()) {
+        p99_usecs = p999_usecs = max_usecs = 0;
+        return;
+    }
+    std::sort(samples.begin(), samples.end());
+    const size_t last = samples.size() - 1;
+    p99_usecs = samples[std::min(last, (samples.size() * 990 + 999) / 1000 - 1)];
+    p999_usecs = samples[std::min(last, (samples.size() * 999 + 999) / 1000 - 1)];
+    max_usecs = samples[last];
 }
 
 
@@ -1011,11 +1142,11 @@ void GxJack::gx_jack_portreg_callback(jack_port_id_t pid, int reg, void* arg) {
 // to change the samplerate when jack is running?)
 int GxJack::gx_jack_srate_callback(jack_nframes_t samplerate, void* arg) {
     GxJack& self = *static_cast<GxJack*>(arg);
-    if (self.jack_sr == samplerate) {
+    if (self.jack_sr.load(std::memory_order_relaxed) == samplerate) {
 	return 0;
     }
     self.engine.set_stateflag(gx_engine::GxEngine::SF_JACK_RECONFIG);
-    self.jack_sr = samplerate;
+    self.jack_sr.store(samplerate, std::memory_order_release);
     self.engine.set_samplerate(samplerate);
     self.engine.clear_stateflag(gx_engine::GxEngine::SF_JACK_RECONFIG);
     return 0;
@@ -1025,18 +1156,18 @@ int GxJack::gx_jack_srate_callback(jack_nframes_t samplerate, void* arg) {
 // RT process thread
 int GxJack::gx_jack_buffersize_callback(jack_nframes_t nframes, void* arg) {
     GxJack& self = *static_cast<GxJack*>(arg);
-    if (self.jack_bs == nframes) {
+    if (self.jack_bs.load(std::memory_order_relaxed) == nframes) {
 	return 0;
     }
     self.engine.set_stateflag(gx_engine::GxEngine::SF_JACK_RECONFIG);
-    self.jack_bs = nframes;
+    self.jack_bs.store(nframes, std::memory_order_release);
     self.engine.set_buffersize(nframes);
     self.engine.clear_stateflag(gx_engine::GxEngine::SF_JACK_RECONFIG);
     self.buffersize_change();
 	// create buffer to bypass the insert ports
 	delete[] self.insert_buffer;
 	self.insert_buffer = NULL;
-    self.insert_buffer = new float[self.jack_bs];
+    self.insert_buffer = new float[nframes];
     return 0;
 }
 
@@ -1073,20 +1204,23 @@ void GxJack::shutdown_callback_client_insert(void *arg) {
     self.gx_jack_shutdown_callback();
 }
 
-void GxJack::report_xrun_clear() {
-    xrun_msg_blocked = false;
-}
-
 void GxJack::report_xrun() {
-    if (xrun_msg_blocked) {
-	return;
-    }
-    xrun_msg_blocked = true;
-    Glib::signal_timeout().connect_once(
-	sigc::mem_fun(this, &GxJack::report_xrun_clear), 100);
     gx_print_warning(
 	_("Jack XRun"),
-	(boost::format(_(" delay of at least %1% microsecs")) % last_xrun).str());
+	(boost::format(_(" delay of at least %1% microsecs")) % get_last_xrun()).str());
+}
+
+bool GxJack::poll_xrun() {
+    const unsigned long long current = get_xrun_count();
+    if (current == reported_xrun_count) {
+	return true;
+    }
+    reported_xrun_count = current;
+    if (!engine.mono_chain.is_stopped()) {
+	engine.overload(gx_engine::EngineControl::ov_XRun, "xrun");
+    }
+    report_xrun();
+    return true;
 }
 
 // ---- jack xrun callback
@@ -1095,11 +1229,10 @@ int GxJack::gx_jack_xrun_callback(void* arg) {
     if (!self.client) {
 	return 0;
     }
-    self.last_xrun = jack_get_xrun_delayed_usecs(self.client);
-    if (!self.engine.mono_chain.is_stopped()) {
-	self.engine.overload(gx_engine::EngineControl::ov_XRun, "xrun");
-    }
-    self.xrun();
+    self.last_xrun_usecs.store(
+	static_cast<unsigned int>(jack_get_xrun_delayed_usecs(self.client)),
+	std::memory_order_release);
+    self.xrun_count.fetch_add(1, std::memory_order_release);
     return 0;
 }
 

@@ -440,6 +440,16 @@ static inline bool unit_match(const Glib::ustring& id, const Glib::ustring& pref
 void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonArray& params) {
     START_FUNCTION_SWITCH(mn->m_id);
 
+    // `set` predates request/response use and remains classified as a
+    // notification in the generated interface. Accepting its existing enum in
+    // the call path lets newer clients attach an id and receive an
+    // acknowledgement without changing notification behaviour for old clients.
+    case RPNM_set: {
+        apply_parameter_set(params);
+        jw.write_lit("true");
+        break;
+    }
+
     FUNCTION(get) {
         gx_engine::ParamMap& param = serv.settings.get_param();
         jw.begin_object();
@@ -709,6 +719,33 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write(serv.jack.get_jcpu_load());
     }
 
+    FUNCTION(jack_performance_status) {
+        unsigned long long callback_count = 0;
+        unsigned int callback_sample_count = 0;
+        unsigned int callback_p99_usecs = 0;
+        unsigned int callback_p999_usecs = 0;
+        unsigned int callback_max_usecs = 0;
+        serv.jack.get_callback_performance(
+            callback_count,
+            callback_sample_count,
+            callback_p99_usecs,
+            callback_p999_usecs,
+            callback_max_usecs);
+        jw.begin_object();
+        jw.write_kv("cpuLoad", serv.jack.get_jcpu_load());
+        jw.write_kv("xrunCount", static_cast<double>(serv.jack.get_xrun_count()));
+        jw.write_kv("lastXrunUsecs", serv.jack.get_last_xrun());
+        jw.write_kv("sampleRate", serv.jack.get_jack_sr());
+        jw.write_kv("bufferSize", serv.jack.get_jack_bs());
+        jw.write_kv("realtime", static_cast<int>(serv.jack.get_is_rt()));
+        jw.write_kv("callbackCount", static_cast<double>(callback_count));
+        jw.write_kv("callbackSampleCount", callback_sample_count);
+        jw.write_kv("callbackP99Usecs", callback_p99_usecs);
+        jw.write_kv("callbackP999Usecs", callback_p999_usecs);
+        jw.write_kv("callbackMaxUsecs", callback_max_usecs);
+        jw.end_object();
+    }
+
     FUNCTION(load_impresp_dirs) {
         std::vector<gx_system::FileName> dirs;
         gx_system::list_subdirs(serv.settings.get_options().get_IR_pathlist(), dirs);
@@ -849,6 +886,85 @@ static void save_preset(gx_preset::GxSettings& settings, const Glib::ustring& ba
         throw RpcError(-32001, "bank is immutable");
     }
     settings.save(*pf, preset);
+}
+
+void CmdConnection::apply_parameter_set(JsonArray& params) {
+    if (params.size() & 1) {
+        throw RpcError(-32602, "Invalid param -- array length must be even");
+    }
+    gx_engine::ParamMap& param = serv.settings.get_param();
+    for (unsigned int i = 0; i < params.size(); i += 2) {
+        const Glib::ustring& attr = params[i]->getString();
+        if (!param.hasId(attr)) {
+            continue;
+        }
+        gx_engine::Parameter& p = param[attr];
+        p.set_blocked(true);
+        try {
+            JsonValue *v = params[i+1];
+            if (p.isFloat()) {
+                gx_engine::FloatParameter& pf = p.getFloat();
+                float f;
+                if (p.getControlType() == gx_engine::Parameter::Enum && dynamic_cast<JsonString*>(v)) {
+                    f = pf.idx_from_id(v->getString());
+                } else {
+                    f = v->getFloat();
+                }
+                pf.set(f);
+            } else if (p.isInt()) {
+                gx_engine::IntParameter& pi = p.getInt();
+                int value;
+                if (p.getControlType() == gx_engine::Parameter::Enum && dynamic_cast<JsonString*>(v)) {
+                    value = pi.idx_from_id(v->getString());
+                } else {
+                    value = v->getInt();
+                }
+                pi.set(value);
+            } else if (p.isBool()) {
+                p.getBool().set(v->getInt());
+            } else if (p.isFile()) {
+                p.getFile().set(Gio::File::create_for_path(v->getString()));
+            } else if (p.isString()) {
+                p.getString().set(v->getString());
+            } else if (dynamic_cast<gx_engine::JConvParameter*>(&p) != 0) {
+                gx_engine::GxJConvSettings s;
+                gx_system::JsonSubParser jps = v->getSubParser();
+                s.readJSON(jps);
+                dynamic_cast<gx_engine::JConvParameter*>(&p)->set(s);
+            } else if (dynamic_cast<gx_engine::SeqParameter*>(&p) != 0) {
+                gx_engine::GxSeqSettings s;
+                gx_system::JsonSubParser jps = v->getSubParser();
+                s.readJSON(jps);
+                dynamic_cast<gx_engine::SeqParameter*>(&p)->set(s);
+            } else {
+                throw RpcError(-32602, "Invalid param -- unknown variable");
+            }
+        } catch (...) {
+            p.set_blocked(false);
+            throw;
+        }
+        p.set_blocked(false);
+    }
+    if (serv.broadcast_listeners(f_parameter_change_notify, this)) {
+        gx_system::JsonStringWriter *jw = new gx_system::JsonStringWriter;
+        send_notify_begin((*jw), "set");
+        for (unsigned int i = 0; i < params.size(); i += 2) {
+            jw->write(params[i]->getString());
+            JsonValue *v = params[i+1];
+            if (dynamic_cast<JsonFloat*>(v)) {
+                jw->write(v->getFloat());
+            } else if (dynamic_cast<JsonInt*>(v)) {
+                jw->write(v->getInt());
+            } else if (dynamic_cast<JsonString*>(v)) {
+                jw->write(v->getString());
+            } else if (dynamic_cast<JsonObject*>(v)) {
+                v->getSubParser().copy_object((*jw));
+            }
+        }
+        broadcast_data bd = {jw,CmdConnection::f_parameter_change_notify,this};
+        serv.broadcast_list.push(bd);
+    }
+    serv.save_state();
 }
 
 void CmdConnection::notify(gx_system::JsonStringWriter& jw, const methodnames *mn, JsonArray& params) {
@@ -1012,76 +1128,7 @@ void CmdConnection::notify(gx_system::JsonStringWriter& jw, const methodnames *m
     }
 
     PROCEDURE(set) {
-        if (params.size() & 1) {
-            throw RpcError(-32602, "Invalid param -- array length must be even");
-        }
-        gx_engine::ParamMap& param = serv.settings.get_param();
-        for (unsigned int i = 0; i < params.size(); i += 2) {
-            const Glib::ustring& attr = params[i]->getString();
-            if (param.hasId(attr)) {
-                gx_engine::Parameter& p = param[attr];
-                p.set_blocked(true);
-                JsonValue *v = params[i+1];
-                if (p.isFloat()) {
-                    gx_engine::FloatParameter& pf = p.getFloat();
-                    float f;
-                    if (p.getControlType() == gx_engine::Parameter::Enum && dynamic_cast<JsonString*>(v)) {
-                        f = pf.idx_from_id(v->getString());
-                    } else {
-                        f = v->getFloat();
-                    }
-                    pf.set(f);
-                } else if (p.isInt()) {
-                    gx_engine::IntParameter& pi = p.getInt();
-                    int i;
-                    if (p.getControlType() == gx_engine::Parameter::Enum && dynamic_cast<JsonString*>(v)) {
-                        i = pi.idx_from_id(v->getString());
-                    } else {
-                        i = v->getInt();
-                    }
-                    pi.set(i);
-                } else if (p.isBool()) {
-                    p.getBool().set(v->getInt());
-                } else if (p.isFile()) {
-                    p.getFile().set(Gio::File::create_for_path(v->getString()));
-                } else if (p.isString()) {
-                    p.getString().set(v->getString());
-                } else if (dynamic_cast<gx_engine::JConvParameter*>(&p) != 0) {
-                    gx_engine::GxJConvSettings s;
-                    gx_system::JsonSubParser jps = v->getSubParser();
-                    s.readJSON(jps);
-                    dynamic_cast<gx_engine::JConvParameter*>(&p)->set(s);
-                } else if (dynamic_cast<gx_engine::SeqParameter*>(&p) != 0) {
-                    gx_engine::GxSeqSettings s;
-                    gx_system::JsonSubParser jps = v->getSubParser();
-                    s.readJSON(jps);
-                    dynamic_cast<gx_engine::SeqParameter*>(&p)->set(s);
-                } else {
-                    throw RpcError(-32602, "Invalid param -- unknown variable");
-                }
-                p.set_blocked(false);
-            }
-        }
-        if (serv.broadcast_listeners(f_parameter_change_notify, this)) {
-            gx_system::JsonStringWriter *jw = new gx_system::JsonStringWriter;
-            send_notify_begin((*jw), "set");
-            for (unsigned int i = 0; i < params.size(); i += 2) {
-                jw->write(params[i]->getString());
-                JsonValue *v = params[i+1];
-                if (dynamic_cast<JsonFloat*>(v)) {
-                    jw->write(v->getFloat());
-                } else if (dynamic_cast<JsonInt*>(v)) {
-                    jw->write(v->getInt());
-                } else if (dynamic_cast<JsonString*>(v)) {
-                    jw->write(v->getString());
-                } else if (dynamic_cast<JsonObject*>(v)) {
-                    v->getSubParser().copy_object((*jw));
-                }
-            }
-        broadcast_data bd = {jw,CmdConnection::f_parameter_change_notify,this};
-        serv.broadcast_list.push(bd);
-        }
-        serv.save_state();
+        apply_parameter_set(params);
     }
 
     PROCEDURE(get_updates) {
@@ -1237,6 +1284,8 @@ bool CmdConnection::request(gx_system::JsonStringParser& jp, gx_system::JsonStri
     Glib::ustring method;
     JsonArray params;
     Glib::ustring id;
+    bool has_id = false;
+    bool id_is_number = false;
     jp.next(gx_system::JsonParser::begin_object);
     while (jp.peek() != gx_system::JsonParser::end_object) {
         jp.next(gx_system::JsonParser::value_key);
@@ -1265,6 +1314,8 @@ bool CmdConnection::request(gx_system::JsonStringParser& jp, gx_system::JsonStri
                 jp.peek() != gx_system::JsonParser::value_number) {
                 throw RpcError(-32600,"Invalid Request");
             }
+            has_id = true;
+            id_is_number = jp.peek() == gx_system::JsonParser::value_number;
             jp.next();
             id = jp.current_value();
         } else {
@@ -1272,12 +1323,20 @@ bool CmdConnection::request(gx_system::JsonStringParser& jp, gx_system::JsonStri
         }
     }
     jp.next(gx_system::JsonParser::end_object);
-    const methodnames *p = Perfect_Hash::in_word_set(method.c_str(), method.size());
+    // Keep this explicit fallback until the checked-in gperf output is next
+    // regenerated. It allows diagnostics to be consumed by Houston builds
+    // whose host does not carry the gperf build dependency.
+    static const methodnames jack_performance_status_method = {
+        "jack_performance_status", RPCM_jack_performance_status
+    };
+    const methodnames *p = method == "jack_performance_status"
+        ? &jack_performance_status_method
+        : Perfect_Hash::in_word_set(method.c_str(), method.size());
     if (!p) {
         throw RpcError(-32601, Glib::ustring::compose("Method not found -- '%1'", method));
     }
     try {
-        if (id.empty()) {
+        if (!has_id) {
             notify(jw, p, params);
             return false;
         } else {
@@ -1286,7 +1345,15 @@ bool CmdConnection::request(gx_system::JsonStringParser& jp, gx_system::JsonStri
             }
             jw.begin_object();
             jw.write_kv("jsonrpc", "2.0");
-            jw.write_kv("id", id);
+            jw.write_key("id");
+            if (id_is_number) {
+                // Preserve the JSON-RPC id type. Houston uses monotonically
+                // increasing numeric ids and must be able to match an
+                // acknowledgement to the request that produced it.
+                jw.write_lit(id.raw(), true);
+            } else {
+                jw.write(id.raw(), true);
+            }
             jw.write_key("result");
             call(jw, p, params);
             jw.end_object();

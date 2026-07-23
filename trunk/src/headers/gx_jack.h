@@ -179,6 +179,8 @@ class GxJack: public sigc::trackable {
     static int          gx_jack_buffersize_callback(jack_nframes_t, void* arg);
     static int          gx_jack_process(jack_nframes_t, void* arg);
     static int          gx_jack_insert_process(jack_nframes_t, void* arg);
+    static void         gx_jack_thread_init_main(void* arg);
+    static void         gx_jack_thread_init_insert(void* arg);
 
     static void         shutdown_callback_client(void* arg);
     static void         shutdown_callback_client_insert(void* arg);
@@ -204,13 +206,32 @@ class GxJack: public sigc::trackable {
     Glib::Dispatcher    client_change_rt;
     sigc::signal<void>  client_change;
     string              client_instance;
-    jack_nframes_t      jack_sr;   // jack sample rate
-    jack_nframes_t      jack_bs;   // jack buffer size
+    std::atomic<jack_nframes_t> jack_sr;   // jack sample rate
+    std::atomic<jack_nframes_t> jack_bs;   // jack buffer size
     float               *insert_buffer;
-    Glib::Dispatcher    xrun;
-    float               last_xrun;
-    bool                xrun_msg_blocked;
-    void report_xrun_clear();
+    std::atomic<unsigned long long> xrun_count;
+    std::atomic<unsigned int> last_xrun_usecs;
+    unsigned long long  reported_xrun_count;
+    enum { performance_poll_interval_ms = 1000 };
+    enum CallbackStream {
+        callback_stream_main,
+        callback_stream_insert,
+        callback_stream_count
+    };
+    enum { callback_sample_capacity = 2048 };
+    struct alignas(64) CallbackTelemetryRing {
+        std::atomic<unsigned long long> count;
+        // Each sample packs the low 32 bits of (sequence + 1) above the
+        // duration. A single atomic publication prevents readers from pairing
+        // a new duration with an old sequence while the ring wraps.
+        std::atomic<unsigned long long> samples[callback_sample_capacity];
+    };
+    // Main and insert callbacks normally run on different cores. Per-stream,
+    // cache-line-aligned rings avoid bouncing one shared counter between them.
+    CallbackTelemetryRing callback_rings[callback_stream_count];
+    void record_callback_time(CallbackStream stream, unsigned int elapsed_usecs);
+    void reset_performance_telemetry();
+    bool poll_xrun();
     void report_xrun();
     void write_jack_port_connections(
 	gx_system::JsonWriter& w, const char *key, const PortConnection& pc, bool replace=false);
@@ -235,8 +256,8 @@ class GxJack: public sigc::trackable {
     jack_transport_state_t transport_state;
     jack_transport_state_t old_transport_state;
 
-    jack_nframes_t      get_jack_sr() { return jack_sr; }
-    jack_nframes_t      get_jack_bs() { return jack_bs; }
+    jack_nframes_t      get_jack_sr() const { return jack_sr.load(std::memory_order_acquire); }
+    jack_nframes_t      get_jack_bs() const { return jack_bs.load(std::memory_order_acquire); }
     float               get_jcpu_load() { return client ? jack_cpu_load(client) : -1; }
     bool                get_is_rt() { return client ? IS_RT: false; }
     jack_nframes_t      get_time_is() { return client ? jack_frame_time(client) : 0; }
@@ -251,7 +272,13 @@ public:
     void                set_jack_insert(bool v) { bypass_insert = v;}
     bool                gx_jack_connection(bool connect, bool startserver,
 					   int wait_after_connect, const gx_system::CmdlineOptions& opt);
-    float               get_last_xrun() { return last_xrun; }
+    unsigned long long  get_xrun_count() const { return xrun_count.load(std::memory_order_acquire); }
+    unsigned int        get_last_xrun() const { return last_xrun_usecs.load(std::memory_order_acquire); }
+    void                get_callback_performance(unsigned long long& count,
+                                                 unsigned int& sample_count,
+                                                 unsigned int& p99_usecs,
+                                                 unsigned int& p999_usecs,
+                                                 unsigned int& max_usecs) const;
     void*               get_midi_buffer(jack_nframes_t nframes);
     bool                send_midi_cc(int cc_num, int pgm_num, int bgn, int num);
 
