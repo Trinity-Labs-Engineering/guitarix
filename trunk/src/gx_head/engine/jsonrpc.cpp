@@ -408,6 +408,46 @@ static void write_parameter_state(gx_system::JsonWriter& jw, const gx_engine::Pa
     jw.end_object();
 }
 
+static void write_jack_client_activity_status(
+    gx_system::JsonWriter& jw,
+    const gx_jack::JackClientActivityStatus& status) {
+    jw.begin_object();
+    jw.write_kv("ok", status.ok);
+    jw.write_kv("changed", status.changed);
+    jw.write_kv("active", status.active);
+    jw.write_kv("allActive", status.active);
+    jw.write_kv("anyActive", status.any_active);
+    jw.write_kv("inactive", status.inactive);
+    jw.write_kv("ampActive", status.amp_active);
+    jw.write_kv("fxActive", status.fx_active);
+    jw.write_kv("ampPresent", status.amp_present);
+    jw.write_kv("fxPresent", status.fx_present);
+    jw.write_kv("singleClient", status.single_client);
+    jw.write_kv("generation", static_cast<double>(status.generation));
+    jw.write_kv(
+        "transitionUsecs", static_cast<double>(status.transition_usecs));
+    jw.write_kv(
+        "ampCallbackCount", static_cast<double>(status.amp_callback_count));
+    jw.write_kv(
+        "fxCallbackCount", static_cast<double>(status.fx_callback_count));
+    jw.write_kv(
+        "ampCallbacksSinceActivate",
+        static_cast<double>(status.amp_callbacks_since_activate));
+    jw.write_kv(
+        "fxCallbacksSinceActivate",
+        static_cast<double>(status.fx_callbacks_since_activate));
+    jw.write_kv("ampRampMode", status.amp_ramp_mode);
+    jw.write_kv("fxRampMode", status.fx_ramp_mode);
+    jw.write_kv("engineReady", status.engine_ready);
+    jw.write_kv("ampRc", status.amp_rc);
+    jw.write_kv("fxRc", status.fx_rc);
+    jw.write_kv("rollbackAmpRc", status.rollback_amp_rc);
+    jw.write_kv("rollbackFxRc", status.rollback_fx_rc);
+    jw.write_kv("rollbackIncomplete", status.rollback_incomplete);
+    jw.write_kv("lastError", status.last_error);
+    jw.end_object();
+}
+
 static inline bool unit_match(const Glib::ustring& id, const Glib::ustring& prefix, const char** gl) {
     if (id.compare(0, prefix.size(), prefix) == 0) {
         return true;
@@ -744,6 +784,30 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_kv("callbackP999Usecs", callback_p999_usecs);
         jw.write_kv("callbackMaxUsecs", callback_max_usecs);
         jw.end_object();
+    }
+
+    FUNCTION(jack_deactivate) {
+        if (!params.empty()) {
+            throw RpcError(-32602, "expected no parameters");
+        }
+        write_jack_client_activity_status(
+            jw, serv.jack.jack_deactivate_clients());
+    }
+
+    FUNCTION(jack_activate) {
+        if (!params.empty()) {
+            throw RpcError(-32602, "expected no parameters");
+        }
+        write_jack_client_activity_status(
+            jw, serv.jack.jack_activate_clients());
+    }
+
+    FUNCTION(jack_status) {
+        if (!params.empty()) {
+            throw RpcError(-32602, "expected no parameters");
+        }
+        write_jack_client_activity_status(
+            jw, serv.jack.get_jack_client_activity_status());
     }
 
     FUNCTION(load_impresp_dirs) {
@@ -1326,12 +1390,23 @@ bool CmdConnection::request(gx_system::JsonStringParser& jp, gx_system::JsonStri
     // Keep this explicit fallback until the checked-in gperf output is next
     // regenerated. It allows diagnostics to be consumed by Houston builds
     // whose host does not carry the gperf build dependency.
-    static const methodnames jack_performance_status_method = {
-        "jack_performance_status", RPCM_jack_performance_status
+    static const methodnames fallback_methods[] = {
+        { "jack_performance_status", RPCM_jack_performance_status },
+        { "jack_deactivate", RPCM_jack_deactivate },
+        { "jack_activate", RPCM_jack_activate },
+        { "jack_status", RPCM_jack_status },
     };
-    const methodnames *p = method == "jack_performance_status"
-        ? &jack_performance_status_method
-        : Perfect_Hash::in_word_set(method.c_str(), method.size());
+    const methodnames *p = 0;
+    for (unsigned int i = 0;
+         i < sizeof(fallback_methods) / sizeof(fallback_methods[0]); ++i) {
+        if (method == fallback_methods[i].name) {
+            p = &fallback_methods[i];
+            break;
+        }
+    }
+    if (!p) {
+        p = Perfect_Hash::in_word_set(method.c_str(), method.size());
+    }
     if (!p) {
         throw RpcError(-32601, Glib::ustring::compose("Method not found -- '%1'", method));
     }

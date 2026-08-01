@@ -226,6 +226,20 @@ GxJack::GxJack(gx_engine::GxEngine& engine_)
       jack_sr(),
       jack_bs(),
       insert_buffer(NULL),
+      client_activity_mutex(),
+      jack_shutdown_seen(false),
+      amp_client_active(false),
+      fx_client_active(false),
+      client_activity_generation(0),
+      client_activity_transition_usecs(0),
+      amp_callback_count_at_activate(0),
+      fx_callback_count_at_activate(0),
+      client_activity_amp_rc(0),
+      client_activity_fx_rc(0),
+      client_activity_rollback_amp_rc(0),
+      client_activity_rollback_fx_rc(0),
+      client_activity_rollback_incomplete(false),
+      client_activity_last_error(),
       xrun_count(0),
       last_xrun_usecs(0),
       reported_xrun_count(0),
@@ -371,6 +385,20 @@ bool GxJack::gx_jack_init(bool startserver, int wait_after_connect, const gx_sys
 
     set_jack_down(false);
     set_jack_exit(true);
+    {
+        std::lock_guard<std::mutex> lock(client_activity_mutex);
+        jack_shutdown_seen.store(false, std::memory_order_release);
+        amp_client_active = false;
+        fx_client_active = false;
+        client_activity_generation = 0;
+        client_activity_transition_usecs = 0;
+        client_activity_amp_rc = 0;
+        client_activity_fx_rc = 0;
+        client_activity_rollback_amp_rc = 0;
+        client_activity_rollback_fx_rc = 0;
+        client_activity_rollback_incomplete = false;
+        client_activity_last_error.clear();
+    }
     engine.set_stateflag(gx_engine::GxEngine::SF_INITIALIZING);
 
     //ports = JackPorts(); //FIXME
@@ -521,17 +549,27 @@ void GxJack::cleanup_slot(bool otherthread) {
     } else {
 	// called from other thread. Since most cleanup functions are
 	// not thread safe, just do minimal jack cleanup
+        std::lock_guard<std::mutex> lock(client_activity_mutex);
+        if (jack_shutdown_seen.load(std::memory_order_acquire)) {
+            amp_client_active = false;
+            fx_client_active = false;
+            client = 0;
+            client_insert = 0;
+            return;
+	}
 	if (client) {
-	    if (!is_jack_down()) {
+	    if (!is_jack_down() && amp_client_active) {
 		engine.start_ramp_down();
 		engine.wait_ramp_down_finished();
 	    }
 	    jack_deactivate(client);
+	    amp_client_active = false;
 	    jack_client_close(client);
 	    client = 0;
 	}
 	if (client_insert) {
 	    jack_deactivate(client_insert);
+	    fx_client_active = false;
 	    jack_client_close(client_insert);
 	    client_insert = 0;
 	}
@@ -540,15 +578,29 @@ void GxJack::cleanup_slot(bool otherthread) {
 
 // -----Function that cleans the jack stuff on shutdown
 void GxJack::gx_jack_cleanup() {
+    std::lock_guard<std::mutex> lock(client_activity_mutex);
     if (!client || is_jack_down()) {
 	return;
     }
-    engine.start_ramp_down();
-    engine.wait_ramp_down_finished();
+    if (jack_shutdown_seen.load(std::memory_order_acquire)) {
+        amp_client_active = false;
+        fx_client_active = false;
+        client = 0;
+        client_insert = 0;
+        return;
+    }
+    if (amp_client_active || fx_client_active) {
+        engine.start_ramp_down();
+        engine.wait_ramp_down_finished();
+    }
     set_jack_exit(true);
     engine.set_stateflag(gx_engine::GxEngine::SF_INITIALIZING);
     jack_deactivate(client);
-    if (!single_client) jack_deactivate(client_insert);
+    amp_client_active = false;
+    if (!single_client) {
+        jack_deactivate(client_insert);
+        fx_client_active = false;
+    }
     jack_port_unregister(client, ports.input.port);
     jack_port_unregister(client, ports.midi_input.port);
     if (!single_client) {
@@ -811,17 +863,233 @@ void GxJack::gx_jack_callbacks() {
     (void)jack_get_time();
     jack_set_process_callback(client, gx_jack_process, this);
     if (!single_client) jack_set_process_callback(client_insert, gx_jack_insert_process, this);
-    if (jack_activate(client) != 0) {
+    amp_callback_count_at_activate =
+        callback_rings[callback_stream_main].count.load(std::memory_order_acquire);
+    const int amp_activate_rc = jack_activate(client);
+    amp_client_active = amp_activate_rc == 0;
+    if (amp_activate_rc != 0) {
         gx_print_fatal(
 	    _("Jack Activation"),
 	    string(_("Can't activate JACK gx_amp client")));
     }
     if (!single_client) {
-        if (jack_activate(client_insert) != 0) {
+        fx_callback_count_at_activate =
+            callback_rings[callback_stream_insert].count.load(std::memory_order_acquire);
+        const int fx_activate_rc = jack_activate(client_insert);
+        fx_client_active = fx_activate_rc == 0;
+        if (fx_activate_rc != 0) {
             gx_print_fatal(_("Jack Activation"),
                         string(_("Can't activate JACK gx_amp_fx client")));
         }
+    } else {
+        fx_client_active = false;
     }
+}
+
+JackClientActivityStatus GxJack::client_activity_status_unlocked(
+    bool ok, bool changed) const {
+    JackClientActivityStatus status;
+    status.ok = ok;
+    status.changed = changed;
+    status.amp_active = amp_client_active;
+    status.fx_active = !single_client && fx_client_active;
+    status.amp_present = client != 0;
+    status.fx_present = !single_client && client_insert != 0;
+    status.single_client = single_client;
+    status.active = status.amp_active &&
+        (single_client || status.fx_active);
+    status.any_active = status.amp_active || status.fx_active;
+    status.inactive = !status.any_active;
+    status.generation = client_activity_generation;
+    status.transition_usecs = client_activity_transition_usecs;
+    status.amp_callback_count =
+        callback_rings[callback_stream_main].count.load(std::memory_order_acquire);
+    status.fx_callback_count = single_client ? 0 :
+        callback_rings[callback_stream_insert].count.load(std::memory_order_acquire);
+    status.amp_callbacks_since_activate =
+        status.amp_callback_count >= amp_callback_count_at_activate
+        ? status.amp_callback_count - amp_callback_count_at_activate : 0;
+    status.fx_callbacks_since_activate =
+        status.fx_callback_count >= fx_callback_count_at_activate
+        ? status.fx_callback_count - fx_callback_count_at_activate : 0;
+    status.amp_ramp_mode =
+        static_cast<int>(engine.mono_chain.get_ramp_mode());
+    status.fx_ramp_mode =
+        static_cast<int>(engine.stereo_chain.get_ramp_mode());
+    status.engine_ready = status.active &&
+        status.amp_callbacks_since_activate > 0 &&
+        (single_client || status.fx_callbacks_since_activate > 0) &&
+        status.amp_ramp_mode ==
+            static_cast<int>(gx_engine::ProcessingChainBase::ramp_mode_off) &&
+        status.fx_ramp_mode ==
+            static_cast<int>(gx_engine::ProcessingChainBase::ramp_mode_off);
+    status.amp_rc = client_activity_amp_rc;
+    status.fx_rc = client_activity_fx_rc;
+    status.rollback_amp_rc = client_activity_rollback_amp_rc;
+    status.rollback_fx_rc = client_activity_rollback_fx_rc;
+    status.rollback_incomplete = client_activity_rollback_incomplete;
+    status.last_error = client_activity_last_error;
+    return status;
+}
+
+JackClientActivityStatus GxJack::set_client_activity(bool active) {
+    std::lock_guard<std::mutex> lock(client_activity_mutex);
+    const jack_time_t started_at = jack_get_time();
+    bool changed = false;
+
+    client_activity_transition_usecs = 0;
+    client_activity_amp_rc = 0;
+    client_activity_fx_rc = 0;
+    client_activity_rollback_amp_rc = 0;
+    client_activity_rollback_fx_rc = 0;
+    client_activity_rollback_incomplete = false;
+    client_activity_last_error.clear();
+
+    if (!client || (!single_client && !client_insert) || is_jack_down() ||
+        is_jack_exit() ||
+        jack_shutdown_seen.load(std::memory_order_acquire)) {
+        client_activity_last_error = "JACK clients are unavailable";
+        client_activity_transition_usecs =
+            static_cast<unsigned long long>(jack_get_time() - started_at);
+        return client_activity_status_unlocked(false, false);
+    }
+
+    if (active) {
+        if (!amp_client_active) {
+            amp_callback_count_at_activate =
+                callback_rings[callback_stream_main].count.load(
+                    std::memory_order_acquire);
+            client_activity_amp_rc = jack_activate(client);
+            if (jack_shutdown_seen.load(std::memory_order_acquire)) {
+                amp_client_active = false;
+                fx_client_active = false;
+                client_activity_last_error =
+                    "JACK shut down during jack_activate";
+            } else if (client_activity_amp_rc == 0) {
+                amp_client_active = true;
+                changed = true;
+            }
+        }
+        if (!single_client && !fx_client_active &&
+            client_activity_amp_rc == 0 &&
+            !jack_shutdown_seen.load(std::memory_order_acquire)) {
+            fx_callback_count_at_activate =
+                callback_rings[callback_stream_insert].count.load(
+                    std::memory_order_acquire);
+            client_activity_fx_rc = jack_activate(client_insert);
+            if (jack_shutdown_seen.load(std::memory_order_acquire)) {
+                amp_client_active = false;
+                fx_client_active = false;
+                client_activity_last_error =
+                    "JACK shut down during jack_activate";
+            } else if (client_activity_fx_rc == 0) {
+                fx_client_active = true;
+                changed = true;
+            }
+        }
+        if (client_activity_last_error.empty() &&
+            (client_activity_amp_rc != 0 || client_activity_fx_rc != 0)) {
+            // A partial active state is neither useful nor quiet. Roll back
+            // every active client after a failed activation attempt.
+            if (!single_client && fx_client_active &&
+                !jack_shutdown_seen.load(std::memory_order_acquire)) {
+                client_activity_rollback_fx_rc =
+                    jack_deactivate(client_insert);
+                if (client_activity_rollback_fx_rc == 0) {
+                    fx_client_active = false;
+                    changed = true;
+                }
+            }
+            if (amp_client_active &&
+                !jack_shutdown_seen.load(std::memory_order_acquire)) {
+                client_activity_rollback_amp_rc = jack_deactivate(client);
+                if (client_activity_rollback_amp_rc == 0) {
+                    amp_client_active = false;
+                    changed = true;
+                }
+            }
+            client_activity_rollback_incomplete =
+                amp_client_active || (!single_client && fx_client_active);
+            if (jack_shutdown_seen.load(std::memory_order_acquire)) {
+                client_activity_last_error =
+                    "JACK shut down during activation rollback";
+            } else {
+                client_activity_last_error =
+                    "jack_activate failed (amp=" +
+                    std::to_string(client_activity_amp_rc) + ", fx=" +
+                    std::to_string(client_activity_fx_rc) +
+                    "; rollback amp=" +
+                    std::to_string(client_activity_rollback_amp_rc) + ", fx=" +
+                    std::to_string(client_activity_rollback_fx_rc) + ")";
+            }
+        }
+    } else {
+        if (!single_client && fx_client_active) {
+            client_activity_fx_rc = jack_deactivate(client_insert);
+            if (jack_shutdown_seen.load(std::memory_order_acquire)) {
+                amp_client_active = false;
+                fx_client_active = false;
+                client_activity_last_error =
+                    "JACK shut down during jack_deactivate";
+            } else if (client_activity_fx_rc == 0) {
+                fx_client_active = false;
+                changed = true;
+            }
+        }
+        // Failure policy is quiet-first: still deactivate the amp if the FX
+        // client failed, then report the exact partial state to the caller.
+        if (amp_client_active &&
+            !jack_shutdown_seen.load(std::memory_order_acquire)) {
+            client_activity_amp_rc = jack_deactivate(client);
+            if (jack_shutdown_seen.load(std::memory_order_acquire)) {
+                amp_client_active = false;
+                fx_client_active = false;
+                client_activity_last_error =
+                    "JACK shut down during jack_deactivate";
+            } else if (client_activity_amp_rc == 0) {
+                amp_client_active = false;
+                changed = true;
+            }
+        }
+        if (client_activity_last_error.empty() &&
+            (client_activity_amp_rc != 0 || client_activity_fx_rc != 0)) {
+            if (client_activity_last_error.empty()) {
+                client_activity_last_error =
+                    "jack_deactivate failed (amp=" +
+                    std::to_string(client_activity_amp_rc) + ", fx=" +
+                    std::to_string(client_activity_fx_rc) + ")";
+            }
+        }
+    }
+
+    client_activity_transition_usecs =
+        static_cast<unsigned long long>(jack_get_time() - started_at);
+    const bool reached_target = active
+        ? amp_client_active && (single_client || fx_client_active)
+        : !amp_client_active && (single_client || !fx_client_active);
+    if (reached_target && changed && client_activity_last_error.empty()) {
+        ++client_activity_generation;
+    }
+    return client_activity_status_unlocked(
+        reached_target && client_activity_last_error.empty(), changed);
+}
+
+JackClientActivityStatus GxJack::jack_deactivate_clients() {
+    return set_client_activity(false);
+}
+
+JackClientActivityStatus GxJack::jack_activate_clients() {
+    return set_client_activity(true);
+}
+
+JackClientActivityStatus GxJack::get_jack_client_activity_status() const {
+    std::lock_guard<std::mutex> lock(client_activity_mutex);
+    const bool available =
+        client && (single_client || client_insert) && !is_jack_down() &&
+        !is_jack_exit() &&
+        !jack_shutdown_seen.load(std::memory_order_acquire);
+    return client_activity_status_unlocked(
+        available && client_activity_last_error.empty(), false);
 }
 
 
@@ -1180,26 +1448,56 @@ void GxJack::gx_jack_shutdown_callback() {
 
 void GxJack::shutdown_callback_client(void *arg) {
     GxJack& self = *static_cast<GxJack*>(arg);
-    if (self.client) {
-	self.client = 0;
-	self.client_change_rt();
+    self.jack_shutdown_seen.store(true, std::memory_order_release);
+    self.amp_client_active = false;
+    self.fx_client_active = false;
+    jack_client_t *insert_to_close = 0;
+    bool notify_client_change = true;
+    {
+        std::unique_lock<std::mutex> lock(
+            self.client_activity_mutex, std::try_to_lock);
+        if (lock.owns_lock()) {
+            if (self.client) {
+                self.client = 0;
+            }
+            if (!self.single_client && self.client_insert) {
+                insert_to_close = self.client_insert;
+                self.client_insert = 0;
+            }
+        }
     }
-    if (!self.single_client) {
-    if (self.client_insert) {
-	jack_client_close(self.client_insert);
-	self.client_insert = 0;
+    if (insert_to_close) {
+        jack_client_close(insert_to_close);
     }
+    if (notify_client_change) {
+        self.client_change_rt();
     }
     self.gx_jack_shutdown_callback();
 }
 
 void GxJack::shutdown_callback_client_insert(void *arg) {
     GxJack& self = *static_cast<GxJack*>(arg);
-    self.client_insert = 0;
-    if (self.client) {
-	jack_client_close(self.client);
-	self.client = 0;
-	self.client_change_rt();
+    self.jack_shutdown_seen.store(true, std::memory_order_release);
+    self.amp_client_active = false;
+    self.fx_client_active = false;
+    jack_client_t *amp_to_close = 0;
+    bool notify_client_change = true;
+    {
+        std::unique_lock<std::mutex> lock(
+            self.client_activity_mutex, std::try_to_lock);
+        if (lock.owns_lock()) {
+            self.client_insert = 0;
+            if (self.client) {
+                amp_to_close = self.client;
+                self.client = 0;
+            }
+        }
+    }
+    if (amp_to_close) {
+        jack_client_close(amp_to_close);
+    }
+    if (notify_client_change) {
+        self.client_change_rt();
     }
     self.gx_jack_shutdown_callback();
 }

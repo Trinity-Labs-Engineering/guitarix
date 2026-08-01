@@ -79,6 +79,34 @@ public:
     bool connect;
 };
 
+struct JackClientActivityStatus {
+    bool ok;
+    bool changed;
+    bool active;
+    bool any_active;
+    bool inactive;
+    bool amp_active;
+    bool fx_active;
+    bool amp_present;
+    bool fx_present;
+    bool single_client;
+    unsigned long long generation;
+    unsigned long long transition_usecs;
+    unsigned long long amp_callback_count;
+    unsigned long long fx_callback_count;
+    unsigned long long amp_callbacks_since_activate;
+    unsigned long long fx_callbacks_since_activate;
+    int amp_ramp_mode;
+    int fx_ramp_mode;
+    bool engine_ready;
+    int amp_rc;
+    int fx_rc;
+    int rollback_amp_rc;
+    int rollback_fx_rc;
+    bool rollback_incomplete;
+    std::string last_error;
+};
+
 class PortConnRing {
 private:
     jack_ringbuffer_t *ring;
@@ -170,8 +198,8 @@ class GxJack: public sigc::trackable {
     GxRtCheck           rtc;
     bool                IS_RT;
     gx_engine::GxEngine& engine;
-    bool                jack_is_down;
-    bool                jack_is_exit;
+    std::atomic<bool>   jack_is_down;
+    std::atomic<bool>   jack_is_exit;
     bool                bypass_insert;
     MidiCC              mmessage;
     static int          gx_jack_srate_callback(jack_nframes_t, void* arg);
@@ -209,6 +237,20 @@ class GxJack: public sigc::trackable {
     std::atomic<jack_nframes_t> jack_sr;   // jack sample rate
     std::atomic<jack_nframes_t> jack_bs;   // jack buffer size
     float               *insert_buffer;
+    mutable std::mutex  client_activity_mutex;
+    std::atomic<bool>   jack_shutdown_seen;
+    std::atomic<bool>   amp_client_active;
+    std::atomic<bool>   fx_client_active;
+    unsigned long long  client_activity_generation;
+    unsigned long long  client_activity_transition_usecs;
+    unsigned long long  amp_callback_count_at_activate;
+    unsigned long long  fx_callback_count_at_activate;
+    int                 client_activity_amp_rc;
+    int                 client_activity_fx_rc;
+    int                 client_activity_rollback_amp_rc;
+    int                 client_activity_rollback_fx_rc;
+    bool                client_activity_rollback_incomplete;
+    std::string         client_activity_last_error;
     std::atomic<unsigned long long> xrun_count;
     std::atomic<unsigned int> last_xrun_usecs;
     unsigned long long  reported_xrun_count;
@@ -243,6 +285,9 @@ class GxJack: public sigc::trackable {
     void                gx_jack_init_port_connection(const gx_system::CmdlineOptions& opt);
     void                gx_jack_callbacks();
     void                gx_jack_cleanup();
+    JackClientActivityStatus client_activity_status_unlocked(
+        bool ok, bool changed) const;
+    JackClientActivityStatus set_client_activity(bool active);
     inline void         check_overload();
     void                process_midi_cc(void *buf, jack_nframes_t nframes);
 
@@ -266,8 +311,12 @@ public:
     GxJack(gx_engine::GxEngine& engine_);
     ~GxJack();
 
-    void                set_jack_down(bool v) { jack_is_down = v; }
-    void                set_jack_exit(bool v) { jack_is_exit = v; }
+    void                set_jack_down(bool v) {
+        jack_is_down.store(v, std::memory_order_release);
+    }
+    void                set_jack_exit(bool v) {
+        jack_is_exit.store(v, std::memory_order_release);
+    }
 
     void                set_jack_insert(bool v) { bypass_insert = v;}
     bool                gx_jack_connection(bool connect, bool startserver,
@@ -279,6 +328,9 @@ public:
                                                  unsigned int& p99_usecs,
                                                  unsigned int& p999_usecs,
                                                  unsigned int& max_usecs) const;
+    JackClientActivityStatus jack_deactivate_clients();
+    JackClientActivityStatus jack_activate_clients();
+    JackClientActivityStatus get_jack_client_activity_status() const;
     void*               get_midi_buffer(jack_nframes_t nframes);
     bool                send_midi_cc(int cc_num, int pgm_num, int bgn, int num);
 
@@ -291,9 +343,13 @@ public:
     Glib::Dispatcher    session;
     Glib::Dispatcher    session_ins;
     Glib::Dispatcher    shutdown;
-    bool                is_jack_down() { return jack_is_down; }
+    bool                is_jack_down() const {
+        return jack_is_down.load(std::memory_order_acquire);
+    }
     Glib::Dispatcher    connection;
-    bool                is_jack_exit() { return jack_is_exit; }
+    bool                is_jack_exit() const {
+        return jack_is_exit.load(std::memory_order_acquire);
+    }
     sigc::signal<void>& signal_client_change() { return client_change; }
     sigc::signal<void,string,string,bool>& signal_connection_changed() { return connection_changed; }
     Glib::Dispatcher&   signal_portchange() { return connection_queue.portchange; }
