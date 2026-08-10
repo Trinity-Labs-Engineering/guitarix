@@ -32,6 +32,7 @@
 #include "RTNeural.h"
 #pragma GCC diagnostic pop
 
+#include <memory>
 #include <vector>
 
 namespace gx_jack { class GxJack; }
@@ -69,6 +70,13 @@ public:
 
 class NeuralAmp: public PluginDef {
 private:
+    struct CachedNamModel {
+        Glib::ustring filename;
+        float size;
+        int sample_rate;
+        std::unique_ptr<nam::DSP> model;
+    };
+
     nam::DSP* model;
     ParamMap& param;
     gx_resample::FixedRateResampler smp;
@@ -80,6 +88,7 @@ private:
     float fVslider0;
     float fVslider1;
     float fVslider2;
+    float current_model_size;
     double fRec0[2];
     double fRec1[2];
     int need_resample;
@@ -91,6 +100,7 @@ private:
     Glib::ustring current_file;
     Glib::ustring load_path;
     std::string idstring;
+    std::vector<CachedNamModel> model_cache;
 
     void clear_state_f();
     int load_ui_f(const UiBuilder& b, int form);
@@ -100,6 +110,9 @@ private:
     void load_nam_file_impl();
     void set_nam_size();
     void create_nam_filelist();
+    std::unique_ptr<nam::DSP> take_cached_model(
+        const Glib::ustring& filename, float size, int* sample_rate);
+    void cache_current_model();
     int register_par(const ParamReg& reg);
 
     static void clear_state_f_static(PluginDef*);

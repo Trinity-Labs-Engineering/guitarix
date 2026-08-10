@@ -53,6 +53,7 @@ namespace {
 
 constexpr int kMaxNamHostBlockFrames = 8192;
 constexpr int kNamSelectorSlots = 128;
+constexpr std::size_t kNamModelCacheEntries = 8;
 constexpr float kDefaultNamSlimmableSize = 0.49f;
 constexpr const char* kNamNone = "None";
 
@@ -342,11 +343,59 @@ NeuralAmp::NeuralAmp(ParamMap& param_, std::string id_, sigc::slot<void> sync_)
     loudness = 0.0;
     filelist = 0.0;
     fVslider2 = kDefaultNamSlimmableSize;
+    current_model_size = fVslider2;
     gx_system::atomic_set(&ready, 0);
  }
 
 NeuralAmp::~NeuralAmp() {
     delete model;
+}
+
+std::unique_ptr<nam::DSP> NeuralAmp::take_cached_model(
+    const Glib::ustring& filename, float size, int* sample_rate) {
+    const auto cached = std::find_if(
+        model_cache.begin(), model_cache.end(),
+        [&](const CachedNamModel& entry) {
+            return entry.filename == filename &&
+                std::fabs(entry.size - size) < 0.0001f;
+        });
+    if (cached == model_cache.end()) {
+        return nullptr;
+    }
+
+    std::unique_ptr<nam::DSP> result = std::move(cached->model);
+    if (sample_rate) {
+        *sample_rate = cached->sample_rate;
+    }
+    model_cache.erase(cached);
+    return result;
+}
+
+void NeuralAmp::cache_current_model() {
+    if (!model || current_file.empty() || current_file == kNamNone) {
+        delete model;
+        model = nullptr;
+        return;
+    }
+
+    model_cache.erase(
+        std::remove_if(
+            model_cache.begin(), model_cache.end(),
+            [&](const CachedNamModel& entry) {
+                return entry.filename == current_file &&
+                    std::fabs(entry.size - current_model_size) < 0.0001f;
+            }),
+        model_cache.end());
+    if (model_cache.size() >= kNamModelCacheEntries) {
+        model_cache.erase(model_cache.begin());
+    }
+    model_cache.push_back(CachedNamModel{
+        current_file,
+        current_model_size,
+        mSampleRate,
+        std::unique_ptr<nam::DSP>(model),
+    });
+    model = nullptr;
 }
 
 inline void NeuralAmp::clear_state_f()
@@ -458,17 +507,44 @@ void NeuralAmp::load_nam_file() {
         std::unique_ptr<nam::DSP> next_model;
         int next_sample_rate = 0;
         if (has_selection) {
-            next_model = load_nam_model(selected_file, fSampleRate,
-                                        &next_sample_rate, "Neural Amp Modeler",
-                                        fVslider2, "model");
+            next_model = take_cached_model(
+                selected_file, fVslider2, &next_sample_rate);
+            if (next_model) {
+                try {
+                    // Cached models retain their compiled graph. Reset their
+                    // signal history without repeating JSON parsing, graph
+                    // construction, or the expensive full prewarm.
+                    next_model->Reset(
+                        next_sample_rate,
+                        max_nam_model_block_frames(fSampleRate, next_sample_rate));
+                    gx_print_info(
+                        "Neural Amp Modeler",
+                        "reused cached " + std::string(selected_file));
+                } catch (const std::exception& error) {
+                    gx_print_info(
+                        "Neural Amp Modeler",
+                        "failed to reset cached " + std::string(selected_file) +
+                        ": " + error.what());
+                    next_model.reset();
+                } catch (...) {
+                    gx_print_info(
+                        "Neural Amp Modeler",
+                        "failed to reset cached " + std::string(selected_file));
+                    next_model.reset();
+                }
+            }
+            if (!next_model) {
+                next_model = load_nam_model(selected_file, fSampleRate,
+                                            &next_sample_rate, "Neural Amp Modeler",
+                                            fVslider2, "model");
+            }
         }
 
         ramp.mode = ramp.DOWN;
         gx_system::atomic_set(&ready, 0);
         sync();
 
-        delete model;
-        model = nullptr;
+        cache_current_model();
         need_resample = 0;
         loudness = 0.0;
         load_file = kNamNone;
@@ -482,6 +558,7 @@ void NeuralAmp::load_nam_file() {
             need_resample = setup_nam_resampler(smp, fSampleRate, mSampleRate);
             load_file = selected_file;
             current_file = selected_file;
+            current_model_size = fVslider2;
             if (model->HasLoudness()) loudness = model->GetLoudness();
             gx_print_info("Neural Amp Modeler", "loaded " + std::string(selected_file));
         }
@@ -503,6 +580,7 @@ void NeuralAmp::set_nam_size() {
 
     set_nam_slimmable_size(model, fVslider2, fSampleRate, mSampleRate,
                            "Neural Amp Modeler", current_file, "model");
+    current_model_size = fVslider2;
     gx_system::atomic_set(&ready, model ? 1 : 0);
     ramp.mode = model ? ramp.UP : ramp.OFF;
 }
