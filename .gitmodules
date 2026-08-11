@@ -4,6 +4,7 @@
 [submodule "trunk/src/NAM/NeuralAmpModelerCore"]
 	path = trunk/src/NAM/NeuralAmpModelerCore
 	url = https://github.com/Trinity-Labs-Engineering/NeuralAmpModelerCore.git
+	branch = trinity-a2-support
 [submodule "trunk/src/RTNeural/RTNeural"]
 	path = trunk/src/RTNeural/RTNeural
 	url = https://github.com/jatinchowdhury18/RTNeural.git
