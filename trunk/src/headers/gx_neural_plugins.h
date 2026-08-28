@@ -89,6 +89,8 @@ private:
     float fVslider1;
     float fVslider2;
     float current_model_size;
+    float nam_input_trim_db;
+    float nam_output_trim_db;
     double fRec0[2];
     double fRec1[2];
     int need_resample;
@@ -171,6 +173,10 @@ private:
     int need_bresample;
     float loudnessa;
     float loudnessb;
+    float nam_input_trim_dba;
+    float nam_output_trim_dba;
+    float nam_input_trim_dbb;
+    float nam_output_trim_dbb;
     bool is_inited;
     float afilelist;
     float bfilelist;

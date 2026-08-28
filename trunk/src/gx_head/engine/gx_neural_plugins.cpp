@@ -26,6 +26,7 @@
 
 #include "engine.h"
 #include "gx_faust_support.h"
+#include "calibration.h"
 #include "container.h"
 #include "lstm.h"
 #include "model_config.h"
@@ -33,11 +34,15 @@
 #include "wavenet/model.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <iomanip>
 #include <memory>
+#include <sstream>
 
 namespace gx_engine {
 
@@ -56,6 +61,110 @@ constexpr int kNamSelectorSlots = 128;
 constexpr std::size_t kNamModelCacheEntries = 8;
 constexpr float kDefaultNamSlimmableSize = 0.49f;
 constexpr const char* kNamNone = "None";
+constexpr double kDefaultNamReferenceLevelDbu = 12.0;
+constexpr double kMaxNamAutomaticTrimDb = 60.0;
+
+struct NamReferenceLevel {
+    double dbu = kDefaultNamReferenceLevelDbu;
+    const char* source = "default";
+    bool invalid_override = false;
+};
+
+const NamReferenceLevel& nam_reference_level() {
+    static const NamReferenceLevel reference = [] {
+        NamReferenceLevel result;
+        const char* raw = std::getenv("GUITARIX_NAM_REFERENCE_LEVEL_DBU");
+        if (raw && *raw) {
+            result.source = "GUITARIX_NAM_REFERENCE_LEVEL_DBU";
+        } else {
+            raw = std::getenv("ARTEMIS_NAM_REFERENCE_LEVEL_DBU");
+            if (raw && *raw) {
+                result.source = "ARTEMIS_NAM_REFERENCE_LEVEL_DBU";
+            }
+        }
+        if (!raw || !*raw) {
+            return result;
+        }
+
+        errno = 0;
+        char* end = nullptr;
+        const double parsed = std::strtod(raw, &end);
+        if (errno != 0 || end == raw || *end != '\0' || !std::isfinite(parsed) ||
+            parsed < -60.0 || parsed > 60.0) {
+            result.dbu = kDefaultNamReferenceLevelDbu;
+            result.invalid_override = true;
+            return result;
+        }
+        result.dbu = parsed;
+        return result;
+    }();
+    return reference;
+}
+
+void update_nam_level_calibration(nam::DSP* model,
+                                  float* input_trim_db,
+                                  float* output_trim_db,
+                                  float* loudness,
+                                  const char* module_name,
+                                  const Glib::ustring& filename,
+                                  const char* slot_name) {
+    *input_trim_db = 0.0f;
+    *output_trim_db = 0.0f;
+    if (loudness) {
+        *loudness = 0.0f;
+    }
+    if (!model) {
+        return;
+    }
+
+    if (loudness && model->HasLoudness() && std::isfinite(model->GetLoudness())) {
+        *loudness = static_cast<float>(model->GetLoudness());
+    }
+
+    const NamReferenceLevel& reference = nam_reference_level();
+    const nam::LevelCalibration calibration =
+        nam::GetLevelCalibration(*model, reference.dbu);
+    const bool input_trim_rejected = calibration.input_trim_db.has_value() &&
+        std::abs(calibration.input_trim_db.value()) > kMaxNamAutomaticTrimDb;
+    const bool output_trim_rejected = calibration.output_trim_db.has_value() &&
+        std::abs(calibration.output_trim_db.value()) > kMaxNamAutomaticTrimDb;
+    if (calibration.input_trim_db.has_value() && !input_trim_rejected) {
+        *input_trim_db = static_cast<float>(calibration.input_trim_db.value());
+    }
+    if (calibration.output_trim_db.has_value() && !output_trim_rejected) {
+        *output_trim_db = static_cast<float>(calibration.output_trim_db.value());
+    }
+
+    std::ostringstream message;
+    message << "NAM calibration " << slot_name << " for " << std::string(filename)
+            << ": reference " << std::showpos << std::fixed << std::setprecision(2)
+            << reference.dbu << " dBu";
+    if (reference.invalid_override) {
+        message << " (invalid " << reference.source << "; using default)";
+    } else {
+        message << " (" << reference.source << ")";
+    }
+
+    if (input_trim_rejected) {
+        message << "; input " << calibration.model_input_level_dbu.value()
+                << " dBu => trim outside +/-60.00 dB; ignored";
+    } else if (calibration.input_trim_db.has_value()) {
+        message << "; input " << calibration.model_input_level_dbu.value()
+                << " dBu => " << calibration.input_trim_db.value() << " dB";
+    } else {
+        message << "; input metadata absent => +0.00 dB";
+    }
+    if (output_trim_rejected) {
+        message << "; output " << calibration.model_output_level_dbu.value()
+                << " dBu => trim outside +/-60.00 dB; ignored";
+    } else if (calibration.output_trim_db.has_value()) {
+        message << "; output " << calibration.model_output_level_dbu.value()
+                << " dBu => " << calibration.output_trim_db.value() << " dB";
+    } else {
+        message << "; output metadata absent => +0.00 dB";
+    }
+    gx_print_info(module_name, message.str());
+}
 
 void ensure_nam_builtin_parsers_registered() {
     static const bool registered = [] {
@@ -149,7 +258,8 @@ std::unique_ptr<nam::DSP> load_nam_model(const Glib::ustring& filename,
     try {
         ensure_nam_builtin_parsers_registered();
         std::unique_ptr<nam::DSP> next =
-            nam::get_dsp(std::filesystem::path{std::string(filename)});
+            nam::get_dsp(std::filesystem::path{std::string(filename)},
+                         nam::PrewarmMode::SKIP);
         if (!next) {
             gx_print_info(module_name, "fail to load " + std::string(filename));
             return nullptr;
@@ -344,6 +454,8 @@ NeuralAmp::NeuralAmp(ParamMap& param_, std::string id_, sigc::slot<void> sync_)
     filelist = 0.0;
     fVslider2 = kDefaultNamSlimmableSize;
     current_model_size = fVslider2;
+    nam_input_trim_db = 0.0f;
+    nam_output_trim_db = 0.0f;
     gx_system::atomic_set(&ready, 0);
  }
 
@@ -430,8 +542,10 @@ void always_inline NeuralAmp::compute(int count, float *input0, float *output0)
     if (output0 != input0)
         memcpy(output0, input0, count*sizeof(float));
     if (!model || !gx_system::atomic_get(ready)) return;
-    double fSlow0 = 0.0010000000000000009 * std::pow(1e+01, 0.05 * double(fVslider0));
-    double fSlow1 = 0.0010000000000000009 * std::pow(1e+01, 0.05 * double(fVslider1));
+    double fSlow0 = 0.0010000000000000009 *
+        std::pow(1e+01, 0.05 * double(fVslider0 + nam_input_trim_db));
+    double fSlow1 = 0.0010000000000000009 *
+        std::pow(1e+01, 0.05 * double(fVslider1 + nam_output_trim_db));
     for (int i0 = 0; i0 < count; i0 = i0 + 1) {
         fRec0[0] = fSlow0 + 0.999 * fRec0[1];
         output0[i0] = float(double(output0[i0]) * fRec0[0]);
@@ -547,6 +661,8 @@ void NeuralAmp::load_nam_file() {
         cache_current_model();
         need_resample = 0;
         loudness = 0.0;
+        nam_input_trim_db = 0.0f;
+        nam_output_trim_db = 0.0f;
         load_file = kNamNone;
         current_file.clear();
         clear_state_f();
@@ -559,7 +675,9 @@ void NeuralAmp::load_nam_file() {
             load_file = selected_file;
             current_file = selected_file;
             current_model_size = fVslider2;
-            if (model->HasLoudness()) loudness = model->GetLoudness();
+            update_nam_level_calibration(
+                model, &nam_input_trim_db, &nam_output_trim_db, &loudness,
+                "Neural Amp Modeler", selected_file, "model");
             gx_print_info("Neural Amp Modeler", "loaded " + std::string(selected_file));
         }
         gx_system::atomic_set(&ready, model ? 1 : 0);
@@ -578,9 +696,13 @@ void NeuralAmp::set_nam_size() {
     gx_system::atomic_set(&ready, 0);
     sync();
 
-    set_nam_slimmable_size(model, fVslider2, fSampleRate, mSampleRate,
-                           "Neural Amp Modeler", current_file, "model");
-    current_model_size = fVslider2;
+    if (set_nam_slimmable_size(model, fVslider2, fSampleRate, mSampleRate,
+                               "Neural Amp Modeler", current_file, "model")) {
+        current_model_size = fVslider2;
+        update_nam_level_calibration(
+            model, &nam_input_trim_db, &nam_output_trim_db, &loudness,
+            "Neural Amp Modeler", current_file, "model");
+    }
     gx_system::atomic_set(&ready, model ? 1 : 0);
     ramp.mode = model ? ramp.UP : ramp.OFF;
 }
@@ -677,6 +799,10 @@ NeuralAmpMulti::NeuralAmpMulti(ParamMap& param_, std::string id_, ParallelThread
     plugin = this;
     loudnessa = 0.0;
     loudnessb = 0.0;
+    nam_input_trim_dba = 0.0f;
+    nam_output_trim_dba = 0.0f;
+    nam_input_trim_dbb = 0.0f;
+    nam_output_trim_dbb = 0.0f;
     need_aresample = 0;
     need_bresample = 0;
     is_inited = false;
@@ -763,7 +889,8 @@ void always_inline NeuralAmpMulti::processDelay(int count, float *buf)
 
 void always_inline NeuralAmpMulti::processModelA(int count, float *bufa) {
     if (!modela ) return;
-    double fSlow0 = 0.0010000000000000009 * std::pow(1e+01, 0.05 * double(fVslider0));
+    double fSlow0 = 0.0010000000000000009 *
+        std::pow(1e+01, 0.05 * double(fVslider0 + nam_input_trim_dba));
     for (int i0 = 0; i0 < count; i0 = i0 + 1) {
         fRec0[0] = fSlow0 + 0.999 * fRec0[1];
         bufa[i0] = float(double(bufa[i0]) * fRec0[0]);
@@ -802,6 +929,11 @@ void always_inline NeuralAmpMulti::processModelA(int count, float *bufa) {
         } else {
             process_nam_mono(modela, bufa, bufa, count);
         }
+        const double calibration_gain =
+            std::pow(1e+01, 0.05 * double(nam_output_trim_dba));
+        for (int i0 = 0; i0 < count; ++i0) {
+            bufa[i0] = float(double(bufa[i0]) * calibration_gain);
+        }
         if (rampA.mode == rampA.DOWN || rampA.mode == rampA.DEAD) rampA.rampDown(count, bufa);
         else if (rampA.mode == rampA.UP) rampA.rampUp(count, bufa);
     }
@@ -809,7 +941,8 @@ void always_inline NeuralAmpMulti::processModelA(int count, float *bufa) {
 
 void always_inline NeuralAmpMulti::processModelB() {
     if (!modelb) return;
-    double fSlow01 = 0.0010000000000000009 * std::pow(1e+01, 0.05 * double(fVslider01));
+    double fSlow01 = 0.0010000000000000009 *
+        std::pow(1e+01, 0.05 * double(fVslider01 + nam_input_trim_dbb));
     for (int i0 = 0; i0 < nframes; i0 = i0 + 1) {
         fRec01[0] = fSlow01 + 0.999 * fRec01[1];
         buf[i0] = float(double(buf[i0]) * fRec01[0]);
@@ -847,6 +980,11 @@ void always_inline NeuralAmpMulti::processModelB() {
             }
         } else {
             process_nam_mono(modelb, buf, buf, nframes);
+        }
+        const double calibration_gain =
+            std::pow(1e+01, 0.05 * double(nam_output_trim_dbb));
+        for (int i0 = 0; i0 < nframes; ++i0) {
+            buf[i0] = float(double(buf[i0]) * calibration_gain);
         }
         if (rampB.mode == rampB.DOWN || rampB.mode == rampB.DEAD) rampB.rampDown(nframes, buf);
         else if (rampB.mode == rampB.UP) rampB.rampUp(nframes, buf);
@@ -983,6 +1121,8 @@ void NeuralAmpMulti::load_nam_afile() {
         modela = nullptr;
         need_aresample = 0;
         loudnessa = 0.0;
+        nam_input_trim_dba = 0.0f;
+        nam_output_trim_dba = 0.0f;
         load_afile = kNamNone;
         current_afile.clear();
         clear_state_f();
@@ -994,7 +1134,9 @@ void NeuralAmpMulti::load_nam_afile() {
             need_aresample = setup_nam_resampler(smpa, fSampleRate, maSampleRate);
             load_afile = selected_file;
             current_afile = selected_file;
-            if (modela->HasLoudness()) loudnessa = modela->GetLoudness();
+            update_nam_level_calibration(
+                modela, &nam_input_trim_dba, &nam_output_trim_dba, &loudnessa,
+                "Neural Multi Amp Modeler", selected_file, "A");
             gx_print_info("Neural Multi Amp Modeler", "loaded A " + std::string(selected_file));
         }
         gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
@@ -1038,6 +1180,8 @@ void NeuralAmpMulti::load_nam_bfile() {
         modelb = nullptr;
         need_bresample = 0;
         loudnessb = 0.0;
+        nam_input_trim_dbb = 0.0f;
+        nam_output_trim_dbb = 0.0f;
         load_bfile = kNamNone;
         current_bfile.clear();
         clear_state_f();
@@ -1049,7 +1193,9 @@ void NeuralAmpMulti::load_nam_bfile() {
             need_bresample = setup_nam_resampler(smpb, fSampleRate, mbSampleRate);
             load_bfile = selected_file;
             current_bfile = selected_file;
-            if (modelb->HasLoudness()) loudnessb = modelb->GetLoudness();
+            update_nam_level_calibration(
+                modelb, &nam_input_trim_dbb, &nam_output_trim_dbb, &loudnessb,
+                "Neural Multi Amp Modeler", selected_file, "B");
             gx_print_info("Neural Multi Amp Modeler", "loaded B " + std::string(selected_file));
         }
         gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
@@ -1068,8 +1214,12 @@ void NeuralAmpMulti::set_nam_asize() {
     gx_system::atomic_set(&ready, 0);
     sync();
 
-    set_nam_slimmable_size(modela, fVslider3, fSampleRate, maSampleRate,
-                           "Neural Multi Amp Modeler", current_afile, "A");
+    if (set_nam_slimmable_size(modela, fVslider3, fSampleRate, maSampleRate,
+                               "Neural Multi Amp Modeler", current_afile, "A")) {
+        update_nam_level_calibration(
+            modela, &nam_input_trim_dba, &nam_output_trim_dba, &loudnessa,
+            "Neural Multi Amp Modeler", current_afile, "A");
+    }
     gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
     rampA.mode = modela ? rampA.UP : rampA.OFF;
 }
@@ -1085,8 +1235,12 @@ void NeuralAmpMulti::set_nam_bsize() {
     gx_system::atomic_set(&ready, 0);
     sync();
 
-    set_nam_slimmable_size(modelb, fVslider4, fSampleRate, mbSampleRate,
-                           "Neural Multi Amp Modeler", current_bfile, "B");
+    if (set_nam_slimmable_size(modelb, fVslider4, fSampleRate, mbSampleRate,
+                               "Neural Multi Amp Modeler", current_bfile, "B")) {
+        update_nam_level_calibration(
+            modelb, &nam_input_trim_dbb, &nam_output_trim_dbb, &loudnessb,
+            "Neural Multi Amp Modeler", current_bfile, "B");
+    }
     gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
     rampB.mode = modelb ? rampB.UP : rampB.OFF;
 }

@@ -16,6 +16,7 @@ def build(bld):
     # NAM Core v0.5 splits the WaveNet implementation into subdirectory sources.
     src = [
         './NeuralAmpModelerCore/NAM/activations.cpp',
+        './NeuralAmpModelerCore/NAM/calibration.cpp',
         './NeuralAmpModelerCore/NAM/container.cpp',
         './NeuralAmpModelerCore/NAM/conv1d.cpp',
         './NeuralAmpModelerCore/NAM/convnet.cpp',
