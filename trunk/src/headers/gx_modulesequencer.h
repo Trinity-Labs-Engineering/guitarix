@@ -48,6 +48,13 @@ public:
 private:
     sem_t sync_sem; // RT
     list<Plugin*> to_release;
+protected:
+    // Modules which entered this processing chain since the previous commit.
+    // Only these modules need activation/state initialisation. Keeping this
+    // separate from `modules` prevents an unrelated rack edit from resetting
+    // every resident DSP module.
+    list<Plugin*> to_initialize;
+private:
     int ramp_value; // RT
     int ramp_mode; // RT  should be RampMode, but gcc 4.5 doesn't accept it for g_atomic_int_compare_and_exchange
     volatile bool stopped;
@@ -85,6 +92,7 @@ public:
 #ifdef GUITARIX_AS_PLUGIN
     void process_ramp(int count);
 #endif
+    bool wait_ramp_up_finished();
     void wait_ramp_down_finished();
     void start_ramp_up();
     void start_ramp_down();
@@ -192,22 +200,29 @@ void ThreadSafeChainPointer<F>::setsize(int n)
 
 template <class F>
 void ThreadSafeChainPointer<F>::commit(bool clear, ParamMap& pmap) {
+    (void)clear;
+    (void)pmap;
     setsize(modules.size()+1);  // leave one slot for 0 marker
     int active_counter = 0;
     for (list<Plugin*>::const_iterator p = modules.begin(); p != modules.end(); p++) {
 	PluginDef* pd = (*p)->get_pdef();
-	if (pd->activate_plugin) {
-	    if (pd->activate_plugin(true, pd) != 0) {
-		(*p)->set_on_off(false);
-		continue;
+	bool initialize = std::find(to_initialize.begin(), to_initialize.end(), *p)
+	                  != to_initialize.end();
+	if (initialize) {
+	    if (pd->activate_plugin) {
+		if (pd->activate_plugin(true, pd) != 0) {
+		    (*p)->set_on_off(false);
+		    continue;
+		}
+	    } else if (pd->clear_state) {
+		pd->clear_state(pd);
 	    }
-	} else if (pd->clear_state && clear) {
-	    pd->clear_state(pd);
 	}
 	F f = get_audio(pd);
 	assert(f.func);
 	current_pointer[active_counter++] = f;
     }
+    to_initialize.clear();
     current_pointer[active_counter].func = 0;
     gx_system::atomic_set(&processing_pointer, current_pointer);
     set_latch();
@@ -270,6 +285,7 @@ public:
     ~EngineControl();
     void init(unsigned int samplerate, unsigned int buffersize,
 	      int policy, int priority);
+    virtual bool wait_ramp_up_finished() = 0;
     virtual void wait_ramp_down_finished() = 0;
     virtual bool update_module_lists() = 0;
     virtual void start_ramp_up() = 0;
@@ -340,6 +356,7 @@ public:
     virtual void set_samplerate(unsigned int samplerate);
     virtual void start_ramp_up();
     virtual void start_ramp_down();
+    virtual bool wait_ramp_up_finished();
     virtual void wait_ramp_down_finished();
     void ramp_down() {
 	start_ramp_down();
@@ -351,6 +368,10 @@ public:
     }
     bool prepare_module_lists();
     void commit_module_lists();
+    // Commit a rack change scheduled by parameter signals immediately. This
+    // lets acknowledged control transactions reply after their topology has
+    // been published instead of while it is still in the GLib idle queue.
+    bool commit_pending_module_lists();
     virtual void set_rack_changed();
     virtual bool update_module_lists();
     bool check_module_lists();

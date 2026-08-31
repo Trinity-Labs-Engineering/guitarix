@@ -35,6 +35,7 @@ namespace gx_engine {
 ProcessingChainBase::ProcessingChainBase():
     sync_sem(),
     to_release(),
+    to_initialize(),
     ramp_value(0),
     ramp_mode(ramp_mode_down_dead),
     stopped(true),
@@ -117,6 +118,20 @@ void ProcessingChainBase::wait_ramp_down_finished() {
 	    break;
 	}
     }
+}
+
+bool ProcessingChainBase::wait_ramp_up_finished() {
+    if (stopped) {
+	return true;
+    }
+    RampMode rm = get_ramp_mode();
+    while (rm == ramp_mode_up_dead || rm == ramp_mode_up) {
+	if (!wait_rt_finished()) {
+	    return false;
+	}
+	rm = get_ramp_mode();
+    }
+    return true;
 }
 
 void ProcessingChainBase::start_ramp_up() {
@@ -256,9 +271,13 @@ bool ProcessingChainBase::set_plugin_list(const list<Plugin*> &p) {
 	release();
     }
     typedef set<const char*, stringcomp> pchar_set;
+    set<Plugin*> old_modules(modules.begin(), modules.end());
     pchar_set new_ids;
     for (list<Plugin*>::const_iterator i = p.begin(); i != p.end(); ++i) {
 	new_ids.insert((*i)->get_pdef()->id);
+	if (old_modules.find(*i) == old_modules.end()) {
+	    to_initialize.push_back(*i);
+	}
     }
     for (list<Plugin*>::const_iterator i = modules.begin(); i != modules.end(); ++i) {
 	if (!(*i)->get_pdef()->activate_plugin) {
@@ -660,6 +679,12 @@ void ModuleSequencer::wait_ramp_down_finished() {
     stereo_chain.wait_ramp_down_finished();
 }
 
+bool ModuleSequencer::wait_ramp_up_finished() {
+    bool mono_finished = mono_chain.wait_ramp_up_finished();
+    bool stereo_finished = stereo_chain.wait_ramp_up_finished();
+    return mono_finished && stereo_finished;
+}
+
 bool ModuleSequencer::update_module_lists() {
     if (!get_buffersize() || !get_samplerate()) {
 	return false;
@@ -701,6 +726,29 @@ bool ModuleSequencer::check_module_lists() {
         return mono_chain.check_release() || stereo_chain.check_release();
     }
     return false;
+}
+
+bool ModuleSequencer::commit_pending_module_lists() {
+    if (!get_rack_changed()) {
+	return false;
+    }
+
+    // Keep the idle connection visible while selectors are evaluated. Their
+    // on/off signals then coalesce into this transaction instead of queuing a
+    // redundant second idle callback.
+    bool changed = update_module_lists();
+    clear_rack_changed();
+
+    // Dynamic plugins may only be deactivated after the RT thread has observed
+    // the replacement chain. release() performs that latch wait, so an RPC
+    // acknowledgement cannot race deactivation of an old module.
+    if (mono_chain.check_release()) {
+	mono_chain.release();
+    }
+    if (stereo_chain.check_release()) {
+	stereo_chain.release();
+    }
+    return changed;
 }
 
 void ModuleSequencer::set_rack_changed() {

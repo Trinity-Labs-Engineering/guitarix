@@ -20,6 +20,7 @@ enum jsonrpc_method {
 	RPNM_set_jack_insert,
 	RPCM_get,
 	RPNM_set,
+	RPCM_set_scene,
 	RPCM_parameterlist,
 	RPCM_get_parameter,
 	RPCM_get_parameter_value,

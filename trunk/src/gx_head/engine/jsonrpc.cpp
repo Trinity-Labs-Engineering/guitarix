@@ -253,7 +253,7 @@ public:
  */
 
 const static int InterfaceVersionMajor = 1;
-const static int InterfaceVersionMinor = 1;
+const static int InterfaceVersionMinor = 2;
 
 CmdConnection::CmdConnection(GxService& serv_, const Glib::RefPtr<Gio::SocketConnection>& connection_)
     : serv(serv_),
@@ -488,6 +488,86 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         apply_parameter_set(params);
         jw.write_lit("true");
         break;
+    }
+
+    FUNCTION(set_scene) {
+        if (params.size() & 1) {
+            throw RpcError(-32602, "Invalid param -- array length must be even");
+        }
+
+        // Unlike legacy `set`, a scene transaction rejects unknown ids and
+        // validates every value before changing the first parameter. This
+        // catches malformed scene payloads without leaving a partially applied
+        // rack merely because a later pair had the wrong type.
+        gx_engine::ParamMap& param = serv.settings.get_param();
+        for (unsigned int i = 0; i < params.size(); i += 2) {
+            const Glib::ustring& attr = params[i]->getString();
+            if (!param.hasId(attr)) {
+                throw RpcError(
+                    -32602,
+                    Glib::ustring::compose("Invalid param -- variable %1 unknown", attr));
+            }
+            gx_engine::Parameter& p = param[attr];
+            JsonValue *v = params[i+1];
+            if (p.isFloat()) {
+                if (p.getControlType() == gx_engine::Parameter::Enum &&
+                    dynamic_cast<JsonString*>(v)) {
+                    if (p.getFloat().idx_from_id(v->getString()) < 0) {
+                        throw RpcError(
+                            -32602,
+                            Glib::ustring::compose(
+                                "Invalid param -- enum value %1 unknown for %2",
+                                v->getString(), attr));
+                    }
+                } else {
+                    v->getFloat();
+                }
+            } else if (p.isInt()) {
+                if (p.getControlType() == gx_engine::Parameter::Enum &&
+                    dynamic_cast<JsonString*>(v)) {
+                    if (p.getInt().idx_from_id(v->getString()) < 0) {
+                        throw RpcError(
+                            -32602,
+                            Glib::ustring::compose(
+                                "Invalid param -- enum value %1 unknown for %2",
+                                v->getString(), attr));
+                    }
+                } else {
+                    v->getInt();
+                }
+            } else if (p.isBool()) {
+                v->getInt();
+            } else if (p.isFile() || p.isString()) {
+                v->getString();
+            } else if (dynamic_cast<gx_engine::JConvParameter*>(&p) != 0) {
+                gx_engine::GxJConvSettings s;
+                gx_system::JsonSubParser jps = v->getSubParser();
+                s.readJSON(jps);
+            } else if (dynamic_cast<gx_engine::SeqParameter*>(&p) != 0) {
+                gx_engine::GxSeqSettings s;
+                gx_system::JsonSubParser jps = v->getSubParser();
+                s.readJSON(jps);
+            } else {
+                throw RpcError(-32602, "Invalid param -- unknown variable type");
+            }
+        }
+
+        apply_parameter_set(params);
+        bool topology_changed =
+            serv.jack.get_engine().commit_pending_module_lists();
+        bool chain_settled = !topology_changed ||
+            serv.jack.get_engine().wait_ramp_up_finished();
+
+        // The response is written only after any pending module-list commit
+        // has published its processing-chain pointer and its chain ramp-up has
+        // finished. It does not claim that parameter smoothers or convolver
+        // warm-up have settled.
+        jw.begin_object();
+        jw.write_kv("applied", static_cast<int>(params.size() / 2));
+        jw.write_kv("topologyChanged", topology_changed);
+        jw.write_kv("chainCommitted", topology_changed);
+        jw.write_kv("chainSettled", chain_settled);
+        jw.end_object();
     }
 
     FUNCTION(get) {
@@ -1387,10 +1467,11 @@ bool CmdConnection::request(gx_system::JsonStringParser& jp, gx_system::JsonStri
         }
     }
     jp.next(gx_system::JsonParser::end_object);
-    // Keep this explicit fallback until the checked-in gperf output is next
-    // regenerated. It allows diagnostics to be consumed by Houston builds
-    // whose host does not carry the gperf build dependency.
+    // Keep these explicit fallbacks until the checked-in gperf output is next
+    // regenerated. They allow newer methods to be consumed by builds whose
+    // host does not carry the gperf build dependency.
     static const methodnames fallback_methods[] = {
+        { "set_scene", RPCM_set_scene },
         { "jack_performance_status", RPCM_jack_performance_status },
         { "jack_deactivate", RPCM_jack_deactivate },
         { "jack_activate", RPCM_jack_activate },

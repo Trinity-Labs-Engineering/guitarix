@@ -282,6 +282,7 @@ public:
     void start_ramp_down() { engine.start_ramp_down(); }
     void wait_ramp_down_finished() { engine.wait_ramp_down_finished(); }
     void start_ramp_up() {engine.start_ramp_up();}
+    bool wait_ramp_up_finished() { return engine.wait_ramp_up_finished(); }
 #endif
     virtual sigc::signal<void,Plugin*,PluginChange::pc>& signal_plugin_changed();
     virtual Plugin *pluginlist_lookup_plugin(const std::string& id) const;

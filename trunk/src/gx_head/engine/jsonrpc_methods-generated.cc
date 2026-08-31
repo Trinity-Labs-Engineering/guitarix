@@ -259,6 +259,7 @@ const jsonrpc_method_def jsonrpc_method_list[] = {
 	{ "set_jack_insert", false },
 	{ "get", true },
 	{ "set", false },
+	{ "set_scene", true },
 	{ "parameterlist", true },
 	{ "get_parameter", true },
 	{ "get_parameter_value", true },
