@@ -772,7 +772,7 @@ bool MonoEngine::prepare_module_lists() {
 	(*i)->set_module();
     }
     list<Plugin*> modules;
-    pluginlist.ordered_mono_list(modules, PGN_MODE_NORMAL);
+    pluginlist.ordered_processing_mono_list(modules, PGN_MODE_NORMAL);
     bool ret_mono = mono_chain.set_plugin_list(modules);
     if (ret_mono) {
 	mono_chain.print();
@@ -781,11 +781,16 @@ bool MonoEngine::prepare_module_lists() {
 }
 
 void MonoEngine::commit_module_lists() {
+    const bool rt_state_changed = pluginlist.rt_scene_state_changed();
     bool already_down = (mono_chain.get_ramp_mode() == ProcessingChainBase::ramp_mode_down_dead);
-    bool monoramp = mono_chain.next_commit_needs_ramp && !already_down;
+    bool monoramp = (mono_chain.next_commit_needs_ramp || rt_state_changed) && !already_down;
     if (monoramp) {
 	mono_chain.start_ramp_down();
 	mono_chain.wait_ramp_down_finished();
+    }
+    if (!pluginlist.commit_rt_scene_states()) {
+	gx_print_warning(
+	    "scene switch", "a resident plugin could not be reactivated; keeping it bypassed");
     }
     mono_chain.commit(mono_chain.next_commit_needs_ramp, pmap);
     if (monoramp) {
@@ -795,7 +800,9 @@ void MonoEngine::commit_module_lists() {
 }
 
 bool MonoEngine::update_module_lists() {
-    if (prepare_module_lists()) {
+    bool changed = prepare_module_lists();
+    changed = pluginlist.rt_scene_state_changed() || changed;
+    if (changed) {
 	commit_module_lists();
 	return true;
     }
@@ -1474,7 +1481,7 @@ bool StereoEngine::prepare_module_lists() {
 	(*i)->set_module();
     }
     list<Plugin*> modules;
-    pluginlist.ordered_stereo_list(modules, PGN_MODE_NORMAL);
+    pluginlist.ordered_processing_stereo_list(modules, PGN_MODE_NORMAL);
     bool ret_stereo = stereo_chain.set_plugin_list(modules);
     if (ret_stereo) {
 	stereo_chain.print();
@@ -1483,11 +1490,16 @@ bool StereoEngine::prepare_module_lists() {
 }
 
 void StereoEngine::commit_module_lists() {
+    const bool rt_state_changed = pluginlist.rt_scene_state_changed();
     bool already_down = (stereo_chain.get_ramp_mode() == ProcessingChainBase::ramp_mode_down_dead);
-    bool stereoramp = stereo_chain.next_commit_needs_ramp && !already_down;
+    bool stereoramp = (stereo_chain.next_commit_needs_ramp || rt_state_changed) && !already_down;
     if (stereoramp) {
 	stereo_chain.start_ramp_down();
 	stereo_chain.wait_ramp_down_finished();
+    }
+    if (!pluginlist.commit_rt_scene_states()) {
+	gx_print_warning(
+	    "scene switch", "a resident plugin could not be reactivated; keeping it bypassed");
     }
     stereo_chain.commit(stereo_chain.next_commit_needs_ramp, pmap);
     if (stereoramp) {
@@ -1497,7 +1509,9 @@ void StereoEngine::commit_module_lists() {
 }
 
 bool StereoEngine::update_module_lists() {
-    if (prepare_module_lists()) {
+    bool changed = prepare_module_lists();
+    changed = pluginlist.rt_scene_state_changed() || changed;
+    if (changed) {
 	commit_module_lists();
 	return true;
     }

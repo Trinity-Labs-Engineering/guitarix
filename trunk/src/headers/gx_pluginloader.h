@@ -40,6 +40,9 @@ enum {			       // additional flags for PluginDef (used internally)
     PGNI_UI_REG       = 0x40000, // Plugin registered in user interface
     PGNI_IS_LV2       = 0x80000, // Plugin is in LV2 format
     PGNI_IS_LADSPA    = 0x100000, // Plugin is in LADSPA format
+    // Resetting a resident NAM on re-entry would also rerun model prewarm
+    // synchronously. Preserve its already-warm wrapper/model state instead.
+    PGNI_RESIDENT_PRESERVE_STATE = 0x200000,
 };
 
 class Plugin {
@@ -48,10 +51,19 @@ private:
     BoolParameter *p_box_visible; ///< In Rack: UI Interface Box visible
     BoolParameter *p_plug_visible; ///< minibox visible (false: full box)
     BoolParameter *p_on_off;	   ///< Audio Processing
+    // Houston song scenes may keep a module in the immutable processing
+    // chain while its normal on/off control selects a transparent bypass.
+    // This flag is intentionally hidden, non-MIDI and non-preset state.
+    BoolParameter *p_scene_resident;
     IntParameter  *p_position; ///< Position in Rack / Audio Processing Chain
     IntParameter  *p_effect_post_pre; ///< pre/post amp position (post = 0)
+    // Lock-free snapshot of the on/off and scene-resident controls. Parameter
+    // callbacks only schedule a chain transaction; the snapshot is published
+    // while the old chain is ramped down (or externally muted).
+    int rt_scene_state;
     int pos_tmp;
     void set_midi_on_off_blocked(bool v);
+    int desired_rt_scene_state() const;
 public:
     PluginDef *get_pdef() { return pdef; }
     void set_pdef(PluginDef *p) { pdef = p; }
@@ -62,16 +74,37 @@ public:
     bool get_box_visible() const { return p_box_visible && p_box_visible->get_value(); }
     bool get_plug_visible() const { return p_plug_visible && p_plug_visible->get_value(); }
     bool get_on_off() const { return p_on_off->get_value(); }
+    bool get_scene_resident() const {
+        return p_scene_resident && p_scene_resident->get_value();
+    }
+    bool get_processing_active() const {
+        return get_on_off() || get_scene_resident();
+    }
+    bool get_rt_on_off() {
+        return (gx_system::atomic_get(rt_scene_state) & 1) != 0;
+    }
+    bool rt_scene_state_changed() {
+        return gx_system::atomic_get(rt_scene_state) != desired_rt_scene_state();
+    }
+    // Returns false if a resident plugin could not be reactivated. In that
+    // case its normal on/off parameter and RT snapshot remain bypassed.
+    bool commit_rt_scene_state();
     int get_position() const { return p_position->get_value(); }
     int get_effect_post_pre() const { return p_effect_post_pre->get_value(); }
     void set_box_visible(bool v) const { if (p_box_visible) p_box_visible->set(v); }
     void set_plug_visible(bool v) const { if (p_plug_visible) p_plug_visible->set(v); }
     void set_on_off(bool v) const { p_on_off->set(v); }
+    void set_scene_resident(bool v) const {
+        if (p_scene_resident) p_scene_resident->set(v);
+    }
     void set_position(int v) const { p_position->set(v); }
     void set_effect_post_pre(int v) const { p_effect_post_pre->set(v); }
     const std::string& id_box_visible() const { return p_box_visible->id(); }
     const std::string& id_plug_visible() const { return p_plug_visible->id(); }
     const std::string& id_on_off() const { return p_on_off->id(); }
+    const std::string& id_scene_resident() const {
+        return p_scene_resident->id();
+    }
     const std::string& id_position() const { return p_position->id(); }
     const std::string& id_effect_post_pre() const { return p_effect_post_pre->id(); }
     inline int position_weight() { return get_effect_post_pre() ? get_position() : get_position() + POST_WEIGHT; }
@@ -178,6 +211,10 @@ public:
     void registerAllPlugins(ParamMap& param, ParameterGroups& groups);
     void ordered_mono_list(list<Plugin*>& mono, int mode);
     void ordered_stereo_list(list<Plugin*>& stereo, int mode);
+    void ordered_processing_mono_list(list<Plugin*>& mono, int mode);
+    void ordered_processing_stereo_list(list<Plugin*>& stereo, int mode);
+    bool rt_scene_state_changed();
+    bool commit_rt_scene_states();
     void ordered_list(list<Plugin*>& l, bool stereo, int flagmask, int flagvalue);
     sigc::signal<void,const char*,bool>& signal_insert_remove() { return insert_remove; }
 #ifndef NDEBUG

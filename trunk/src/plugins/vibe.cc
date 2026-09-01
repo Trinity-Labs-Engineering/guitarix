@@ -97,6 +97,7 @@ private:
     float store_r[size];
 public:
     NextValue(): idx(size), sample(0) {}
+    inline void reset() { idx = size; sample = 0; }
     inline bool hasValue() { return idx < size; }
     inline bool need_next() { sample %= period; return sample++ == 0; }
     inline void fetch(float& left, float& right) { left = store_l[idx]; right = store_r[idx]; ++idx; }
@@ -125,6 +126,7 @@ public:
 
     void out (int count, float * smpsl, float * smpsr, float * efxoutl, float * efxoutr);
     static void init(unsigned int samplingFreq, PluginDef *plugin);
+    static void clear_state_impl(PluginDef *plugin);
     static void process(int count, float * smpsl, float * smpsr, float * efxoutl, float * efxoutr, PluginDef *plugin);
     static void process_mono(int count, float *smps, float *efxout, PluginDef *plugin);
     static int registerparam(const ParamReg& reg);
@@ -165,6 +167,7 @@ private:
 
     inline float vibefilter(float data, fparams *ftype, int stage);
     void init_vibes(unsigned int samplerate);
+    void clear_audio_state();
     void modulate(float ldrl, float ldrr);
     inline float bjt_shape(float data);
 
@@ -198,6 +201,7 @@ Vibe::Vibe(bool stereo)
     }
     category = N_("Modulation");
     set_samplerate = init;
+    clear_state = clear_state_impl;
     register_params = registerparam;
     load_ui = uiloader;
     delete_instance = del_instance;
@@ -208,6 +212,10 @@ Vibe::~Vibe () {
 
 void Vibe::init(unsigned int samplingFreq, PluginDef *plugin) {
     static_cast<Vibe*>(plugin)->init_vibes(samplingFreq);
+}
+
+void Vibe::clear_state_impl(PluginDef *plugin) {
+    static_cast<Vibe*>(plugin)->clear_audio_state();
 }
 
 void Vibe::process(int count, float *smpsl, float *smpsr, float *efxoutl, float *efxoutr, PluginDef *plugin) {
@@ -681,7 +689,46 @@ void Vibe::init_vibes(unsigned int samplerate) {
 	vevo[i].d1 = tmpgain*(ed0[i] - ed1[i]);
 	vevo[i].d0 = 1.0f;
     }
+    clear_audio_state();
 };
+
+void Vibe::clear_audio_state() {
+    if (Pstereo) {
+	vibe_lfo_sine::clear_state_f();
+    } else {
+	vibe_mono_lfo_sine::clear_state_f();
+    }
+    lfo.reset();
+
+    dRCl = dTC;
+    dRCr = dTC;
+    alphal = 1.0f - cSAMPLE_RATE/(dRCl + cSAMPLE_RATE);
+    alphar = alphal;
+    dalphal = alphal;
+    dalphar = alphal;
+    stepl = 0.0f;
+    stepr = 0.0f;
+    oldstepl = 0.0f;
+    oldstepr = 0.0f;
+    lstep = 0.0f;
+    rstep = 0.0f;
+    lfol = 0.0f;
+    lfor = 0.0f;
+    gl = 0.0f;
+    gr = 0.0f;
+    oldgl = 0.0f;
+    oldgr = 0.0f;
+    fbl = 0.0f;
+    fbr = 0.0f;
+
+    for (int i = 0; i < 8; ++i) {
+	vc[i].x1 = vc[i].y1 = 0.0f;
+	vcvo[i].x1 = vcvo[i].y1 = 0.0f;
+	ecvc[i].x1 = ecvc[i].y1 = 0.0f;
+	vevo[i].x1 = vevo[i].y1 = 0.0f;
+	oldcvolt[i] = 0.0f;
+    }
+}
 
 void Vibe::modulate(float ldrl, float ldrr) {
     float tmpgain;

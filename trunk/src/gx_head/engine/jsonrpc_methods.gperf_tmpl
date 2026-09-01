@@ -65,6 +65,7 @@ struct CmdConnection::methodnames;
 "get", true
 "set", false
 "set_scene", true
+"set_scene_muted", true
 "parameterlist", true
 "get_parameter", true
 "get_parameter_value", true

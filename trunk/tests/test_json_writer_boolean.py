@@ -18,7 +18,7 @@ JSONRPC_SOURCE = TRUNK / "src" / "gx_head" / "engine" / "jsonrpc.cpp"
 class JsonWriterBooleanWireTests(unittest.TestCase):
     def test_set_scene_acknowledgement_uses_explicit_boolean_writer(self) -> None:
         source = JSONRPC_SOURCE.read_text(encoding="utf-8")
-        set_scene = source.split("FUNCTION(set_scene) {", 1)[1].split(
+        set_scene = source.split("FUNCTION(set_scene)", 1)[1].split(
             "FUNCTION(get) {", 1
         )[0]
 
@@ -29,6 +29,10 @@ class JsonWriterBooleanWireTests(unittest.TestCase):
         ):
             self.assertIn(f'jw.write_bool_kv("{field}", {value});', set_scene)
             self.assertNotIn(f'jw.write_kv("{field}",', set_scene)
+        self.assertIn(
+            '"rampSuppressed", externally_muted && topology_changed',
+            set_scene,
+        )
 
     def test_explicit_booleans_use_json_literals_without_changing_legacy_status(self) -> None:
         compiler = os.environ.get("CXX", "c++")
@@ -68,12 +72,14 @@ class JsonWriterBooleanWireTests(unittest.TestCase):
         self.assertEqual(
             wire_lines[0],
             '{"applied": 3,"topologyChanged": true,'
-            '"chainCommitted": true,"chainSettled": false}',
+            '"chainCommitted": true,"chainSettled": false,'
+            '"rampSuppressed": true}',
         )
         scene = json.loads(wire_lines[0])
         self.assertIs(type(scene["topologyChanged"]), bool)
         self.assertIs(type(scene["chainCommitted"]), bool)
         self.assertIs(type(scene["chainSettled"]), bool)
+        self.assertIs(type(scene["rampSuppressed"]), bool)
 
         self.assertEqual(wire_lines[1], '{"ok": 1}')
         self.assertIs(type(json.loads(wire_lines[1])["ok"]), int)

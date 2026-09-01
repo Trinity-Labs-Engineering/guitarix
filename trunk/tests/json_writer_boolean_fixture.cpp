@@ -43,6 +43,7 @@ int main() {
     scene.write_bool_kv("topologyChanged", true);
     scene.write_bool_kv("chainCommitted", true);
     scene.write_bool_kv("chainSettled", false);
+    scene.write_bool_kv("rampSuppressed", true);
     scene.end_object();
     std::cout << scene.get_string() << '\n';
 

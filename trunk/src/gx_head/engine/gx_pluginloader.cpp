@@ -214,8 +214,10 @@ Plugin::Plugin(PluginDef *pl)
       p_box_visible(0),
       p_plug_visible(0),
       p_on_off(0),
+      p_scene_resident(0),
       p_position(0),
-      p_effect_post_pre(0) {
+      p_effect_post_pre(0),
+      rt_scene_state(0) {
     set_pdef(pl);
 }
 
@@ -239,8 +241,10 @@ Plugin::Plugin(gx_system::JsonParser& jp, ParamMap& pmap)
       p_box_visible(0),
       p_plug_visible(0),
       p_on_off(0),
+      p_scene_resident(0),
       p_position(0),
-      p_effect_post_pre(0) {
+      p_effect_post_pre(0),
+      rt_scene_state(0) {
     PluginDef *p = new PluginDef();
     p->delete_instance = delete_plugindef_instance;
     jp.next(gx_system::JsonParser::begin_object);
@@ -291,9 +295,13 @@ Plugin::Plugin(gx_system::JsonParser& jp, ParamMap& pmap)
         p_plug_visible = &pmap[id].getBool();
     }
     p_on_off = &pmap[s+".on_off"].getBool();
+    if (pmap.hasId(s+".scene_resident")) {
+        p_scene_resident = &pmap[s+".scene_resident"].getBool();
+    }
     p_position = &pmap[s+".position"].getInt();
     p_effect_post_pre = &pmap[s+".pp"].getInt();
     set_pdef(p);
+    commit_rt_scene_state();
 }
 
 void Plugin::writeJSON(gx_system::JsonWriter& jw) {
@@ -328,6 +336,39 @@ void Plugin::set_midi_on_off_blocked(bool v) {
     p_on_off->set_midi_blocked(!v);
 }
 
+int Plugin::desired_rt_scene_state() const {
+    return (get_on_off() ? 1 : 0) | (get_scene_resident() ? 2 : 0);
+}
+
+bool Plugin::commit_rt_scene_state() {
+    const int old_state = gx_system::atomic_get(rt_scene_state);
+    int new_state = desired_rt_scene_state();
+
+    // A resident module which was bypassed stayed in the immutable chain.
+    // Reinitialise it before making it audible so delay/reverb history cannot
+    // leak from its previous scene. Lifecycle-managed modules are cycled here;
+    // the mono convolver retains its exact prepared IR across that cycle.
+    if (old_state == 2 && (new_state & 1) &&
+        !(pdef->flags & PGNI_RESIDENT_PRESERVE_STATE)) {
+        if (pdef->clear_state) {
+            pdef->clear_state(pdef);
+        } else if (pdef->activate_plugin) {
+            pdef->activate_plugin(false, pdef);
+            if (pdef->activate_plugin(true, pdef) != 0) {
+                p_on_off->set(false);
+                new_state = desired_rt_scene_state();
+                gx_system::atomic_set(&rt_scene_state, new_state);
+                return false;
+            }
+        }
+    }
+
+    // Publish the complete desired snapshot in one atomic write. The caller
+    // has already ramped down or confirmed an external hardware mute.
+    gx_system::atomic_set(&rt_scene_state, new_state);
+    return true;
+}
+
 void Plugin::register_vars(ParamMap& param, EngineControl& seq) {
     string s = pdef->id;
     p_on_off = param.reg_par(s+".on_off",N_("on/off"), (bool*)0, !(pdef->flags & (PGN_GUI|PGN_ALTERNATIVE)));
@@ -336,6 +377,12 @@ void Plugin::register_vars(ParamMap& param, EngineControl& seq) {
     }
     p_on_off->signal_changed_bool().connect(
         sigc::hide(sigc::mem_fun(seq, &EngineControl::set_rack_changed)));
+    p_scene_resident = param.reg_non_midi_par(
+        s+".scene_resident", (bool*)0, false, false);
+    p_scene_resident->setSavable(false);
+    p_scene_resident->signal_changed_bool().connect(
+        sigc::hide(sigc::mem_fun(seq, &EngineControl::set_rack_changed)));
+    commit_rt_scene_state();
     if ((pdef->load_ui || pdef->flags & PGN_GUI) &&
         (pdef->flags & PGNI_DYN_POSITION || !(pdef->flags & PGN_FIXED_GUI))) {
         p_box_visible = param.reg_non_midi_par("ui." + s, (bool*)0, true);
@@ -682,6 +729,7 @@ void PluginList::registerParameter(Plugin *pl, ParamMap& param, ParamRegImpl& pr
 void PluginList::unregisterParameter(Plugin *pl, ParamMap& param) {
     PluginDef *pd = pl->get_pdef();
     param.unregister(pl->p_on_off);
+    param.unregister(pl->p_scene_resident);
     param.unregister(pl->p_position);
     param.unregister(pl->p_box_visible);
     param.unregister(pl->p_plug_visible);
@@ -760,6 +808,50 @@ void PluginList::ordered_stereo_list(list<Plugin*>& stereo, int mode) {
         }
     }
     stereo.sort(plugin_order);
+}
+
+void PluginList::ordered_processing_mono_list(list<Plugin*>& mono, int mode) {
+    mono.clear();
+    for (pluginmap::iterator p = pmap.begin(); p != pmap.end(); p++) {
+        Plugin *pl = p->second;
+        if (pl->get_processing_active() && pl->get_pdef()->mono_audio &&
+            (pl->get_pdef()->flags & mode)) {
+            mono.push_back(pl);
+        }
+    }
+    mono.sort(plugin_order);
+}
+
+void PluginList::ordered_processing_stereo_list(list<Plugin*>& stereo, int mode) {
+    stereo.clear();
+    for (pluginmap::iterator p = pmap.begin(); p != pmap.end(); p++) {
+        Plugin *pl = p->second;
+        if (pl->get_processing_active() && pl->get_pdef()->stereo_audio &&
+            (pl->get_pdef()->flags & mode)) {
+            stereo.push_back(pl);
+        }
+    }
+    stereo.sort(plugin_order);
+}
+
+bool PluginList::rt_scene_state_changed() {
+    for (pluginmap::iterator p = pmap.begin(); p != pmap.end(); ++p) {
+        if (p->second->rt_scene_state_changed()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool PluginList::commit_rt_scene_states() {
+    bool ok = true;
+    for (pluginmap::iterator p = pmap.begin(); p != pmap.end(); ++p) {
+        if (p->second->rt_scene_state_changed() &&
+            !p->second->commit_rt_scene_state()) {
+            ok = false;
+        }
+    }
+    return ok;
 }
 
 void PluginList::ordered_list(list<Plugin*>& l, bool stereo, int flagmask, int flagvalue) {

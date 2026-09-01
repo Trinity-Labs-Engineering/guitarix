@@ -1,4 +1,5 @@
 #include "gx_plugin.h"
+#include <algorithm>
 #include <cmath>
 #include <stdlib.h>
 
@@ -109,6 +110,7 @@ private:
 public:
     ReverseDelay();
     static void init(unsigned int samplingFreq, PluginDef *plugin);
+    static void clear_state_impl(PluginDef *plugin);
     static void process(int count, float *input, float *output, PluginDef *plugin);
     static int registerparam(const ParamReg& reg);
     static int uiloader(const UiBuilder& builder, int form);
@@ -124,6 +126,7 @@ ReverseDelay::ReverseDelay():
     category = N_("Echo / Delay");
     mono_audio = process;
     set_samplerate = init;
+    clear_state = clear_state_impl;
     register_params = registerparam;
     load_ui = uiloader;
     delete_instance = del_instance;
@@ -137,6 +140,20 @@ ReverseDelay::ReverseDelay():
     window_old = 0;
 
     buf_indication = 0;
+}
+
+void ReverseDelay::clear_state_impl(PluginDef *plugin) {
+    ReverseDelay& self = *static_cast<ReverseDelay*>(plugin);
+    if (self.buffer && self.buf_size) {
+        std::fill(self.buffer, self.buffer + self.buf_size, 0.0f);
+    }
+    self.counter = 0;
+    self.cur_buf_size = 0;
+    self.feedback_buf = 0.0f;
+    self.time_old = -1.0f;
+    self.window_old = -1.0f;
+    self.buf_indication = 0.0f;
+    self.ow = overlap_window();
 }
 
 int ReverseDelay::registerparam(const ParamReg& reg) {

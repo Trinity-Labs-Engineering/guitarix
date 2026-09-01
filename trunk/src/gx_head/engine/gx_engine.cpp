@@ -570,6 +570,10 @@ void GxEngine::ladspaloader_update_plugins() {
 	Plugin *pl = pluginlist.lookup_plugin((*i)->id_str);
 	LadspaLoader::pluginarray::iterator j = find_plugin(ml, *i);
 	if (j == ml.end()) {
+	    // A hidden song-pool residency flag otherwise keeps this plugin in the
+	    // RT chain after on_off is cleared, leaving dangling owner/PluginDef
+	    // pointers when the dynamically loaded module is deleted below.
+	    pl->set_scene_resident(false);
 	    pl->set_on_off(false);
 	    pv.push_back(PluginChange(pl, PluginChange::remove));
 	} else {

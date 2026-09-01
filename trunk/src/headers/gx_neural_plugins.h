@@ -74,6 +74,7 @@ private:
         Glib::ustring filename;
         float size;
         int sample_rate;
+        int host_sample_rate;
         std::unique_ptr<nam::DSP> model;
     };
 
@@ -136,6 +137,14 @@ public:
 
 class NeuralAmpMulti: public PluginDef {
 private:
+    struct CachedNamModel {
+        Glib::ustring filename;
+        float size;
+        int sample_rate;
+        int host_sample_rate;
+        std::unique_ptr<nam::DSP> model;
+    };
+
     nam::DSP* modela;
     nam::DSP* modelb;
     ParamMap& param;
@@ -157,6 +166,8 @@ private:
     float fVslider2;
     float fVslider3;
     float fVslider4;
+    float current_model_sizea;
+    float current_model_sizeb;
     int IOTA0;
     double fDec0[16384];
     float fVslider02;
@@ -191,6 +202,7 @@ private:
     Glib::ustring load_apath;
     Glib::ustring load_bpath;
     std::string idstring;
+    std::vector<CachedNamModel> model_cache;
 
     void clear_state_f();
     int load_ui_f(const UiBuilder& b, int form);
@@ -207,6 +219,10 @@ private:
     void set_nam_bsize();
     void create_nam_afilelist();
     void create_nam_bfilelist();
+    std::unique_ptr<nam::DSP> take_cached_model(
+        const Glib::ustring& filename, float size, int* sample_rate);
+    void cache_model(nam::DSP*& active_model, const Glib::ustring& filename,
+                     float size, int sample_rate);
     int register_par(const ParamReg& reg);
 
     static void clear_state_f_static(PluginDef*);

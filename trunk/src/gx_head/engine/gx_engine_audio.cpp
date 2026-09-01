@@ -333,6 +333,9 @@ void __rt_func MonoModuleChain::process(int count, float *input, float *output) 
     }
     memcpy(output, input, count*sizeof(float));
     for (monochain_data *p = get_rt_chain(); p->func; ++p) {
+	if (p->owner && !p->owner->get_rt_on_off()) {
+	    continue;
+	}
 	p->func(count, output, output, p->plugin);
     }
     if (rm == ramp_mode_off) {
@@ -401,12 +404,18 @@ void __rt_func StereoModuleChain::process(int count, float *input1, float *input
     memcpy(output2, input2, count*sizeof(float));
 #ifdef GUITARIX_AS_PLUGIN
     for (stereochain_data *p = get_rt_chain(); p->func; ++p) {
+		if (p->owner && !p->owner->get_rt_on_off()) {
+			continue;
+		}
 		if (!feed)
             { feed = true; continue; }//max:
 		(p->func)(count, output1, output2, output1, output2, p->plugin);
     }
 #else
     for (stereochain_data *p = get_rt_chain(); p->func; ++p) {
+	if (p->owner && !p->owner->get_rt_on_off()) {
+	    continue;
+	}
 	(p->func)(count, output1, output2, output1, output2, p->plugin);
     }
 #endif
@@ -528,6 +537,19 @@ int ModuleSelectorFromList::static_register(const ParamReg &param) {
 }
 
 void ModuleSelectorFromList::set_module() {
+    const bool resident = plugin.get_scene_resident();
+    for (unsigned int i = 0; i < size; ++i) {
+	Plugin *candidate = seq.pluginlist.lookup_plugin(modules[i]->id);
+	if (!candidate) {
+	    continue;
+	}
+	candidate->set_scene_resident(resident);
+	if (resident) {
+	    // All alternatives occupy one immutable song-chain position. Only the
+	    // selected child's on/off flag is audible in the RT wrapper.
+	    candidate->copy_position(plugin);
+	}
+    }
     if (plugin.get_on_off()) {
 	Plugin *old = current_plugin;
 	current_plugin = seq.pluginlist.lookup_plugin(modules[selector]->id);
@@ -689,7 +711,9 @@ bool ModuleSequencer::update_module_lists() {
     if (!get_buffersize() || !get_samplerate()) {
 	return false;
     }
-    if (prepare_module_lists()) {
+    bool changed = prepare_module_lists();
+    changed = pluginlist.rt_scene_state_changed() || changed;
+    if (changed) {
 	commit_module_lists();
 	if (stateflags & SF_OVERLOAD) {
 	    // hack: jackd need some time for new load statistic
@@ -728,7 +752,23 @@ bool ModuleSequencer::check_module_lists() {
     return false;
 }
 
-bool ModuleSequencer::commit_pending_module_lists() {
+bool ModuleSequencer::scene_commit_ready() {
+    boost::mutex::scoped_lock lock(stateflags_mutex);
+    return get_buffersize() && get_samplerate() &&
+	!(stateflags & (SF_INITIALIZING | SF_JACK_RECONFIG));
+}
+
+bool ModuleSequencer::commit_pending_module_lists(bool externally_muted,
+						  bool* commit_ok) {
+    if (commit_ok) {
+	*commit_ok = false;
+    }
+    if (!scene_commit_ready()) {
+	return false;
+    }
+    if (commit_ok) {
+	*commit_ok = true;
+    }
     if (!get_rack_changed()) {
 	return false;
     }
@@ -736,7 +776,25 @@ bool ModuleSequencer::commit_pending_module_lists() {
     // Keep the idle connection visible while selectors are evaluated. Their
     // on/off signals then coalesce into this transaction instead of queuing a
     // redundant second idle callback.
-    bool changed = update_module_lists();
+    bool changed = prepare_module_lists();
+    changed = pluginlist.rt_scene_state_changed() || changed;
+    if (changed) {
+	const bool ok = commit_module_lists(externally_muted);
+	if (commit_ok) {
+	    *commit_ok = ok;
+	}
+	if (stateflags & SF_OVERLOAD) {
+#if defined(_WINDOWS) || defined(__APPLE__)
+	    clearoverride_conn=signal_timeout().connect(
+	        sigc::mem_fun(*this, &ModuleSequencer::clear_override));
+#else
+	    Glib::signal_timeout().connect_once(
+	        sigc::bind(
+	            sigc::mem_fun(*this,&ModuleSequencer::clear_stateflag),
+	            SF_OVERLOAD), 1000);
+#endif
+	}
+    }
     clear_rack_changed();
 
     // Dynamic plugins may only be deactivated after the RT thread has observed
@@ -769,9 +827,9 @@ bool ModuleSequencer::prepare_module_lists() {
         (*i)->set_module();
     }
     list<Plugin*> modules;
-    pluginlist.ordered_mono_list(modules, audio_mode);
+    pluginlist.ordered_processing_mono_list(modules, audio_mode);
     bool ret_mono = mono_chain.set_plugin_list(modules);
-    pluginlist.ordered_stereo_list(modules, audio_mode);
+    pluginlist.ordered_processing_stereo_list(modules, audio_mode);
     bool ret_stereo = stereo_chain.set_plugin_list(modules);
     if (ret_mono || ret_stereo) {
         mono_chain.print();
@@ -780,21 +838,40 @@ bool ModuleSequencer::prepare_module_lists() {
     return ret_mono || ret_stereo;
 }
 
-void ModuleSequencer::commit_module_lists() {
-    bool already_down = (mono_chain.get_ramp_mode() == ProcessingChainBase::ramp_mode_down_dead);
-    bool monoramp = mono_chain.next_commit_needs_ramp && !already_down;
+bool ModuleSequencer::commit_module_lists(bool externally_muted) {
+    const bool rt_state_changed = pluginlist.rt_scene_state_changed();
+    bool already_down =
+        mono_chain.get_ramp_mode() == ProcessingChainBase::ramp_mode_down_dead;
+    bool monoramp = (mono_chain.next_commit_needs_ramp || rt_state_changed) &&
+        !already_down && !externally_muted;
+    already_down =
+        stereo_chain.get_ramp_mode() == ProcessingChainBase::ramp_mode_down_dead;
+    bool stereoramp = (stereo_chain.next_commit_needs_ramp || rt_state_changed) &&
+        !already_down && !externally_muted;
+
+    // Both chains must be quiet before publishing the shared per-plugin RT
+    // state; a plugin can never become bypassed halfway through the two chain
+    // commits.
     if (monoramp) {
 	mono_chain.start_ramp_down();
-	mono_chain.wait_ramp_down_finished();
     }
-    mono_chain.commit(mono_chain.next_commit_needs_ramp, get_param());
-    already_down =  (stereo_chain.get_ramp_mode() == ProcessingChainBase::ramp_mode_down_dead);
-    bool stereoramp = stereo_chain.next_commit_needs_ramp && !already_down;
     if (stereoramp) {
 	stereo_chain.start_ramp_down();
+    }
+    if (monoramp) {
+	mono_chain.wait_ramp_down_finished();
+    }
+    if (stereoramp) {
 	stereo_chain.wait_ramp_down_finished();
     }
-    stereo_chain.commit(stereo_chain.next_commit_needs_ramp, get_param());
+
+    bool ok = pluginlist.commit_rt_scene_states();
+    ok = mono_chain.commit(mono_chain.next_commit_needs_ramp, get_param()) && ok;
+    ok = stereo_chain.commit(stereo_chain.next_commit_needs_ramp, get_param()) && ok;
+    if (!ok) {
+	gx_print_warning(
+	    "scene switch", "a plugin could not be activated; keeping it bypassed");
+    }
     if (monoramp) {
 	mono_chain.start_ramp_up();
 	mono_chain.next_commit_needs_ramp = false;
@@ -803,6 +880,13 @@ void ModuleSequencer::commit_module_lists() {
 	stereo_chain.start_ramp_up();
 	stereo_chain.next_commit_needs_ramp = false;
     }
+    // A hardware-muted commit deliberately suppresses Guitarix's chain ramp,
+    // but it still consumes the pending-ramp requirement for this topology.
+    if (externally_muted) {
+	mono_chain.next_commit_needs_ramp = false;
+	stereo_chain.next_commit_needs_ramp = false;
+    }
+    return ok;
 }
 
 int ModuleSequencer::sporadic_interval = 0;

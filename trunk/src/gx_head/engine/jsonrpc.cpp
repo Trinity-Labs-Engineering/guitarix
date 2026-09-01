@@ -490,9 +490,20 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         break;
     }
 
-    FUNCTION(set_scene) {
+    FUNCTION(set_scene)
+    case RPCM_set_scene_muted: {
+        const bool externally_muted = mn->m_id == RPCM_set_scene_muted;
         if (params.size() & 1) {
             throw RpcError(-32602, "Invalid param -- array length must be even");
+        }
+        const auto jack_status = serv.jack.get_jack_client_activity_status();
+        if (!jack_status.ok || !jack_status.active ||
+            !serv.jack.get_engine().scene_commit_ready()) {
+            // Do not apply half a scene before JACK has supplied the engine's
+            // runtime dimensions: module activation may allocate buffers from
+            // both values. The client can retry without any parameter having
+            // changed.
+            throw RpcError(-32000, "Audio engine is not ready");
         }
 
         // Unlike legacy `set`, a scene transaction rejects unknown ids and
@@ -553,10 +564,19 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         }
 
         apply_parameter_set(params);
-        bool topology_changed =
-            serv.jack.get_engine().commit_pending_module_lists();
+        bool commit_ok = false;
+        bool topology_changed = serv.jack.get_engine().commit_pending_module_lists(
+            externally_muted, &commit_ok);
         bool chain_settled = !topology_changed ||
             serv.jack.get_engine().wait_ramp_up_finished();
+
+        if (!commit_ok || !chain_settled) {
+            // Parameters may already have been staged, but failed modules are
+            // kept out of the processing chain and the caller receives no
+            // success acknowledgement. Houston therefore keeps the hardware
+            // guard muted instead of exposing a partial scene.
+            throw RpcError(-32001, "Scene processing chain did not commit");
+        }
 
         // The response is written only after any pending module-list commit
         // has published its processing-chain pointer and its chain ramp-up has
@@ -567,6 +587,8 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_bool_kv("topologyChanged", topology_changed);
         jw.write_bool_kv("chainCommitted", topology_changed);
         jw.write_bool_kv("chainSettled", chain_settled);
+        jw.write_bool_kv(
+            "rampSuppressed", externally_muted && topology_changed);
         jw.end_object();
     }
 

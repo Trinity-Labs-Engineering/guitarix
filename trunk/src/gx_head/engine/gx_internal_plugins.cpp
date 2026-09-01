@@ -520,6 +520,11 @@ ConvolverAdapter::ConvolverAdapter(
       sync(sync_),
       activated(false),
       jcset(),
+      configured_jcset(),
+      configured_samplerate(0),
+      configured_buffersize(0),
+      has_configured_ir(false),
+      retain_configuration_while_bypassed(false),
       jcp(0),
       plugin() {
     version = PLUGINDEF_VERSION;
@@ -536,13 +541,20 @@ ConvolverAdapter::~ConvolverAdapter() {
 void ConvolverAdapter::change_buffersize(unsigned int size) {
     boost::mutex::scoped_lock lock(activate_mutex);
     if (activated) {
-        conv.stop_process();
-        while (conv.is_runnable()) {
-            conv.checkstate();
+        if (conv.is_runnable()) {
+            conv.stop_process();
+            while (conv.is_runnable()) {
+                conv.checkstate();
+            }
         }
         conv.set_buffersize(size);
         if (size) {
-            conv_start();
+            if (retain_configuration_while_bypassed &&
+                plugin.get_scene_resident() && !plugin.get_on_off()) {
+                conv_prepare();
+            } else {
+                conv_start();
+            }
         }
     } else {
         conv.set_buffersize(size);
@@ -550,43 +562,33 @@ void ConvolverAdapter::change_buffersize(unsigned int size) {
 }
 
 void ConvolverAdapter::restart() {
-    if (!plugin.get_on_off()) {
+    const bool prepare_only =
+        retain_configuration_while_bypassed && activated &&
+        plugin.get_scene_resident() && !plugin.get_on_off();
+    if (!plugin.get_on_off() && !prepare_only) {
         return;
     }
-    conv.set_not_runnable();
-    sync();
-    conv.stop_process();
-    while (!conv.checkstate());
-    float gain;
-    if (jcset.getGainCor()) {
-        gain = jcset.getGain();
-    } else {
-        gain = 1.0;
+    if (conv.is_runnable()) {
+        conv.set_not_runnable();
+        sync();
+        conv.stop_process();
+        while (!conv.checkstate());
     }
-    bool rc = conv.configure(
-        jcset.getFullIRPath(), gain, gain, jcset.getDelay(), jcset.getDelay(),
-        jcset.getOffset(), jcset.getLength(), 0, 0, jcset.getGainline());
-    int policy, priority;
-    engine.get_sched_priority(policy, priority);
-    if (!rc || !conv.start(policy, priority)) {
+    const bool rc = prepare_only ? conv_prepare() : conv_start();
+    if (!rc && !prepare_only) {
         plugin.set_on_off(false);
     }
 }
 
-bool ConvolverAdapter::conv_start() {
-    if (!conv.get_buffersize() || !conv.get_samplerate()) {
-        return false;
-    }
-    string path = jcset.getFullIRPath();
-    if (path.empty()) {
-        gx_print_warning(_("convolver"), _("no impulseresponse file"));
-        plugin.set_on_off(false);
-        return false;
-    }
-    while (!conv.checkstate());
-    if (conv.is_runnable()) {
-        return true;
-    }
+bool ConvolverAdapter::configuration_matches() {
+    return has_configured_ir &&
+        configured_samplerate == conv.get_samplerate() &&
+        configured_buffersize == conv.get_buffersize() &&
+        configured_jcset == jcset;
+}
+
+bool ConvolverAdapter::configure_current_ir() {
+    has_configured_ir = false;
     float gain;
     if (jcset.getGainCor()) {
         gain = jcset.getGain();
@@ -594,15 +596,54 @@ bool ConvolverAdapter::conv_start() {
         gain = 1.0;
     }
     if (!conv.configure(
-            path, gain, gain, jcset.getDelay(), jcset.getDelay(),
-            jcset.getOffset(), jcset.getLength(), 0, 0, jcset.getGainline())) {
+        jcset.getFullIRPath(), gain, gain, jcset.getDelay(), jcset.getDelay(),
+        jcset.getOffset(), jcset.getLength(), 0, 0, jcset.getGainline())) {
         return false;
+    }
+
+    configured_jcset = jcset;
+    configured_samplerate = conv.get_samplerate();
+    configured_buffersize = conv.get_buffersize();
+    has_configured_ir = true;
+    return true;
+}
+
+bool ConvolverAdapter::conv_prepare() {
+    if (!conv.get_buffersize() || !conv.get_samplerate()) {
+        return false;
+    }
+    if (jcset.getFullIRPath().empty()) {
+        return false;
+    }
+    while (!conv.checkstate());
+    if (conv.is_runnable()) {
+        return configuration_matches();
+    }
+    if (configuration_matches() && conv.state() == Convproc::ST_STOP) {
+        return true;
+    }
+    return configure_current_ir();
+}
+
+bool ConvolverAdapter::conv_start() {
+    if (!conv.get_buffersize() || !conv.get_samplerate()) {
+        return false;
+    }
+    if (jcset.getFullIRPath().empty()) {
+        gx_print_warning(_("convolver"), _("no impulseresponse file"));
+        plugin.set_on_off(false);
+        return false;
+    }
+    if (!conv_prepare()) {
+        return false;
+    }
+    if (conv.is_runnable()) {
+        return true;
     }
     int policy, priority;
     engine.get_sched_priority(policy, priority);
     return conv.start(policy, priority);
 }
-
 
 /****************************************************************
  ** class ConvolverStereoAdapter
@@ -757,6 +798,7 @@ int ConvolverStereoAdapter::jconv_load_ui(const UiBuilder& builder, int format) 
 ConvolverMonoAdapter::ConvolverMonoAdapter(
     EngineControl& engine_, sigc::slot<void> sync_)
     : ConvolverAdapter(engine_, sync_) {
+    retain_configuration_while_bypassed = true;
     id = "jconv_mono";
     name = N_("Convolver");
     register_params = convolver_register;
@@ -797,12 +839,18 @@ void ConvolverMonoAdapter::convolver_init(unsigned int samplingFreq, PluginDef *
     ConvolverMonoAdapter& self = *static_cast<ConvolverMonoAdapter*>(p);
     boost::mutex::scoped_lock lock(self.activate_mutex);
     if (self.activated) {
-        self.conv.stop_process();
+        if (self.conv.is_runnable()) {
+            self.conv.stop_process();
+        }
         self.conv.set_samplerate(samplingFreq);
         while (self.conv.is_runnable()) {
             self.conv.checkstate();
         }
-        self.conv_start();
+        if (self.plugin.get_scene_resident() && !self.plugin.get_on_off()) {
+            self.conv_prepare();
+        } else {
+            self.conv_start();
+        }
     } else {
         self.conv.set_samplerate(samplingFreq);
     }
@@ -822,10 +870,16 @@ int ConvolverMonoAdapter::activate(bool start, PluginDef *p) {
     }
     self.activated = start;
     if (start) {
+        if (self.plugin.get_scene_resident() && !self.plugin.get_on_off()) {
+            // Prepare the one current IR while the song-resident module is
+            // bypassed. It remains in Convproc's stopped state until enabled.
+            self.conv_prepare();
+            return 0;
+        }
         if (!self.conv_start()) {
             return -1;
         }
-    } else {
+    } else if (self.conv.is_runnable()) {
         self.conv.stop_process();
     }
     return 0;

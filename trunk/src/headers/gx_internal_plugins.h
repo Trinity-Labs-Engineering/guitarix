@@ -365,7 +365,15 @@ protected:
     // wrapper for the rack order function pointers
     void change_buffersize(unsigned int size);
     GxJConvSettings jcset;
+    GxJConvSettings configured_jcset;
+    unsigned int configured_samplerate;
+    unsigned int configured_buffersize;
+    bool has_configured_ir;
+    bool retain_configuration_while_bypassed;
     JConvParameter *jcp;
+    bool configuration_matches();
+    bool configure_current_ir();
+    bool conv_prepare();
 public:
     Plugin plugin;
 public:

@@ -119,7 +119,7 @@ private:
     int current_index;
     F *current_pointer;
     void setsize(int n);
-    inline F get_audio(PluginDef *p);
+    inline F get_audio(Plugin *p);
 protected:
     F *processing_pointer; // RT
     inline F* get_rt_chain() { return gx_system::atomic_get(processing_pointer); } // RT
@@ -132,7 +132,7 @@ public:
 	    commit(true, pmap);
 	}
     }
-    void commit(bool clear, ParamMap& pmap);
+    bool commit(bool clear, ParamMap& pmap);
 };
 
 typedef void (*monochainorder)(int count, float *output, float *output1,
@@ -143,27 +143,33 @@ typedef void (*stereochainorder)(int count, float* input, float* input1,
 struct monochain_data {
     monochainorder func;
     PluginDef      *plugin;
-    monochain_data(monochainorder func_, PluginDef *plugin_): func(func_), plugin(plugin_) {}
-    monochain_data(): func(), plugin() {}
+    Plugin         *owner;
+    monochain_data(monochainorder func_, PluginDef *plugin_, Plugin *owner_):
+        func(func_), plugin(plugin_), owner(owner_) {}
+    monochain_data(): func(), plugin(), owner() {}
 };
 
 struct stereochain_data {
     stereochainorder func;
     PluginDef       *plugin;
-    stereochain_data(stereochainorder func_, PluginDef *plugin_): func(func_), plugin(plugin_) {}
-    stereochain_data(): func(), plugin() {}
+    Plugin          *owner;
+    stereochain_data(stereochainorder func_, PluginDef *plugin_, Plugin *owner_):
+        func(func_), plugin(plugin_), owner(owner_) {}
+    stereochain_data(): func(), plugin(), owner() {}
 };
 
 template <>
-inline monochain_data ThreadSafeChainPointer<monochain_data>::get_audio(PluginDef *p)
+inline monochain_data ThreadSafeChainPointer<monochain_data>::get_audio(Plugin *p)
 {
-    return monochain_data(p->mono_audio, p);
+    PluginDef *pd = p->get_pdef();
+    return monochain_data(pd->mono_audio, pd, p);
 }
 
 template <>
-inline stereochain_data ThreadSafeChainPointer<stereochain_data>::get_audio(PluginDef *p)
+inline stereochain_data ThreadSafeChainPointer<stereochain_data>::get_audio(Plugin *p)
 {
-    return stereochain_data(p->stereo_audio, p);
+    PluginDef *pd = p->get_pdef();
+    return stereochain_data(pd->stereo_audio, pd, p);
 }
 
 template <class F>
@@ -199,11 +205,12 @@ void ThreadSafeChainPointer<F>::setsize(int n)
 }
 
 template <class F>
-void ThreadSafeChainPointer<F>::commit(bool clear, ParamMap& pmap) {
+bool ThreadSafeChainPointer<F>::commit(bool clear, ParamMap& pmap) {
     (void)clear;
     (void)pmap;
     setsize(modules.size()+1);  // leave one slot for 0 marker
     int active_counter = 0;
+    bool ok = true;
     for (list<Plugin*>::const_iterator p = modules.begin(); p != modules.end(); p++) {
 	PluginDef* pd = (*p)->get_pdef();
 	bool initialize = std::find(to_initialize.begin(), to_initialize.end(), *p)
@@ -212,13 +219,15 @@ void ThreadSafeChainPointer<F>::commit(bool clear, ParamMap& pmap) {
 	    if (pd->activate_plugin) {
 		if (pd->activate_plugin(true, pd) != 0) {
 		    (*p)->set_on_off(false);
+		    (*p)->commit_rt_scene_state();
+		    ok = false;
 		    continue;
 		}
 	    } else if (pd->clear_state) {
 		pd->clear_state(pd);
 	    }
 	}
-	F f = get_audio(pd);
+	F f = get_audio(*p);
 	assert(f.func);
 	current_pointer[active_counter++] = f;
     }
@@ -228,6 +237,7 @@ void ThreadSafeChainPointer<F>::commit(bool clear, ParamMap& pmap) {
     set_latch();
     current_index = (current_index+1) % 2;
     current_pointer = rack_order_ptr[current_index];
+    return ok;
 }
 
 /****************************************************************
@@ -367,11 +377,13 @@ public:
 	stereo_chain.set_down_dead();
     }
     bool prepare_module_lists();
-    void commit_module_lists();
+    bool commit_module_lists(bool externally_muted = false);
     // Commit a rack change scheduled by parameter signals immediately. This
     // lets acknowledged control transactions reply after their topology has
     // been published instead of while it is still in the GLib idle queue.
-    bool commit_pending_module_lists();
+    bool commit_pending_module_lists(bool externally_muted = false,
+                                     bool* commit_ok = 0);
+    bool scene_commit_ready();
     virtual void set_rack_changed();
     virtual bool update_module_lists();
     bool check_module_lists();
