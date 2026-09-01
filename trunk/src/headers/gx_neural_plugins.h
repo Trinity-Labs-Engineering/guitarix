@@ -32,6 +32,8 @@
 #include "RTNeural.h"
 #pragma GCC diagnostic pop
 
+#include <cstdint>
+#include <mutex>
 #include <memory>
 #include <vector>
 
@@ -119,6 +121,11 @@ private:
     Glib::ustring current_file;
     Glib::ustring load_path;
     std::string idstring;
+    mutable std::mutex runtime_status_mutex;
+    std::uint64_t runtime_status_generation = 0;
+    nam::RuntimeDSPInfo runtime_dsp_info = {
+        nam::RuntimeDSPClass::None, -1, false};
+    Glib::ustring runtime_model_path;
     std::vector<CachedNamModel> model_cache;
     volatile int scene_smoother_snap_pending;
     bool muted_scene_parameter_batch;
@@ -133,6 +140,8 @@ private:
     void load_nam_file_impl();
     void set_nam_size();
     void create_nam_filelist();
+    void publish_runtime_status(const nam::DSP* current_model,
+                                const Glib::ustring& model_path);
     std::unique_ptr<nam::DSP> take_cached_model(
         const Glib::ustring& filename, float size, int* sample_rate);
     void cache_current_model();
@@ -145,6 +154,12 @@ private:
     static int register_params_static(const ParamReg& reg);
     static void del_instance(PluginDef *p);
 public:
+    struct RuntimeStatus {
+        std::uint64_t generation;
+        nam::RuntimeDSPInfo dsp_info;
+        Glib::ustring model_path;
+    };
+
     std::vector<Glib::ustring> nam_file_names;
     Plugin plugin;
     NeuralAmp(ParamMap& param_, std::string id, sigc::slot<void> sync);
@@ -154,6 +169,7 @@ public:
     void request_scene_smoother_snap();
     bool is_scene_smoother_snap_pending();
     bool finish_scene_smoother_snap();
+    RuntimeStatus get_runtime_status() const;
 };
 
 /****************************************************************
@@ -230,6 +246,15 @@ private:
     Glib::ustring load_bpath;
     std::string idstring;
     std::vector<CachedNamModel> model_cache;
+    mutable std::mutex runtime_status_mutex;
+    std::uint64_t runtime_status_generation_a = 0;
+    std::uint64_t runtime_status_generation_b = 0;
+    nam::RuntimeDSPInfo runtime_dsp_info_a = {
+        nam::RuntimeDSPClass::None, -1, false};
+    nam::RuntimeDSPInfo runtime_dsp_info_b = {
+        nam::RuntimeDSPClass::None, -1, false};
+    Glib::ustring runtime_model_path_a;
+    Glib::ustring runtime_model_path_b;
     volatile int scene_smoother_snap_pending;
     bool muted_scene_parameter_batch;
     bool scene_smoother_preset;
@@ -258,6 +283,8 @@ private:
                      float size, int sample_rate, char slot);
     bool prepared_key_matches(char slot, const Glib::ustring& filename,
                               float size) const;
+    void publish_runtime_status(bool slot_b, const nam::DSP* current_model,
+                                const Glib::ustring& model_path);
     int register_par(const ParamReg& reg);
 
     static void clear_state_f_static(PluginDef*);
@@ -280,6 +307,7 @@ public:
     PreparedNamModelResult prepare_song_models(
         const Glib::ustring& generation,
         const std::vector<PreparedNamModelDescriptor>& descriptors);
+    NeuralAmp::RuntimeStatus get_runtime_status(bool slot_b) const;
 };
 
 /****************************************************************

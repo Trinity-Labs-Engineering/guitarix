@@ -495,6 +495,25 @@ bool NeuralAmp::finish_scene_smoother_snap() {
     return finished;
 }
 
+void NeuralAmp::publish_runtime_status(const nam::DSP* current_model,
+                                       const Glib::ustring& model_path) {
+    std::lock_guard<std::mutex> lock(runtime_status_mutex);
+    ++runtime_status_generation;
+    runtime_dsp_info = current_model
+        ? current_model->GetRuntimeDSPInfo()
+        : nam::RuntimeDSPInfo{nam::RuntimeDSPClass::None, -1, false};
+    runtime_model_path = current_model ? model_path : Glib::ustring();
+}
+
+NeuralAmp::RuntimeStatus NeuralAmp::get_runtime_status() const {
+    std::lock_guard<std::mutex> lock(runtime_status_mutex);
+    return RuntimeStatus{
+        runtime_status_generation,
+        runtime_dsp_info,
+        runtime_model_path,
+    };
+}
+
 std::unique_ptr<nam::DSP> NeuralAmp::take_cached_model(
     const Glib::ustring& filename, float size, int* sample_rate) {
     const auto cached = std::find_if(
@@ -702,6 +721,7 @@ void NeuralAmp::load_nam_file() {
 
         ramp.mode = ramp.DOWN;
         gx_system::atomic_set(&ready, 0);
+        publish_runtime_status(nullptr, Glib::ustring());
         sync();
 
         cache_current_model();
@@ -724,6 +744,7 @@ void NeuralAmp::load_nam_file() {
             update_nam_level_calibration(
                 model, &nam_input_trim_db, &nam_output_trim_db, &loudness,
                 "Neural Amp Modeler", selected_file, "model");
+            publish_runtime_status(model, current_file);
             gx_print_info("Neural Amp Modeler", "loaded " + std::string(selected_file));
         }
         if (muted_scene_parameter_batch) {
@@ -747,6 +768,7 @@ void NeuralAmp::set_nam_size() {
         ramp.startRampDown();
     }
     gx_system::atomic_set(&ready, 0);
+    publish_runtime_status(nullptr, Glib::ustring());
     sync();
 
     if (set_nam_slimmable_size(model, fVslider2, fSampleRate, mSampleRate,
@@ -760,6 +782,7 @@ void NeuralAmp::set_nam_size() {
             scene_smoother_preset = true;
         }
     }
+    publish_runtime_status(model, current_file);
     gx_system::atomic_set(&ready, model ? 1 : 0);
     ramp.mode = model ? ramp.UP : ramp.OFF;
 }
@@ -909,6 +932,32 @@ bool NeuralAmpMulti::finish_scene_smoother_snap() {
     const bool finished = !gx_system::atomic_get(scene_smoother_snap_pending);
     gx_system::atomic_set(&scene_smoother_snap_pending, 0);
     return finished;
+}
+
+void NeuralAmpMulti::publish_runtime_status(
+    bool slot_b, const nam::DSP* current_model,
+    const Glib::ustring& model_path) {
+    std::lock_guard<std::mutex> lock(runtime_status_mutex);
+    std::uint64_t& generation = slot_b
+        ? runtime_status_generation_b : runtime_status_generation_a;
+    nam::RuntimeDSPInfo& dsp_info = slot_b
+        ? runtime_dsp_info_b : runtime_dsp_info_a;
+    Glib::ustring& path = slot_b
+        ? runtime_model_path_b : runtime_model_path_a;
+    ++generation;
+    dsp_info = current_model
+        ? current_model->GetRuntimeDSPInfo()
+        : nam::RuntimeDSPInfo{nam::RuntimeDSPClass::None, -1, false};
+    path = current_model ? model_path : Glib::ustring();
+}
+
+NeuralAmp::RuntimeStatus NeuralAmpMulti::get_runtime_status(bool slot_b) const {
+    std::lock_guard<std::mutex> lock(runtime_status_mutex);
+    return NeuralAmp::RuntimeStatus{
+        slot_b ? runtime_status_generation_b : runtime_status_generation_a,
+        slot_b ? runtime_dsp_info_b : runtime_dsp_info_a,
+        slot_b ? runtime_model_path_b : runtime_model_path_a,
+    };
 }
 
 std::unique_ptr<nam::DSP> NeuralAmpMulti::take_cached_model(
@@ -1429,6 +1478,7 @@ void NeuralAmpMulti::load_nam_afile() {
 
         rampA.mode = rampA.DOWN;
         gx_system::atomic_set(&ready, 0);
+        publish_runtime_status(false, nullptr, Glib::ustring());
         sync();
 
         cache_model(
@@ -1452,6 +1502,7 @@ void NeuralAmpMulti::load_nam_afile() {
             update_nam_level_calibration(
                 modela, &nam_input_trim_dba, &nam_output_trim_dba, &loudnessa,
                 "Neural Multi Amp Modeler", selected_file, "A");
+            publish_runtime_status(false, modela, current_afile);
             gx_print_info("Neural Multi Amp Modeler", "loaded A " + std::string(selected_file));
         }
         if (muted_scene_parameter_batch) {
@@ -1503,6 +1554,7 @@ void NeuralAmpMulti::load_nam_bfile() {
 
         rampB.mode = rampB.DOWN;
         gx_system::atomic_set(&ready, 0);
+        publish_runtime_status(true, nullptr, Glib::ustring());
         sync();
 
         cache_model(
@@ -1526,6 +1578,7 @@ void NeuralAmpMulti::load_nam_bfile() {
             update_nam_level_calibration(
                 modelb, &nam_input_trim_dbb, &nam_output_trim_dbb, &loudnessb,
                 "Neural Multi Amp Modeler", selected_file, "B");
+            publish_runtime_status(true, modelb, current_bfile);
             gx_print_info("Neural Multi Amp Modeler", "loaded B " + std::string(selected_file));
         }
         if (muted_scene_parameter_batch) {
@@ -1546,6 +1599,7 @@ void NeuralAmpMulti::set_nam_asize() {
         rampA.startRampDown();
     }
     gx_system::atomic_set(&ready, 0);
+    publish_runtime_status(false, nullptr, Glib::ustring());
     sync();
 
     if (set_nam_slimmable_size(modela, fVslider3, fSampleRate, maSampleRate,
@@ -1559,6 +1613,7 @@ void NeuralAmpMulti::set_nam_asize() {
             scene_smoother_preset = true;
         }
     }
+    publish_runtime_status(false, modela, current_afile);
     gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
     rampA.mode = modela ? rampA.UP : rampA.OFF;
 }
@@ -1572,6 +1627,7 @@ void NeuralAmpMulti::set_nam_bsize() {
         rampB.startRampDown();
     }
     gx_system::atomic_set(&ready, 0);
+    publish_runtime_status(true, nullptr, Glib::ustring());
     sync();
 
     if (set_nam_slimmable_size(modelb, fVslider4, fSampleRate, mbSampleRate,
@@ -1585,6 +1641,7 @@ void NeuralAmpMulti::set_nam_bsize() {
             scene_smoother_preset = true;
         }
     }
+    publish_runtime_status(true, modelb, current_bfile);
     gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
     rampB.mode = modelb ? rampB.UP : rampB.OFF;
 }
