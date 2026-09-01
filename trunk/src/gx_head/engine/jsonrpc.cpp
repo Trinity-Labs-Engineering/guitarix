@@ -534,9 +534,9 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
     case RPCM_set_scene_muted: {
         const bool externally_muted = mn->m_id == RPCM_set_scene_muted;
         bool snap_output_gain = false;
-        bool snap_nam_gain = false;
-        bool snap_snam_gain = false;
-        bool snap_mnam_gain = false;
+        bool snap_nam_gain_rt = false;
+        bool snap_snam_gain_rt = false;
+        bool snap_mnam_gain_rt = false;
         if (params.size() & 1) {
             throw RpcError(-32602, "Invalid param -- array length must be even");
         }
@@ -608,46 +608,68 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
 
             if (externally_muted) {
                 snap_output_gain = snap_output_gain || attr == "amp.out_master";
-                snap_nam_gain = snap_nam_gain ||
+                snap_nam_gain_rt = snap_nam_gain_rt ||
                     attr == "nam.input" || attr == "nam.output" ||
-                    attr == "nam.on_off" || attr == "nam.loadpath" ||
-                    attr == "nam.flist" || attr == "nam.size";
-                snap_snam_gain = snap_snam_gain ||
+                    attr == "nam.on_off";
+                snap_snam_gain_rt = snap_snam_gain_rt ||
                     attr == "snam.input" || attr == "snam.output" ||
-                    attr == "snam.on_off" || attr == "snam.loadpath" ||
-                    attr == "snam.flist" || attr == "snam.size";
-                snap_mnam_gain = snap_mnam_gain ||
+                    attr == "snam.on_off";
+                snap_mnam_gain_rt = snap_mnam_gain_rt ||
                     attr == "mnam.input" || attr == "mnam.inputb" ||
                     attr == "mnam.output" || attr == "mnam.mix" ||
-                    attr == "mnam.on_off" || attr == "mnam.loadapath" ||
-                    attr == "mnam.loadbpath" || attr == "mnam.falist" ||
-                    attr == "mnam.fblist" || attr == "mnam.sizea" ||
-                    attr == "mnam.sizeb";
+                    attr == "mnam.on_off";
             }
         }
 
-        apply_parameter_set(params);
         gx_engine::GxEngine& engine = serv.jack.get_engine();
+        // A model replacement already obtains exclusive ownership of its DSP
+        // state via sync(). During an externally-muted scene, finish the gain
+        // accumulators under that ownership rather than requiring a second RT
+        // callback solely to observe the same state. The batch guard lets the
+        // model callback report whether that safe fast path actually ran.
+        engine.neural_amp.begin_scene_parameter_batch(externally_muted);
+        engine.sneural_amp.begin_scene_parameter_batch(externally_muted);
+        engine.mneural_amp.begin_scene_parameter_batch(externally_muted);
+        bool nam_gain_preset = false;
+        bool snam_gain_preset = false;
+        bool mnam_gain_preset = false;
+        try {
+            apply_parameter_set(params);
+            nam_gain_preset = engine.neural_amp.finish_scene_parameter_batch();
+            snam_gain_preset = engine.sneural_amp.finish_scene_parameter_batch();
+            mnam_gain_preset = engine.mneural_amp.finish_scene_parameter_batch();
+        } catch (...) {
+            // Never leak an external-mute context into a later interactive
+            // parameter change if a plugin callback rejects this batch.
+            engine.neural_amp.finish_scene_parameter_batch();
+            engine.sneural_amp.finish_scene_parameter_batch();
+            engine.mneural_amp.finish_scene_parameter_batch();
+            throw;
+        }
+
         // Do not arm a bypassed NAM wrapper: it cannot consume an RT request,
         // and carrying the request into a later unmuted activation would turn
         // a scene-only snap into an interactive one.
-        snap_nam_gain = snap_nam_gain && engine.neural_amp.plugin.get_on_off();
-        snap_snam_gain = snap_snam_gain && engine.sneural_amp.plugin.get_on_off();
-        snap_mnam_gain = snap_mnam_gain && engine.mneural_amp.plugin.get_on_off();
+        snap_nam_gain_rt = snap_nam_gain_rt &&
+            engine.neural_amp.plugin.get_on_off();
+        snap_snam_gain_rt = snap_snam_gain_rt &&
+            engine.sneural_amp.plugin.get_on_off();
+        snap_mnam_gain_rt = snap_mnam_gain_rt &&
+            engine.mneural_amp.plugin.get_on_off();
         int requested_gain_snaps = 0;
         if (snap_output_gain) {
             engine.scene_outputlevel.request_scene_smoother_snap();
             ++requested_gain_snaps;
         }
-        if (snap_nam_gain) {
+        if (snap_nam_gain_rt) {
             engine.neural_amp.request_scene_smoother_snap();
             ++requested_gain_snaps;
         }
-        if (snap_snam_gain) {
+        if (snap_snam_gain_rt) {
             engine.sneural_amp.request_scene_smoother_snap();
             ++requested_gain_snaps;
         }
-        if (snap_mnam_gain) {
+        if (snap_mnam_gain_rt) {
             engine.mneural_amp.request_scene_smoother_snap();
             ++requested_gain_snaps;
         }
@@ -663,11 +685,11 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         // idle/stalled stereo client and doubled the worst-case timeout.
         const bool output_gain_pending = snap_output_gain &&
             engine.scene_outputlevel.is_scene_smoother_snap_pending();
-        const bool nam_gain_pending = snap_nam_gain &&
+        const bool nam_gain_pending = snap_nam_gain_rt &&
             engine.neural_amp.is_scene_smoother_snap_pending();
-        const bool snam_gain_pending = snap_snam_gain &&
+        const bool snam_gain_pending = snap_snam_gain_rt &&
             engine.sneural_amp.is_scene_smoother_snap_pending();
-        const bool mnam_gain_pending = snap_mnam_gain &&
+        const bool mnam_gain_pending = snap_mnam_gain_rt &&
             engine.mneural_amp.is_scene_smoother_snap_pending();
         const bool mono_gain_pending =
             nam_gain_pending || snam_gain_pending || mnam_gain_pending;
@@ -676,21 +698,21 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         const bool gain_audio_cycle_finished = gain_audio_status.finished();
 
         bool output_gain_settled = !snap_output_gain;
-        bool nam_gain_settled = !snap_nam_gain;
-        bool snam_gain_settled = !snap_snam_gain;
-        bool mnam_gain_settled = !snap_mnam_gain;
+        bool nam_gain_settled = !snap_nam_gain_rt;
+        bool snam_gain_settled = !snap_snam_gain_rt;
+        bool mnam_gain_settled = !snap_mnam_gain_rt;
         if (snap_output_gain) {
             output_gain_settled =
                 engine.scene_outputlevel.finish_scene_smoother_snap();
         }
-        if (snap_nam_gain) {
+        if (snap_nam_gain_rt) {
             nam_gain_settled = engine.neural_amp.finish_scene_smoother_snap();
         }
-        if (snap_snam_gain) {
+        if (snap_snam_gain_rt) {
             snam_gain_settled =
                 engine.sneural_amp.finish_scene_smoother_snap();
         }
-        if (snap_mnam_gain) {
+        if (snap_mnam_gain_rt) {
             mnam_gain_settled =
                 engine.mneural_amp.finish_scene_smoother_snap();
         }
@@ -720,11 +742,14 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                     << " waitBudgetUsecs=" << gain_audio_status.wait_budget_usecs
                     << " outputGainRequested=" << (snap_output_gain ? "true" : "false")
                     << " outputGainSettled=" << (output_gain_settled ? "true" : "false")
-                    << " namGainRequested=" << (snap_nam_gain ? "true" : "false")
+                    << " namGainRequested=" << (snap_nam_gain_rt ? "true" : "false")
+                    << " namGainPreset=" << (nam_gain_preset ? "true" : "false")
                     << " namGainSettled=" << (nam_gain_settled ? "true" : "false")
-                    << " snamGainRequested=" << (snap_snam_gain ? "true" : "false")
+                    << " snamGainRequested=" << (snap_snam_gain_rt ? "true" : "false")
+                    << " snamGainPreset=" << (snam_gain_preset ? "true" : "false")
                     << " snamGainSettled=" << (snam_gain_settled ? "true" : "false")
-                    << " mnamGainRequested=" << (snap_mnam_gain ? "true" : "false")
+                    << " mnamGainRequested=" << (snap_mnam_gain_rt ? "true" : "false")
+                    << " mnamGainPreset=" << (mnam_gain_preset ? "true" : "false")
                     << " mnamGainSettled=" << (mnam_gain_settled ? "true" : "false");
             gx_print_warning("scene switch", details.str());
             throw RpcError(-32001, details.str());
@@ -743,7 +768,13 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_bool_kv("chainSettled", chain_settled);
         jw.write_bool_kv(
             "rampSuppressed", externally_muted && topology_changed);
-        jw.write_bool_kv("gainSmoothersSnapped", requested_gain_snaps > 0);
+        jw.write_bool_kv(
+            "gainSmoothersSnapped",
+            requested_gain_snaps > 0 || nam_gain_preset ||
+                snam_gain_preset || mnam_gain_preset);
+        jw.write_bool_kv(
+            "gainSmoothersPreset",
+            nam_gain_preset || snam_gain_preset || mnam_gain_preset);
         jw.write_bool_kv("gainSmoothersSettled", gain_smoothers_settled);
         jw.write_bool_kv("gainAudioCycleFinished", gain_audio_cycle_finished);
         jw.write_bool_kv(
@@ -758,11 +789,14 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                     gain_audio_status.wait_budget_usecs);
         jw.write_bool_kv("outputGainSmootherRequested", snap_output_gain);
         jw.write_bool_kv("outputGainSmootherSettled", output_gain_settled);
-        jw.write_bool_kv("namGainSmootherRequested", snap_nam_gain);
+        jw.write_bool_kv("namGainSmootherRequested", snap_nam_gain_rt);
+        jw.write_bool_kv("namGainSmootherPreset", nam_gain_preset);
         jw.write_bool_kv("namGainSmootherSettled", nam_gain_settled);
-        jw.write_bool_kv("snamGainSmootherRequested", snap_snam_gain);
+        jw.write_bool_kv("snamGainSmootherRequested", snap_snam_gain_rt);
+        jw.write_bool_kv("snamGainSmootherPreset", snam_gain_preset);
         jw.write_bool_kv("snamGainSmootherSettled", snam_gain_settled);
-        jw.write_bool_kv("mnamGainSmootherRequested", snap_mnam_gain);
+        jw.write_bool_kv("mnamGainSmootherRequested", snap_mnam_gain_rt);
+        jw.write_bool_kv("mnamGainSmootherPreset", mnam_gain_preset);
         jw.write_bool_kv("mnamGainSmootherSettled", mnam_gain_settled);
         jw.end_object();
     }

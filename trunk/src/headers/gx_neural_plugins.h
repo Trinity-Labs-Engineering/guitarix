@@ -121,8 +121,11 @@ private:
     std::string idstring;
     std::vector<CachedNamModel> model_cache;
     volatile int scene_smoother_snap_pending;
+    bool muted_scene_parameter_batch;
+    bool scene_smoother_preset;
 
     void clear_state_f();
+    void preset_scene_smoother_targets();
     int load_ui_f(const UiBuilder& b, int form);
     void init(unsigned int sample_rate);
     void compute(int count, float *input0, float *output0);
@@ -146,6 +149,8 @@ public:
     Plugin plugin;
     NeuralAmp(ParamMap& param_, std::string id, sigc::slot<void> sync);
     ~NeuralAmp();
+    void begin_scene_parameter_batch(bool externally_muted);
+    bool finish_scene_parameter_batch();
     void request_scene_smoother_snap();
     bool is_scene_smoother_snap_pending();
     bool finish_scene_smoother_snap();
@@ -226,10 +231,13 @@ private:
     std::string idstring;
     std::vector<CachedNamModel> model_cache;
     volatile int scene_smoother_snap_pending;
+    bool muted_scene_parameter_batch;
+    bool scene_smoother_preset;
     Glib::ustring prepared_generation;
     std::vector<PreparedNamModelDescriptor> prepared_models;
 
     void clear_state_f();
+    void preset_scene_smoother_targets();
     int load_ui_f(const UiBuilder& b, int form);
     void init(unsigned int sample_rate);
     void compute(int count, float *input0, float *output0);
@@ -264,6 +272,8 @@ public:
     Plugin plugin;
     NeuralAmpMulti(ParamMap& param_, std::string id, ParallelThread *pro_, sigc::slot<void> sync);
     ~NeuralAmpMulti();
+    void begin_scene_parameter_batch(bool externally_muted);
+    bool finish_scene_parameter_batch();
     void request_scene_smoother_snap();
     bool is_scene_smoother_snap_pending();
     bool finish_scene_smoother_snap();

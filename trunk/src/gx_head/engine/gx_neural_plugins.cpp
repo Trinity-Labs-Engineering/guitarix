@@ -461,10 +461,24 @@ NeuralAmp::NeuralAmp(ParamMap& param_, std::string id_, sigc::slot<void> sync_)
     nam_output_trim_db = 0.0f;
     gx_system::atomic_set(&ready, 0);
     gx_system::atomic_set(&scene_smoother_snap_pending, 0);
+    muted_scene_parameter_batch = false;
+    scene_smoother_preset = false;
  }
 
 NeuralAmp::~NeuralAmp() {
     delete model;
+}
+
+void NeuralAmp::begin_scene_parameter_batch(bool externally_muted) {
+    muted_scene_parameter_batch = externally_muted;
+    scene_smoother_preset = false;
+}
+
+bool NeuralAmp::finish_scene_parameter_batch() {
+    const bool preset = scene_smoother_preset;
+    muted_scene_parameter_batch = false;
+    scene_smoother_preset = false;
+    return preset;
 }
 
 void NeuralAmp::request_scene_smoother_snap() {
@@ -542,6 +556,15 @@ inline void NeuralAmp::clear_state_f()
     for (int l0 = 0; l0 < 2; l0 = l0 + 1) fRec1[l0] = 0.0;
 }
 
+void NeuralAmp::preset_scene_smoother_targets() {
+    const double input_slow = 0.0010000000000000009 *
+        std::pow(1e+01, 0.05 * double(fVslider0 + nam_input_trim_db));
+    const double output_slow = 0.0010000000000000009 *
+        std::pow(1e+01, 0.05 * double(fVslider1 + nam_output_trim_db));
+    fRec0[0] = fRec0[1] = 1000.0 * input_slow;
+    fRec1[0] = fRec1[1] = 1000.0 * output_slow;
+}
+
 void NeuralAmp::clear_state_f_static(PluginDef *p)
 {
     static_cast<NeuralAmp*>(p)->clear_state_f();
@@ -567,25 +590,27 @@ void always_inline NeuralAmp::compute(int count, float *input0, float *output0)
 {
     if (output0 != input0)
         memcpy(output0, input0, count*sizeof(float));
-    const bool model_ready = model && gx_system::atomic_get(ready);
+    const bool processing_ready = gx_system::atomic_get(ready);
     const bool snap_pending = gx_system::atomic_get(scene_smoother_snap_pending);
-    if (!model_ready && !snap_pending) return;
+    // Model replacement sets ready false before sync(). Once the in-flight
+    // callback has completed, later callbacks must not read the model pointer
+    // or smoother state until the control thread publishes the replacement.
+    if (!processing_ready && !snap_pending) return;
+    const bool has_model = model != nullptr;
+    if (!has_model && !snap_pending) return;
     double fSlow0 = 0.0010000000000000009 *
         std::pow(1e+01, 0.05 * double(fVslider0 + nam_input_trim_db));
     double fSlow1 = 0.0010000000000000009 *
         std::pow(1e+01, 0.05 * double(fVslider1 + nam_output_trim_db));
     if (snap_pending) {
-        const double input_target = 1000.0 * fSlow0;
-        const double output_target = 1000.0 * fSlow1;
-        fRec0[0] = fRec0[1] = input_target;
-        fRec1[0] = fRec1[1] = output_target;
+        preset_scene_smoother_targets();
         gx_system::atomic_set(&scene_smoother_snap_pending, 0);
     }
     // An enabled wrapper can legitimately have no selected model (or still be
     // waiting for one to become ready).  It must nevertheless consume a muted
     // scene snap so the RPC acknowledgement cannot be held hostage by this
     // transparent early-return path.
-    if (!model_ready) return;
+    if (!processing_ready || !has_model) return;
     for (int i0 = 0; i0 < count; i0 = i0 + 1) {
         fRec0[0] = fSlow0 + 0.999 * fRec0[1];
         output0[i0] = float(double(output0[i0]) * fRec0[0]);
@@ -701,6 +726,13 @@ void NeuralAmp::load_nam_file() {
                 "Neural Amp Modeler", selected_file, "model");
             gx_print_info("Neural Amp Modeler", "loaded " + std::string(selected_file));
         }
+        if (muted_scene_parameter_batch) {
+            // ready is still false and sync() has observed a complete mono
+            // callback, so the control thread exclusively owns these local
+            // accumulators. This replaces a redundant post-swap RT barrier.
+            preset_scene_smoother_targets();
+            scene_smoother_preset = true;
+        }
         gx_system::atomic_set(&ready, model ? 1 : 0);
     }
     ramp.mode = model ? ramp.UP : ramp.OFF;
@@ -723,6 +755,10 @@ void NeuralAmp::set_nam_size() {
         update_nam_level_calibration(
             model, &nam_input_trim_db, &nam_output_trim_db, &loudness,
             "Neural Amp Modeler", current_file, "model");
+        if (muted_scene_parameter_batch) {
+            preset_scene_smoother_targets();
+            scene_smoother_preset = true;
+        }
     }
     gx_system::atomic_set(&ready, model ? 1 : 0);
     ramp.mode = model ? ramp.UP : ramp.OFF;
@@ -840,11 +876,25 @@ NeuralAmpMulti::NeuralAmpMulti(ParamMap& param_, std::string id_, ParallelThread
     current_model_sizeb = fVslider4;
     gx_system::atomic_set(&ready, 0);
     gx_system::atomic_set(&scene_smoother_snap_pending, 0);
+    muted_scene_parameter_batch = false;
+    scene_smoother_preset = false;
  }
 
 NeuralAmpMulti::~NeuralAmpMulti() {
     delete modela;
     delete modelb;
+}
+
+void NeuralAmpMulti::begin_scene_parameter_batch(bool externally_muted) {
+    muted_scene_parameter_batch = externally_muted;
+    scene_smoother_preset = false;
+}
+
+bool NeuralAmpMulti::finish_scene_parameter_batch() {
+    const bool preset = scene_smoother_preset;
+    muted_scene_parameter_batch = false;
+    scene_smoother_preset = false;
+    return preset;
 }
 
 void NeuralAmpMulti::request_scene_smoother_snap() {
@@ -1053,6 +1103,21 @@ inline void NeuralAmpMulti::clear_state_f()
     for (int l5 = 0; l5 < 2; l5 = l5 + 1) fDel3[l5] = 0.0;
 }
 
+void NeuralAmpMulti::preset_scene_smoother_targets() {
+    const double input_a_target = std::pow(
+        1e+01, 0.05 * double(fVslider0 + nam_input_trim_dba));
+    const double input_b_target = std::pow(
+        1e+01, 0.05 * double(fVslider01 + nam_input_trim_dbb));
+    const double output_target = std::pow(
+        1e+01, 0.05 * double(fVslider1));
+    const double mix_target = std::max<double>(
+        0.0, std::min<double>(1.0, double(fVslider2)));
+    fRec0[0] = fRec0[1] = input_a_target;
+    fRec01[0] = fRec01[1] = input_b_target;
+    fRec1[0] = fRec1[1] = output_target;
+    fRec2[0] = fRec2[1] = mix_target;
+}
+
 void NeuralAmpMulti::clear_state_f_static(PluginDef *p)
 {
     static_cast<NeuralAmpMulti*>(p)->clear_state_f();
@@ -1217,24 +1282,19 @@ void always_inline NeuralAmpMulti::compute(int count, float *input0, float *outp
 {
     if (output0 != input0)
         memcpy(output0, input0, count*sizeof(float));
+    const bool processing_ready = gx_system::atomic_get(ready);
     const bool snap_pending = gx_system::atomic_get(scene_smoother_snap_pending);
-    if (!modela && !modelb && !snap_pending) return;
+    // Model replacement sets ready false before sync(). Once the in-flight
+    // callback has completed, later callbacks must not touch model pointers or
+    // smoother state until the control thread publishes the replacement.
+    if (!processing_ready && !snap_pending) return;
+    const bool has_model = modela || modelb;
+    if (!has_model && !snap_pending) return;
     double fSlow1 = 0.0010000000000000009 * std::pow(1e+01, 0.05 * double(fVslider1));
     double fSlow2 = 0.0010000000000000009 * double(fVslider2);
 
     if (snap_pending) {
-        const double input_a_target = std::pow(
-            1e+01, 0.05 * double(fVslider0 + nam_input_trim_dba));
-        const double input_b_target = std::pow(
-            1e+01, 0.05 * double(fVslider01 + nam_input_trim_dbb));
-        const double output_target = std::pow(
-            1e+01, 0.05 * double(fVslider1));
-        const double mix_target = std::max<double>(
-            0.0, std::min<double>(1.0, double(fVslider2)));
-        fRec0[0] = fRec0[1] = input_a_target;
-        fRec01[0] = fRec01[1] = input_b_target;
-        fRec1[0] = fRec1[1] = output_target;
-        fRec2[0] = fRec2[1] = mix_target;
+        preset_scene_smoother_targets();
         gx_system::atomic_set(&scene_smoother_snap_pending, 0);
     }
 
@@ -1242,7 +1302,7 @@ void always_inline NeuralAmpMulti::compute(int count, float *input0, float *outp
     // still has to consume the scene snap before returning, otherwise
     // set_scene_muted reports a failed chain commit even though the processing
     // chain itself was published successfully.
-    if (!modela && !modelb) return;
+    if (!processing_ready || !has_model) return;
 
     if (static_cast<size_t>(count) > scratcha.size() ||
         static_cast<size_t>(count) > scratchb.size()) {
@@ -1394,6 +1454,10 @@ void NeuralAmpMulti::load_nam_afile() {
                 "Neural Multi Amp Modeler", selected_file, "A");
             gx_print_info("Neural Multi Amp Modeler", "loaded A " + std::string(selected_file));
         }
+        if (muted_scene_parameter_batch) {
+            preset_scene_smoother_targets();
+            scene_smoother_preset = true;
+        }
         gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
     }
     rampA.mode = modela ? rampA.UP : rampA.OFF;
@@ -1464,6 +1528,10 @@ void NeuralAmpMulti::load_nam_bfile() {
                 "Neural Multi Amp Modeler", selected_file, "B");
             gx_print_info("Neural Multi Amp Modeler", "loaded B " + std::string(selected_file));
         }
+        if (muted_scene_parameter_batch) {
+            preset_scene_smoother_targets();
+            scene_smoother_preset = true;
+        }
         gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
     }
     rampB.mode = modelb ? rampB.UP : rampB.OFF;
@@ -1486,6 +1554,10 @@ void NeuralAmpMulti::set_nam_asize() {
         update_nam_level_calibration(
             modela, &nam_input_trim_dba, &nam_output_trim_dba, &loudnessa,
             "Neural Multi Amp Modeler", current_afile, "A");
+        if (muted_scene_parameter_batch) {
+            preset_scene_smoother_targets();
+            scene_smoother_preset = true;
+        }
     }
     gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
     rampA.mode = modela ? rampA.UP : rampA.OFF;
@@ -1508,6 +1580,10 @@ void NeuralAmpMulti::set_nam_bsize() {
         update_nam_level_calibration(
             modelb, &nam_input_trim_dbb, &nam_output_trim_dbb, &loudnessb,
             "Neural Multi Amp Modeler", current_bfile, "B");
+        if (muted_scene_parameter_batch) {
+            preset_scene_smoother_targets();
+            scene_smoother_preset = true;
+        }
     }
     gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
     rampB.mode = modelb ? rampB.UP : rampB.OFF;

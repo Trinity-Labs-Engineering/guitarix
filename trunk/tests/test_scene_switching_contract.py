@@ -196,6 +196,137 @@ class SceneSwitchingContractTests(unittest.TestCase):
         self.assertIn("pl.add(&scene_outputlevel", engine)
         self.assertNotIn("gx_effects::gx_outputlevel::plugin()", engine)
 
+    def test_model_batches_reuse_the_model_ownership_barrier_for_smoothers(
+        self,
+    ) -> None:
+        rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
+        neural = (ENGINE / "gx_neural_plugins.cpp").read_text(encoding="utf-8")
+        header = (HEADERS / "gx_neural_plugins.h").read_text(encoding="utf-8")
+        scene = rpc.split("FUNCTION(set_scene)", maxsplit=1)[1].split(
+            "FUNCTION(get) {", maxsplit=1
+        )[0]
+        snap_whitelist = scene.split(
+            "if (externally_muted) {", maxsplit=1
+        )[1].split("gx_engine::GxEngine& engine", maxsplit=1)[0]
+
+        # File selection and model-size callbacks already call sync() before
+        # replacing/resetting DSP state. They must not arm an additional RT
+        # snap; real gain/on-off controls still must.
+        for model_control in (
+            'attr == "nam.loadpath"',
+            'attr == "nam.flist"',
+            'attr == "nam.size"',
+            'attr == "snam.loadpath"',
+            'attr == "snam.flist"',
+            'attr == "snam.size"',
+            'attr == "mnam.loadapath"',
+            'attr == "mnam.loadbpath"',
+            'attr == "mnam.falist"',
+            'attr == "mnam.fblist"',
+            'attr == "mnam.sizea"',
+            'attr == "mnam.sizeb"',
+        ):
+            self.assertNotIn(model_control, snap_whitelist)
+        for live_control in (
+            'attr == "nam.input"',
+            'attr == "nam.output"',
+            'attr == "nam.on_off"',
+            'attr == "mnam.input"',
+            'attr == "mnam.inputb"',
+            'attr == "mnam.output"',
+            'attr == "mnam.mix"',
+            'attr == "mnam.on_off"',
+        ):
+            self.assertIn(live_control, snap_whitelist)
+
+        self.assertEqual(header.count("begin_scene_parameter_batch"), 2)
+        self.assertEqual(header.count("finish_scene_parameter_batch"), 2)
+        self.assertLess(
+            scene.index("begin_scene_parameter_batch(externally_muted)"),
+            scene.index("apply_parameter_set(params)"),
+        )
+        self.assertLess(
+            scene.index("apply_parameter_set(params)"),
+            scene.index("finish_scene_parameter_batch()"),
+        )
+        self.assertIn("catch (...) {", scene)
+        self.assertIn('"gainSmoothersPreset"', scene)
+        for plugin in ("nam", "snam", "mnam"):
+            self.assertIn(f'"{plugin}GainSmootherPreset"', scene)
+            self.assertIn(f"{plugin}GainPreset=", scene)
+
+        standalone_load = neural.split(
+            "void NeuralAmp::load_nam_file()", maxsplit=1
+        )[1].split("void NeuralAmp::set_nam_size()", maxsplit=1)[0]
+        self.assertLess(
+            standalone_load.index("sync();"),
+            standalone_load.index("preset_scene_smoother_targets();"),
+        )
+        self.assertLess(
+            standalone_load.index("preset_scene_smoother_targets();"),
+            standalone_load.rindex("atomic_set(&ready"),
+        )
+        for loader, following in (
+            ("void NeuralAmpMulti::load_nam_afile()", "void NeuralAmpMulti::load_nam_bfile_impl()"),
+            ("void NeuralAmpMulti::load_nam_bfile()", "void NeuralAmpMulti::set_nam_asize()"),
+        ):
+            model_load = neural.split(loader, maxsplit=1)[1].split(
+                following, maxsplit=1
+            )[0]
+            self.assertLess(
+                model_load.index("sync();"),
+                model_load.index("preset_scene_smoother_targets();"),
+            )
+            self.assertLess(
+                model_load.index("preset_scene_smoother_targets();"),
+                model_load.rindex("atomic_set(&ready"),
+            )
+
+        multi_compute = neural.split(
+            "void always_inline NeuralAmpMulti::compute", maxsplit=1
+        )[1].split("void NeuralAmpMulti::connect", maxsplit=1)[0]
+        standalone_compute = neural.split(
+            "void always_inline NeuralAmp::compute", maxsplit=1
+        )[1].split("void NeuralAmp::connect", maxsplit=1)[0]
+        self.assertLess(
+            standalone_compute.index("if (!processing_ready && !snap_pending) return;"),
+            standalone_compute.index("const bool has_model = model != nullptr;"),
+        )
+        self.assertLess(
+            standalone_compute.index("if (!processing_ready && !snap_pending) return;"),
+            standalone_compute.index("preset_scene_smoother_targets();"),
+        )
+        self.assertLess(
+            multi_compute.index("if (!processing_ready && !snap_pending) return;"),
+            multi_compute.index("const bool has_model = modela || modelb;"),
+        )
+        self.assertLess(
+            multi_compute.index("if (!processing_ready && !snap_pending) return;"),
+            multi_compute.index("preset_scene_smoother_targets();"),
+        )
+
+    def test_direct_smoother_preset_does_not_mask_a_pending_rt_snap(self) -> None:
+        rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
+        scene = rpc.split("FUNCTION(set_scene)", maxsplit=1)[1].split(
+            "FUNCTION(get) {", maxsplit=1
+        )[0]
+
+        # A batch can contain a model replacement followed by a live gain
+        # change. The direct preset is diagnostic only: requested RT work must
+        # still be consumed before the transaction can succeed.
+        for plugin in ("nam", "snam", "mnam"):
+            self.assertIn(
+                f"bool {plugin}_gain_settled = !snap_{plugin}_gain_rt;", scene
+            )
+            self.assertIn(
+                f"if (snap_{plugin}_gain_rt) {{", scene
+            )
+        failure_predicate = scene.split("if (!commit_ok", maxsplit=1)[1].split(
+            ") {", maxsplit=1
+        )[0]
+        self.assertIn("gain_smoothers_settled", failure_predicate)
+        self.assertNotIn("gain_preset", failure_predicate)
+
     def test_scene_audio_wait_is_selective_shared_and_hard_capped(self) -> None:
         rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
         audio = (ENGINE / "gx_engine_audio.cpp").read_text(encoding="utf-8")
@@ -257,11 +388,11 @@ class SceneSwitchingContractTests(unittest.TestCase):
 
         self.assertLess(
             standalone_compute.index("scene_smoother_snap_pending"),
-            standalone_compute.index("if (!model_ready) return;"),
+            standalone_compute.index("if (!processing_ready || !has_model) return;"),
         )
         self.assertLess(
             multi_compute.index("scene_smoother_snap_pending"),
-            multi_compute.index("if (!modela && !modelb) return;"),
+            multi_compute.index("if (!processing_ready || !has_model) return;"),
         )
 
     def test_song_model_prepare_rpc_uses_the_checked_in_fallback(self) -> None:
