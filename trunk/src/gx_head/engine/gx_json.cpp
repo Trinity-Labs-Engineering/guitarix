@@ -22,12 +22,19 @@
  * ----------------------------------------------------------------------------
  */
 
+#ifdef GX_JSON_WRITER_UNIT_TEST
+// The focused wire regression supplies the lightweight declarations normally
+// provided transitively by engine.h, then compiles this production writer.
+#include "gx_json.h"
+#else
 #include "engine.h"               // NOLINT
+#endif
 
 #include <sys/stat.h>
 
 namespace gx_system {
 
+#ifndef GX_JSON_WRITER_UNIT_TEST
 static bool check_mtime(const std::string& filename, time_t& mtime) {
     struct stat st;
     if (stat(filename.c_str(), &st) != 0) {
@@ -41,6 +48,7 @@ static bool check_mtime(const std::string& filename, time_t& mtime) {
     mtime = t;
     return false;
 }
+#endif
 
 /****************************************************************
  ** JsonWriter
@@ -242,6 +250,8 @@ void JsonStringWriter::send_notify_end() {
 /****************************************************************
  ** JsonParser
  */
+
+#ifndef GX_JSON_WRITER_UNIT_TEST
 
 JsonException::JsonException(const Glib::ustring& desc) {
     what_str = "Json parse error: " + desc;
@@ -2042,5 +2052,7 @@ bool GxSettingsBase::rename_preset(PresetFile& pf, const Glib::ustring& oldname,
     }
     return true;
 }
+
+#endif  // GX_JSON_WRITER_UNIT_TEST
 
 } /* end of gx_system namespace */

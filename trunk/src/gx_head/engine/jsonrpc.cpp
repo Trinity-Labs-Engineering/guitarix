@@ -564,9 +564,9 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         // warm-up have settled.
         jw.begin_object();
         jw.write_kv("applied", static_cast<int>(params.size() / 2));
-        jw.write_kv("topologyChanged", topology_changed);
-        jw.write_kv("chainCommitted", topology_changed);
-        jw.write_kv("chainSettled", chain_settled);
+        jw.write_bool_kv("topologyChanged", topology_changed);
+        jw.write_bool_kv("chainCommitted", topology_changed);
+        jw.write_bool_kv("chainSettled", chain_settled);
         jw.end_object();
     }
 

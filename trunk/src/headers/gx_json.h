@@ -78,12 +78,19 @@ class JsonWriter {
     void write(unsigned int i, bool nl = false);
     void write(const char* p, bool nl = false);
     void write(const string& s, bool nl = false) { write(s.c_str(), nl); }
+    void write_bool(bool v, bool nl = false) {
+        write_lit(v ? "true" : "false", nl);
+    }
     void write_kv(const char *key, float v) { write_key(key); write(v, true); }
     void write_kv(const char *key, double v) { write_key(key); write(v, true); }
     void write_kv(const char *key, int i) { write_key(key); write(i, true); }
     void write_kv(const char *key, unsigned int i) { write_key(key); write(i, true); }
     void write_kv(const char *key, const char* p) { write_key(key); write(p, true); }
     void write_kv(const char *key, const std::string& s) { write_key(key); write(s, true); }
+    void write_bool_kv(const char *key, bool v) {
+        write_key(key);
+        write_bool(v, true);
+    }
     void write_lit(const string& s, bool nl = false);
     void begin_object(bool nl = false);
     void end_object(bool nl = false);
