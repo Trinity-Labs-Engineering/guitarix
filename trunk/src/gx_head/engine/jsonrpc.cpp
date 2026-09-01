@@ -1048,6 +1048,70 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             callback_p99_usecs,
             callback_p999_usecs,
             callback_max_usecs);
+        const gx_engine::NeuralAmp::RuntimeStatus nam_runtime =
+            serv.jack.get_engine().neural_amp.get_runtime_status();
+        const char* nam_runtime_class = "generic";
+        const char* nam_compute_profile = "non-a2";
+        switch (nam_runtime.dsp_info.runtime_class) {
+        case nam::RuntimeDSPClass::None:
+            nam_runtime_class = "none";
+            nam_compute_profile = "none";
+            break;
+        case nam::RuntimeDSPClass::A2Fast3:
+            nam_runtime_class = "A2FastModel<3>";
+            nam_compute_profile = "a2-lite";
+            break;
+        case nam::RuntimeDSPClass::A2Fast8:
+            nam_runtime_class = "A2FastModel<8>";
+            nam_compute_profile = "a2-full";
+            break;
+        case nam::RuntimeDSPClass::Generic:
+            break;
+        }
+        const gx_engine::NeuralAmp::RuntimeStatus snam_runtime =
+            serv.jack.get_engine().sneural_amp.get_runtime_status();
+        const gx_engine::NeuralAmp::RuntimeStatus mnam_a_runtime =
+            serv.jack.get_engine().mneural_amp.get_runtime_status(false);
+        const gx_engine::NeuralAmp::RuntimeStatus mnam_b_runtime =
+            serv.jack.get_engine().mneural_amp.get_runtime_status(true);
+        const auto write_nam_runtime = [&jw](
+            const char* plugin_id,
+            const gx_engine::NeuralAmp::RuntimeStatus& runtime) {
+            const char* runtime_class = "generic";
+            const char* compute_profile = "non-a2";
+            switch (runtime.dsp_info.runtime_class) {
+            case nam::RuntimeDSPClass::None:
+                runtime_class = "none";
+                compute_profile = "none";
+                break;
+            case nam::RuntimeDSPClass::A2Fast3:
+                runtime_class = "A2FastModel<3>";
+                compute_profile = "a2-lite";
+                break;
+            case nam::RuntimeDSPClass::A2Fast8:
+                runtime_class = "A2FastModel<8>";
+                compute_profile = "a2-full";
+                break;
+            case nam::RuntimeDSPClass::Generic:
+                break;
+            }
+            jw.begin_object();
+            jw.write_kv("pluginId", plugin_id);
+            jw.write_kv("schemaVersion", 1);
+            jw.write_kv(
+                "ready",
+                static_cast<int>(runtime.dsp_info.runtime_class != nam::RuntimeDSPClass::None));
+            jw.write_kv("source", "instantiated-dsp");
+            jw.write_kv("modelPath", std::string(runtime.model_path));
+            jw.write_kv("runtimeClass", runtime_class);
+            jw.write_kv("computeProfile", compute_profile);
+            jw.write_kv(
+                "containerClass",
+                runtime.dsp_info.is_container ? "ContainerModel" : "");
+            jw.write_kv("activeSubmodelIndex", runtime.dsp_info.active_submodel_index);
+            jw.write_kv("generation", static_cast<double>(runtime.generation));
+            jw.end_object();
+        };
         jw.begin_object();
         jw.write_kv("cpuLoad", serv.jack.get_jcpu_load());
         jw.write_kv("xrunCount", static_cast<double>(serv.jack.get_xrun_count()));
@@ -1060,6 +1124,33 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_kv("callbackP99Usecs", callback_p99_usecs);
         jw.write_kv("callbackP999Usecs", callback_p999_usecs);
         jw.write_kv("callbackMaxUsecs", callback_max_usecs);
+        jw.write_key("namRuntime");
+        jw.begin_object();
+        jw.write_kv("schemaVersion", 1);
+        jw.write_kv(
+            "ready",
+            static_cast<int>(nam_runtime.dsp_info.runtime_class != nam::RuntimeDSPClass::None));
+        jw.write_kv("source", "instantiated-dsp");
+        jw.write_kv("modelPath", std::string(nam_runtime.model_path));
+        jw.write_kv("runtimeClass", nam_runtime_class);
+        jw.write_kv("computeProfile", nam_compute_profile);
+        jw.write_kv(
+            "containerClass",
+            nam_runtime.dsp_info.is_container ? "ContainerModel" : "");
+        jw.write_kv(
+            "activeSubmodelIndex",
+            nam_runtime.dsp_info.active_submodel_index);
+        jw.write_kv(
+            "generation",
+            static_cast<double>(nam_runtime.generation));
+        jw.end_object();
+        jw.write_key("namRuntimes");
+        jw.begin_array();
+        write_nam_runtime("nam", nam_runtime);
+        write_nam_runtime("snam", snam_runtime);
+        write_nam_runtime("mnam.a", mnam_a_runtime);
+        write_nam_runtime("mnam.b", mnam_b_runtime);
+        jw.end_array();
         jw.end_object();
     }
 
