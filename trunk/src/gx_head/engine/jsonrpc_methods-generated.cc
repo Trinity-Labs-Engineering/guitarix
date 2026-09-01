@@ -282,6 +282,7 @@ const jsonrpc_method_def jsonrpc_method_list[] = {
 	{ "set", false },
 	{ "set_scene", true },
 	{ "set_scene_muted", true },
+	{ "prepare_mnam_models", true },
 	{ "parameterlist", true },
 	{ "get_parameter", true },
 	{ "get_parameter_value", true },

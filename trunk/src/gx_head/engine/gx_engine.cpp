@@ -285,6 +285,7 @@ GxEngine::GxEngine(const string& plugin_dir, ParameterGroups& groups, const gx_s
       // internal audio modules
       noisegate(),
       outputgate(&noisegate),
+      scene_outputlevel(),
       monomute(),
       stereomute(),
       tuner(*this),
@@ -392,7 +393,7 @@ void GxEngine::load_static_plugins() {
 
     // rack stereo modules inserted here
 
-    pl.add(gx_effects::gx_outputlevel::plugin(),  PLUGIN_POS_END);
+    pl.add(&scene_outputlevel,                    PLUGIN_POS_END);
     pl.add(balance::plugin(),                     PLUGIN_POS_END, PGN_MODE_BYPASS);
     pl.add(&stereomute,                           PLUGIN_POS_END, PGN_MODE_MUTE);
     pl.add(fizz_remover::plugin(),                PLUGIN_POS_END, PGN_GUI);

@@ -143,6 +143,33 @@ public:
 };
 
 /****************************************************************
+ ** Scene-aware final output level
+ */
+
+class SceneOutputLevel : public PluginDef {
+private:
+    volatile int scene_smoother_snap_pending;
+    float fVslider0;
+    double fRec0[2];
+
+    void clear_state_f();
+    void init(unsigned int sample_rate);
+    void compute(int count, float *input0, float *input1,
+                 float *output0, float *output1);
+    int register_par(const ParamReg& reg);
+
+    static void clear_state_f_static(PluginDef*);
+    static void init_static(unsigned int sample_rate, PluginDef*);
+    static void compute_static(int count, float *input0, float *input1,
+                               float *output0, float *output1, PluginDef*);
+    static int register_params_static(const ParamReg& reg);
+public:
+    SceneOutputLevel();
+    void request_scene_smoother_snap();
+    bool finish_scene_smoother_snap();
+};
+
+/****************************************************************
  ** class OscilloscopeAdapter
  */
 

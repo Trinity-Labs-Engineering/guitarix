@@ -39,6 +39,22 @@ namespace gx_jack { class GxJack; }
 
 namespace gx_engine {
 
+struct PreparedNamModelDescriptor {
+    char slot;
+    Glib::ustring filename;
+    float size;
+};
+
+struct PreparedNamModelResult {
+    int requested;
+    int active_hits;
+    int cache_hits;
+    int loaded;
+    int capacity;
+    int host_sample_rate;
+    bool rapid_switch_ready;
+};
+
 class Ramp {
 public:
     int                         mode;
@@ -104,6 +120,7 @@ private:
     Glib::ustring load_path;
     std::string idstring;
     std::vector<CachedNamModel> model_cache;
+    volatile int scene_smoother_snap_pending;
 
     void clear_state_f();
     int load_ui_f(const UiBuilder& b, int form);
@@ -129,6 +146,8 @@ public:
     Plugin plugin;
     NeuralAmp(ParamMap& param_, std::string id, sigc::slot<void> sync);
     ~NeuralAmp();
+    void request_scene_smoother_snap();
+    bool finish_scene_smoother_snap();
 };
 
 /****************************************************************
@@ -138,10 +157,12 @@ public:
 class NeuralAmpMulti: public PluginDef {
 private:
     struct CachedNamModel {
+        char slot;
         Glib::ustring filename;
         float size;
         int sample_rate;
         int host_sample_rate;
+        Glib::ustring pin_generation;
         std::unique_ptr<nam::DSP> model;
     };
 
@@ -203,6 +224,9 @@ private:
     Glib::ustring load_bpath;
     std::string idstring;
     std::vector<CachedNamModel> model_cache;
+    volatile int scene_smoother_snap_pending;
+    Glib::ustring prepared_generation;
+    std::vector<PreparedNamModelDescriptor> prepared_models;
 
     void clear_state_f();
     int load_ui_f(const UiBuilder& b, int form);
@@ -220,9 +244,11 @@ private:
     void create_nam_afilelist();
     void create_nam_bfilelist();
     std::unique_ptr<nam::DSP> take_cached_model(
-        const Glib::ustring& filename, float size, int* sample_rate);
+        char slot, const Glib::ustring& filename, float size, int* sample_rate);
     void cache_model(nam::DSP*& active_model, const Glib::ustring& filename,
-                     float size, int sample_rate);
+                     float size, int sample_rate, char slot);
+    bool prepared_key_matches(char slot, const Glib::ustring& filename,
+                              float size) const;
     int register_par(const ParamReg& reg);
 
     static void clear_state_f_static(PluginDef*);
@@ -237,6 +263,11 @@ public:
     Plugin plugin;
     NeuralAmpMulti(ParamMap& param_, std::string id, ParallelThread *pro_, sigc::slot<void> sync);
     ~NeuralAmpMulti();
+    void request_scene_smoother_snap();
+    bool finish_scene_smoother_snap();
+    PreparedNamModelResult prepare_song_models(
+        const Glib::ustring& generation,
+        const std::vector<PreparedNamModelDescriptor>& descriptors);
 };
 
 /****************************************************************

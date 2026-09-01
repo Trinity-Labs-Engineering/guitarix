@@ -490,9 +490,53 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         break;
     }
 
+    FUNCTION(prepare_mnam_models) {
+        if (params.empty() || (params.size() - 1) % 3 != 0) {
+            throw RpcError(
+                -32602,
+                "Invalid param -- expected generation followed by slot/path/size triples");
+        }
+        const Glib::ustring generation = params[0]->getString();
+        if (generation.empty()) {
+            throw RpcError(-32602, "Invalid param -- generation must not be empty");
+        }
+        if ((params.size() - 1) / 3 > 32) {
+            throw RpcError(-32602, "Invalid param -- too many prepared NAM models");
+        }
+        std::vector<gx_engine::PreparedNamModelDescriptor> descriptors;
+        for (unsigned int i = 1; i < params.size(); i += 3) {
+            const Glib::ustring slot_name = params[i]->getString();
+            const Glib::ustring filename = params[i+1]->getString();
+            const float size = params[i+2]->getFloat();
+            if ((slot_name != "A" && slot_name != "B") || filename.empty() ||
+                !std::isfinite(size) || size < 0.0f || size > 1.0f) {
+                throw RpcError(-32602, "Invalid prepared NAM model descriptor");
+            }
+            descriptors.push_back(gx_engine::PreparedNamModelDescriptor{
+                static_cast<char>(slot_name[0]), filename, size,
+            });
+        }
+        const gx_engine::PreparedNamModelResult result =
+            serv.jack.get_engine().mneural_amp.prepare_song_models(
+                generation, descriptors);
+        jw.begin_object();
+        jw.write_kv("requested", result.requested);
+        jw.write_kv("activeHits", result.active_hits);
+        jw.write_kv("cacheHits", result.cache_hits);
+        jw.write_kv("loaded", result.loaded);
+        jw.write_kv("capacity", result.capacity);
+        jw.write_kv("hostSampleRate", result.host_sample_rate);
+        jw.write_bool_kv("rapidSwitchReady", result.rapid_switch_ready);
+        jw.end_object();
+    }
+
     FUNCTION(set_scene)
     case RPCM_set_scene_muted: {
         const bool externally_muted = mn->m_id == RPCM_set_scene_muted;
+        bool snap_output_gain = false;
+        bool snap_nam_gain = false;
+        bool snap_snam_gain = false;
+        bool snap_mnam_gain = false;
         if (params.size() & 1) {
             throw RpcError(-32602, "Invalid param -- array length must be even");
         }
@@ -561,16 +605,82 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             } else {
                 throw RpcError(-32602, "Invalid param -- unknown variable type");
             }
+
+            if (externally_muted) {
+                snap_output_gain = snap_output_gain || attr == "amp.out_master";
+                snap_nam_gain = snap_nam_gain ||
+                    attr == "nam.input" || attr == "nam.output" ||
+                    attr == "nam.on_off" || attr == "nam.loadpath" ||
+                    attr == "nam.flist" || attr == "nam.size";
+                snap_snam_gain = snap_snam_gain ||
+                    attr == "snam.input" || attr == "snam.output" ||
+                    attr == "snam.on_off" || attr == "snam.loadpath" ||
+                    attr == "snam.flist" || attr == "snam.size";
+                snap_mnam_gain = snap_mnam_gain ||
+                    attr == "mnam.input" || attr == "mnam.inputb" ||
+                    attr == "mnam.output" || attr == "mnam.mix" ||
+                    attr == "mnam.on_off" || attr == "mnam.loadapath" ||
+                    attr == "mnam.loadbpath" || attr == "mnam.falist" ||
+                    attr == "mnam.fblist" || attr == "mnam.sizea" ||
+                    attr == "mnam.sizeb";
+            }
         }
 
         apply_parameter_set(params);
+        gx_engine::GxEngine& engine = serv.jack.get_engine();
+        // Do not arm a bypassed NAM wrapper: it cannot consume an RT request,
+        // and carrying the request into a later unmuted activation would turn
+        // a scene-only snap into an interactive one.
+        snap_nam_gain = snap_nam_gain && engine.neural_amp.plugin.get_on_off();
+        snap_snam_gain = snap_snam_gain && engine.sneural_amp.plugin.get_on_off();
+        snap_mnam_gain = snap_mnam_gain && engine.mneural_amp.plugin.get_on_off();
+        int requested_gain_snaps = 0;
+        if (snap_output_gain) {
+            engine.scene_outputlevel.request_scene_smoother_snap();
+            ++requested_gain_snaps;
+        }
+        if (snap_nam_gain) {
+            engine.neural_amp.request_scene_smoother_snap();
+            ++requested_gain_snaps;
+        }
+        if (snap_snam_gain) {
+            engine.sneural_amp.request_scene_smoother_snap();
+            ++requested_gain_snaps;
+        }
+        if (snap_mnam_gain) {
+            engine.mneural_amp.request_scene_smoother_snap();
+            ++requested_gain_snaps;
+        }
         bool commit_ok = false;
-        bool topology_changed = serv.jack.get_engine().commit_pending_module_lists(
+        bool topology_changed = engine.commit_pending_module_lists(
             externally_muted, &commit_ok);
         bool chain_settled = !topology_changed ||
-            serv.jack.get_engine().wait_ramp_up_finished();
+            engine.wait_ramp_up_finished();
+        const bool gain_audio_cycle_finished = !requested_gain_snaps ||
+            engine.wait_scene_audio_cycle();
+        bool gain_smoothers_settled = gain_audio_cycle_finished;
+        if (snap_output_gain) {
+            gain_smoothers_settled =
+                engine.scene_outputlevel.finish_scene_smoother_snap() &&
+                gain_smoothers_settled;
+        }
+        if (snap_nam_gain) {
+            gain_smoothers_settled =
+                engine.neural_amp.finish_scene_smoother_snap() &&
+                gain_smoothers_settled;
+        }
+        if (snap_snam_gain) {
+            gain_smoothers_settled =
+                engine.sneural_amp.finish_scene_smoother_snap() &&
+                gain_smoothers_settled;
+        }
+        if (snap_mnam_gain) {
+            gain_smoothers_settled =
+                engine.mneural_amp.finish_scene_smoother_snap() &&
+                gain_smoothers_settled;
+        }
 
-        if (!commit_ok || !chain_settled) {
+        if (!commit_ok || !chain_settled || !gain_smoothers_settled) {
             // Parameters may already have been staged, but failed modules are
             // kept out of the processing chain and the caller receives no
             // success acknowledgement. Houston therefore keeps the hardware
@@ -580,8 +690,9 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
 
         // The response is written only after any pending module-list commit
         // has published its processing-chain pointer and its chain ramp-up has
-        // finished. It does not claim that parameter smoothers or convolver
-        // warm-up have settled.
+        // finished. Under an external hardware mute it also covers the narrow
+        // gain-smoother whitelist above; convolver and time-effect state are
+        // deliberately outside this acknowledgement.
         jw.begin_object();
         jw.write_kv("applied", static_cast<int>(params.size() / 2));
         jw.write_bool_kv("topologyChanged", topology_changed);
@@ -589,6 +700,8 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_bool_kv("chainSettled", chain_settled);
         jw.write_bool_kv(
             "rampSuppressed", externally_muted && topology_changed);
+        jw.write_bool_kv("gainSmoothersSnapped", requested_gain_snaps > 0);
+        jw.write_bool_kv("gainSmoothersSettled", gain_smoothers_settled);
         jw.end_object();
     }
 
@@ -1494,6 +1607,7 @@ bool CmdConnection::request(gx_system::JsonStringParser& jp, gx_system::JsonStri
     // host does not carry the gperf build dependency.
     static const methodnames fallback_methods[] = {
         { "set_scene", RPCM_set_scene },
+        { "prepare_mnam_models", RPCM_prepare_mnam_models },
         { "jack_performance_status", RPCM_jack_performance_status },
         { "jack_deactivate", RPCM_jack_deactivate },
         { "jack_activate", RPCM_jack_activate },

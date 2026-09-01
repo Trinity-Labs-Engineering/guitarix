@@ -136,6 +136,103 @@ void OutPutGate::outputgate_compute(int count, float *input, float *output, Plug
 }
 
 /****************************************************************
+ ** SceneOutputLevel
+ **
+ ** Normal interactive changes retain Guitarix's original 0.999 one-pole
+ ** smoothing.  An acknowledged scene transaction may ask the RT thread to
+ ** place the accumulator directly at its new target while Houston's hardware
+ ** guard is already muted.
+ */
+
+SceneOutputLevel::SceneOutputLevel()
+    : PluginDef(), scene_smoother_snap_pending(0), fVslider0(0.0f) {
+    version = PLUGINDEF_VERSION;
+    flags = 0;
+    groups = 0;
+    id = "gx_outputlevel";
+    name = N_("gx_outputlevel");
+    description = "";
+    category = "";
+    shortname = "";
+    mono_audio = 0;
+    stereo_audio = compute_static;
+    set_samplerate = init_static;
+    activate_plugin = 0;
+    register_params = register_params_static;
+    load_ui = 0;
+    clear_state = clear_state_f_static;
+    delete_instance = 0;
+    clear_state_f();
+}
+
+void SceneOutputLevel::clear_state_f() {
+    fRec0[0] = 0.0;
+    fRec0[1] = 0.0;
+    gx_system::atomic_set(&scene_smoother_snap_pending, 0);
+}
+
+void SceneOutputLevel::clear_state_f_static(PluginDef *p) {
+    static_cast<SceneOutputLevel*>(p)->clear_state_f();
+}
+
+void SceneOutputLevel::init(unsigned int sample_rate) {
+    (void)sample_rate;
+    clear_state_f();
+}
+
+void SceneOutputLevel::init_static(unsigned int sample_rate, PluginDef *p) {
+    static_cast<SceneOutputLevel*>(p)->init(sample_rate);
+}
+
+void SceneOutputLevel::request_scene_smoother_snap() {
+    gx_system::atomic_set(&scene_smoother_snap_pending, 1);
+}
+
+bool SceneOutputLevel::finish_scene_smoother_snap() {
+    const bool finished = !gx_system::atomic_get(scene_smoother_snap_pending);
+    // A bypassed/stopped chain cannot consume the request.  Never leave a
+    // scene-only snap armed for a later interactive unmute.
+    gx_system::atomic_set(&scene_smoother_snap_pending, 0);
+    return finished;
+}
+
+void always_inline SceneOutputLevel::compute(
+    int count, float *input0, float *input1, float *output0, float *output1) {
+    const double slow = 0.0010000000000000009 *
+        std::pow(1e+01, 0.05 * double(fVslider0));
+    if (gx_system::atomic_get(scene_smoother_snap_pending)) {
+        const double target = 1000.0 * slow;
+        fRec0[0] = target;
+        fRec0[1] = target;
+        gx_system::atomic_set(&scene_smoother_snap_pending, 0);
+    }
+    for (int i = 0; i < count; ++i) {
+        fRec0[0] = slow + 0.999 * fRec0[1];
+        output0[i] = float(double(input0[i]) * fRec0[0]);
+        output1[i] = float(double(input1[i]) * fRec0[0]);
+        fRec0[1] = fRec0[0];
+    }
+}
+
+void __rt_func SceneOutputLevel::compute_static(
+    int count, float *input0, float *input1, float *output0, float *output1,
+    PluginDef *p) {
+    static_cast<SceneOutputLevel*>(p)->compute(
+        count, input0, input1, output0, output1);
+}
+
+int SceneOutputLevel::register_par(const ParamReg& reg) {
+    reg.registerFloatVar(
+        "amp.out_master", N_("Level"), "S", N_("Overall Rack output Volume"),
+        &fVslider0, 0.0, -5e+01, 4.0, 0.1, 0);
+    return 0;
+}
+
+int SceneOutputLevel::register_params_static(const ParamReg& reg) {
+    return static_cast<SceneOutputLevel*>(reg.plugin)->register_par(reg);
+}
+
+/****************************************************************
  ** class GxSeqSettings
  */
 

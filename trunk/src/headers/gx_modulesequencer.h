@@ -383,6 +383,10 @@ public:
     // been published instead of while it is still in the GLib idle queue.
     bool commit_pending_module_lists(bool externally_muted = false,
                                      bool* commit_ok = 0);
+    // Wait until both RT chains have observed at least one callback. Scene
+    // gain snaps are requested from the control thread and consumed only by
+    // the audio thread, so their acknowledgement needs this explicit barrier.
+    bool wait_scene_audio_cycle();
     bool scene_commit_ready();
     virtual void set_rack_changed();
     virtual bool update_module_lists();

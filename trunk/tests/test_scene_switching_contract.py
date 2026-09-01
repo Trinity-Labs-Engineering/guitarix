@@ -24,6 +24,9 @@ class SceneSwitchingContractTests(unittest.TestCase):
         self.assertIn("RPCM_set_scene_muted", generated_header)
         self.assertIn('{"set_scene_muted", RPCM_set_scene_muted}', generated_source)
         self.assertIn('{ "set_scene_muted", true }', generated_source)
+        self.assertIn('"prepare_mnam_models", true', template)
+        self.assertIn("RPCM_prepare_mnam_models", generated_header)
+        self.assertIn('{ "prepare_mnam_models", true }', generated_source)
 
     def test_scene_residency_is_hidden_and_bypassed_in_the_rt_chain(self) -> None:
         loader = (ENGINE / "gx_pluginloader.cpp").read_text(encoding="utf-8")
@@ -98,7 +101,10 @@ class SceneSwitchingContractTests(unittest.TestCase):
 
         self.assertIn("bool* commit_ok", header)
         self.assertIn("*commit_ok = ok;", audio)
-        self.assertIn("if (!commit_ok || !chain_settled)", rpc)
+        self.assertIn(
+            "if (!commit_ok || !chain_settled || !gain_smoothers_settled)",
+            rpc,
+        )
         self.assertIn(
             'throw RpcError(-32001, "Scene processing chain did not commit")', rpc
         )
@@ -133,18 +139,62 @@ class SceneSwitchingContractTests(unittest.TestCase):
         self.assertIn(
             "if (model_cache.size() >= kNamModelCacheEntries)", source
         )
-        self.assertIn(
-            "cache_model(modela, current_afile, current_model_sizea, maSampleRate);",
-            source,
-        )
-        self.assertIn(
-            "cache_model(modelb, current_bfile, current_model_sizeb, mbSampleRate);",
-            source,
-        )
+        self.assertIn("maSampleRate, 'A');", source)
+        self.assertIn("mbSampleRate, 'B');", source)
         self.assertIn("reused prewarmed cached A ", source)
         self.assertIn("reused prewarmed cached B ", source)
-        self.assertIn("model_to_cache->ResetAndPrewarm(", source)
+        multi_parking = source.split(
+            "void NeuralAmpMulti::cache_model", maxsplit=1
+        )[1].split("PreparedNamModelResult", maxsplit=1)[0]
+        self.assertNotIn("ResetAndPrewarm", multi_parking)
+        self.assertNotIn("->Reset(", multi_parking)
+        standalone_parking = source.split(
+            "void NeuralAmp::cache_current_model", maxsplit=1
+        )[1].split("inline void NeuralAmp::clear_state_f", maxsplit=1)[0]
+        self.assertNotIn("ResetAndPrewarm", standalone_parking)
+        self.assertIn("prepare_song_models", source)
+        self.assertIn("load_nam_model(", source)
+        self.assertIn("entry.slot == slot", source)
+        self.assertIn("prepared_generation", header)
         self.assertIn("entry.host_sample_rate == fSampleRate", source)
+
+    def test_muted_scene_snaps_only_the_bounded_gain_whitelist(self) -> None:
+        rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
+        neural = (ENGINE / "gx_neural_plugins.cpp").read_text(encoding="utf-8")
+        internal = (ENGINE / "gx_internal_plugins.cpp").read_text(encoding="utf-8")
+        engine = (ENGINE / "gx_engine.cpp").read_text(encoding="utf-8")
+
+        for parameter_id in (
+            "amp.out_master",
+            "nam.input",
+            "nam.output",
+            "snam.input",
+            "snam.output",
+            "mnam.input",
+            "mnam.inputb",
+            "mnam.output",
+            "mnam.mix",
+        ):
+            self.assertIn(parameter_id, rpc)
+        self.assertNotIn('attr == "mnam.cdelay"', rpc)
+        self.assertIn("wait_scene_audio_cycle()", rpc)
+        self.assertIn('"gainSmoothersSnapped"', rpc)
+        self.assertIn('"gainSmoothersSettled"', rpc)
+        self.assertIn("scene_smoother_snap_pending", neural)
+        self.assertIn("SceneOutputLevel::request_scene_smoother_snap", internal)
+        self.assertIn("pl.add(&scene_outputlevel", engine)
+        self.assertNotIn("gx_effects::gx_outputlevel::plugin()", engine)
+
+    def test_song_model_prepare_rpc_uses_the_checked_in_fallback(self) -> None:
+        rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("FUNCTION(prepare_mnam_models)", rpc)
+        self.assertIn(
+            '{ "prepare_mnam_models", RPCM_prepare_mnam_models }',
+            rpc,
+        )
+        self.assertIn("mneural_amp.prepare_song_models", rpc)
+        self.assertIn('jw.write_bool_kv("rapidSwitchReady"', rpc)
 
     def test_resident_nam_preserves_prewarmed_model_and_smoother_state(self) -> None:
         source = (ENGINE / "gx_neural_plugins.cpp").read_text(encoding="utf-8")

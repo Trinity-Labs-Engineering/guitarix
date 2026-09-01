@@ -460,10 +460,21 @@ NeuralAmp::NeuralAmp(ParamMap& param_, std::string id_, sigc::slot<void> sync_)
     nam_input_trim_db = 0.0f;
     nam_output_trim_db = 0.0f;
     gx_system::atomic_set(&ready, 0);
+    gx_system::atomic_set(&scene_smoother_snap_pending, 0);
  }
 
 NeuralAmp::~NeuralAmp() {
     delete model;
+}
+
+void NeuralAmp::request_scene_smoother_snap() {
+    gx_system::atomic_set(&scene_smoother_snap_pending, 1);
+}
+
+bool NeuralAmp::finish_scene_smoother_snap() {
+    const bool finished = !gx_system::atomic_get(scene_smoother_snap_pending);
+    gx_system::atomic_set(&scene_smoother_snap_pending, 0);
+    return finished;
 }
 
 std::unique_ptr<nam::DSP> NeuralAmp::take_cached_model(
@@ -496,25 +507,10 @@ void NeuralAmp::cache_current_model() {
 
     std::unique_ptr<nam::DSP> model_to_cache(model);
     model = nullptr;
-    try {
-        // Park an actually pre-warmed instance. A later cache hit can publish
-        // it directly instead of paying either graph construction or the
-        // model's warm-up transient on the preset-switch path.
-        model_to_cache->ResetAndPrewarm(
-            mSampleRate,
-            max_nam_model_block_frames(fSampleRate, mSampleRate));
-    } catch (const std::exception& error) {
-        gx_print_info(
-            "Neural Amp Modeler",
-            "failed to prewarm cached " + std::string(current_file) +
-            ": " + error.what());
-        return;
-    } catch (...) {
-        gx_print_info(
-            "Neural Amp Modeler",
-            "failed to prewarm cached " + std::string(current_file));
-        return;
-    }
+    // The outgoing graph was pre-warmed when it was constructed and has just
+    // been processing audio. Park it by ownership transfer only. Resetting and
+    // processing 0.5 seconds of warm-up audio here made every displacement a
+    // synchronous scene-switch cost.
 
     model_cache.erase(
         std::remove_if(
@@ -572,6 +568,13 @@ void always_inline NeuralAmp::compute(int count, float *input0, float *output0)
         std::pow(1e+01, 0.05 * double(fVslider0 + nam_input_trim_db));
     double fSlow1 = 0.0010000000000000009 *
         std::pow(1e+01, 0.05 * double(fVslider1 + nam_output_trim_db));
+    if (gx_system::atomic_get(scene_smoother_snap_pending)) {
+        const double input_target = 1000.0 * fSlow0;
+        const double output_target = 1000.0 * fSlow1;
+        fRec0[0] = fRec0[1] = input_target;
+        fRec1[0] = fRec1[1] = output_target;
+        gx_system::atomic_set(&scene_smoother_snap_pending, 0);
+    }
     for (int i0 = 0; i0 < count; i0 = i0 + 1) {
         fRec0[0] = fSlow0 + 0.999 * fRec0[1];
         output0[i0] = float(double(output0[i0]) * fRec0[0]);
@@ -825,6 +828,7 @@ NeuralAmpMulti::NeuralAmpMulti(ParamMap& param_, std::string id_, ParallelThread
     current_model_sizea = fVslider3;
     current_model_sizeb = fVslider4;
     gx_system::atomic_set(&ready, 0);
+    gx_system::atomic_set(&scene_smoother_snap_pending, 0);
  }
 
 NeuralAmpMulti::~NeuralAmpMulti() {
@@ -832,12 +836,22 @@ NeuralAmpMulti::~NeuralAmpMulti() {
     delete modelb;
 }
 
+void NeuralAmpMulti::request_scene_smoother_snap() {
+    gx_system::atomic_set(&scene_smoother_snap_pending, 1);
+}
+
+bool NeuralAmpMulti::finish_scene_smoother_snap() {
+    const bool finished = !gx_system::atomic_get(scene_smoother_snap_pending);
+    gx_system::atomic_set(&scene_smoother_snap_pending, 0);
+    return finished;
+}
+
 std::unique_ptr<nam::DSP> NeuralAmpMulti::take_cached_model(
-    const Glib::ustring& filename, float size, int* sample_rate) {
+    char slot, const Glib::ustring& filename, float size, int* sample_rate) {
     const auto cached = std::find_if(
         model_cache.begin(), model_cache.end(),
         [&](const CachedNamModel& entry) {
-            return entry.filename == filename &&
+            return entry.slot == slot && entry.filename == filename &&
                 std::fabs(entry.size - size) < 0.0001f &&
                 entry.host_sample_rate == fSampleRate;
         });
@@ -853,9 +867,20 @@ std::unique_ptr<nam::DSP> NeuralAmpMulti::take_cached_model(
     return result;
 }
 
+bool NeuralAmpMulti::prepared_key_matches(
+    char slot, const Glib::ustring& filename, float size) const {
+    return std::find_if(
+        prepared_models.begin(), prepared_models.end(),
+        [&](const PreparedNamModelDescriptor& descriptor) {
+            return descriptor.slot == slot &&
+                descriptor.filename == filename &&
+                std::fabs(descriptor.size - size) < 0.0001f;
+        }) != prepared_models.end();
+}
+
 void NeuralAmpMulti::cache_model(
     nam::DSP*& active_model, const Glib::ustring& filename, float size,
-    int sample_rate) {
+    int sample_rate, char slot) {
     if (!active_model || filename.empty() || filename == kNamNone) {
         delete active_model;
         active_model = nullptr;
@@ -864,42 +889,139 @@ void NeuralAmpMulti::cache_model(
 
     std::unique_ptr<nam::DSP> model_to_cache(active_model);
     active_model = nullptr;
-    try {
-        model_to_cache->ResetAndPrewarm(
-            sample_rate,
-            max_nam_model_block_frames(fSampleRate, sample_rate));
-    } catch (const std::exception& error) {
-        gx_print_info(
-            "Neural Multi Amp Modeler",
-            "failed to prewarm cached " + std::string(filename) +
-            ": " + error.what());
-        return;
-    } catch (...) {
-        gx_print_info(
-            "Neural Multi Amp Modeler",
-            "failed to prewarm cached " + std::string(filename));
-        return;
-    }
-
+    // This graph was pre-warmed at construction and has just been processing
+    // live audio. Parking is deliberately constant-time; song preparation
+    // constructs replacement graphs before performance instead of running a
+    // half-second model warm-up here.
     model_cache.erase(
         std::remove_if(
             model_cache.begin(), model_cache.end(),
             [&](const CachedNamModel& entry) {
-                return entry.filename == filename &&
+                return entry.slot == slot && entry.filename == filename &&
                     std::fabs(entry.size - size) < 0.0001f;
             }),
         model_cache.end());
     if (model_cache.size() >= kNamModelCacheEntries) {
-        model_cache.erase(model_cache.begin());
+        const auto unpinned = std::find_if(
+            model_cache.begin(), model_cache.end(),
+            [&](const CachedNamModel& entry) {
+                return !prepared_key_matches(entry.slot, entry.filename, entry.size);
+            });
+        model_cache.erase(
+            unpinned != model_cache.end() ? unpinned : model_cache.begin());
     }
 
     model_cache.push_back(CachedNamModel{
+        slot,
         filename,
         size,
         sample_rate,
         fSampleRate,
+        prepared_key_matches(slot, filename, size)
+            ? prepared_generation : Glib::ustring(),
         std::move(model_to_cache),
     });
+}
+
+PreparedNamModelResult NeuralAmpMulti::prepare_song_models(
+    const Glib::ustring& generation,
+    const std::vector<PreparedNamModelDescriptor>& descriptors) {
+    PreparedNamModelResult result = {
+        0, 0, 0, 0, static_cast<int>(kNamModelCacheEntries),
+        fSampleRate, false,
+    };
+    if (!is_inited || fSampleRate <= 0) {
+        return result;
+    }
+
+    std::vector<PreparedNamModelDescriptor> unique;
+    for (const PreparedNamModelDescriptor& descriptor : descriptors) {
+        const bool duplicate = std::find_if(
+            unique.begin(), unique.end(),
+            [&](const PreparedNamModelDescriptor& existing) {
+                return existing.slot == descriptor.slot &&
+                    existing.filename == descriptor.filename &&
+                    std::fabs(existing.size - descriptor.size) < 0.0001f;
+            }) != unique.end();
+        if (!duplicate) {
+            unique.push_back(descriptor);
+        }
+    }
+
+    prepared_generation = generation;
+    prepared_models = unique;
+    result.requested = static_cast<int>(unique.size());
+    model_cache.erase(
+        std::remove_if(
+            model_cache.begin(), model_cache.end(),
+            [&](const CachedNamModel& entry) {
+                return entry.host_sample_rate != fSampleRate;
+            }),
+        model_cache.end());
+
+    for (const PreparedNamModelDescriptor& descriptor : unique) {
+        const bool active_hit =
+            (descriptor.slot == 'A' && modela &&
+             current_afile == descriptor.filename &&
+             std::fabs(current_model_sizea - descriptor.size) < 0.0001f) ||
+            (descriptor.slot == 'B' && modelb &&
+             current_bfile == descriptor.filename &&
+             std::fabs(current_model_sizeb - descriptor.size) < 0.0001f);
+        if (active_hit) {
+            ++result.active_hits;
+            continue;
+        }
+
+        const auto cached = std::find_if(
+            model_cache.begin(), model_cache.end(),
+            [&](const CachedNamModel& entry) {
+                return entry.slot == descriptor.slot &&
+                    entry.filename == descriptor.filename &&
+                    std::fabs(entry.size - descriptor.size) < 0.0001f &&
+                    entry.host_sample_rate == fSampleRate;
+            });
+        if (cached != model_cache.end()) {
+            cached->pin_generation = generation;
+            ++result.cache_hits;
+            continue;
+        }
+
+        if (model_cache.size() >= kNamModelCacheEntries) {
+            const auto stale = std::find_if(
+                model_cache.begin(), model_cache.end(),
+                [&](const CachedNamModel& entry) {
+                    return !prepared_key_matches(
+                        entry.slot, entry.filename, entry.size);
+                });
+            if (stale == model_cache.end()) {
+                continue;
+            }
+            model_cache.erase(stale);
+        }
+
+        int model_sample_rate = 0;
+        std::unique_ptr<nam::DSP> prepared = load_nam_model(
+            descriptor.filename, fSampleRate, &model_sample_rate,
+            "Neural Multi Amp Modeler", descriptor.size,
+            descriptor.slot == 'A' ? "prepared A" : "prepared B");
+        if (!prepared) {
+            continue;
+        }
+        model_cache.push_back(CachedNamModel{
+            descriptor.slot,
+            descriptor.filename,
+            descriptor.size,
+            model_sample_rate,
+            fSampleRate,
+            generation,
+            std::move(prepared),
+        });
+        ++result.loaded;
+    }
+
+    result.rapid_switch_ready =
+        result.active_hits + result.cache_hits + result.loaded == result.requested;
+    return result;
 }
 
 inline void NeuralAmpMulti::clear_state_f()
@@ -1084,6 +1206,22 @@ void always_inline NeuralAmpMulti::compute(int count, float *input0, float *outp
     double fSlow1 = 0.0010000000000000009 * std::pow(1e+01, 0.05 * double(fVslider1));
     double fSlow2 = 0.0010000000000000009 * double(fVslider2);
 
+    if (gx_system::atomic_get(scene_smoother_snap_pending)) {
+        const double input_a_target = std::pow(
+            1e+01, 0.05 * double(fVslider0 + nam_input_trim_dba));
+        const double input_b_target = std::pow(
+            1e+01, 0.05 * double(fVslider01 + nam_input_trim_dbb));
+        const double output_target = std::pow(
+            1e+01, 0.05 * double(fVslider1));
+        const double mix_target = std::max<double>(
+            0.0, std::min<double>(1.0, double(fVslider2)));
+        fRec0[0] = fRec0[1] = input_a_target;
+        fRec01[0] = fRec01[1] = input_b_target;
+        fRec1[0] = fRec1[1] = output_target;
+        fRec2[0] = fRec2[1] = mix_target;
+        gx_system::atomic_set(&scene_smoother_snap_pending, 0);
+    }
+
     if (static_cast<size_t>(count) > scratcha.size() ||
         static_cast<size_t>(count) > scratchb.size()) {
         return;
@@ -1193,7 +1331,7 @@ void NeuralAmpMulti::load_nam_afile() {
         int next_sample_rate = 0;
         if (has_selection) {
             next_model = take_cached_model(
-                selected_file, fVslider3, &next_sample_rate);
+                'A', selected_file, fVslider3, &next_sample_rate);
             if (next_model) {
                 gx_print_info(
                     "Neural Multi Amp Modeler",
@@ -1211,7 +1349,8 @@ void NeuralAmpMulti::load_nam_afile() {
         gx_system::atomic_set(&ready, 0);
         sync();
 
-        cache_model(modela, current_afile, current_model_sizea, maSampleRate);
+        cache_model(
+            modela, current_afile, current_model_sizea, maSampleRate, 'A');
         need_aresample = 0;
         loudnessa = 0.0;
         nam_input_trim_dba = 0.0f;
@@ -1262,7 +1401,7 @@ void NeuralAmpMulti::load_nam_bfile() {
         int next_sample_rate = 0;
         if (has_selection) {
             next_model = take_cached_model(
-                selected_file, fVslider4, &next_sample_rate);
+                'B', selected_file, fVslider4, &next_sample_rate);
             if (next_model) {
                 gx_print_info(
                     "Neural Multi Amp Modeler",
@@ -1280,7 +1419,8 @@ void NeuralAmpMulti::load_nam_bfile() {
         gx_system::atomic_set(&ready, 0);
         sync();
 
-        cache_model(modelb, current_bfile, current_model_sizeb, mbSampleRate);
+        cache_model(
+            modelb, current_bfile, current_model_sizeb, mbSampleRate, 'B');
         need_bresample = 0;
         loudnessb = 0.0;
         nam_input_trim_dbb = 0.0f;

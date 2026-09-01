@@ -758,6 +758,16 @@ bool ModuleSequencer::scene_commit_ready() {
 	!(stateflags & (SF_INITIALIZING | SF_JACK_RECONFIG));
 }
 
+bool ModuleSequencer::wait_scene_audio_cycle() {
+    // Arm both latches before waiting for either one; otherwise the second
+    // chain could complete in the gap and add a needless callback of latency.
+    mono_chain.set_latch();
+    stereo_chain.set_latch();
+    const bool mono_finished = mono_chain.wait_rt_finished();
+    const bool stereo_finished = stereo_chain.wait_rt_finished();
+    return mono_finished && stereo_finished;
+}
+
 bool ModuleSequencer::commit_pending_module_lists(bool externally_muted,
 						  bool* commit_ok) {
     if (commit_ok) {

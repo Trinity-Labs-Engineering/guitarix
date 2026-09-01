@@ -85,6 +85,7 @@ public:
     // internal audio modules
     NoiseGate noisegate;
     OutPutGate outputgate;
+    SceneOutputLevel scene_outputlevel;
     MonoMute monomute;
     StereoMute stereomute;
     TunerAdapter tuner;
@@ -126,4 +127,3 @@ public:
 /* ------------------------------------------------------------------- */
 } /* end of gx_engine namespace */
 #endif  // SRC_HEADERS_GX_ENGINE_H_
-
