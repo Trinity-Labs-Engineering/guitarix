@@ -185,6 +185,29 @@ class SceneSwitchingContractTests(unittest.TestCase):
         self.assertIn("pl.add(&scene_outputlevel", engine)
         self.assertNotIn("gx_effects::gx_outputlevel::plugin()", engine)
 
+    def test_model_less_nam_wrappers_consume_muted_scene_snaps(self) -> None:
+        source = (ENGINE / "gx_neural_plugins.cpp").read_text(encoding="utf-8")
+
+        standalone_compute = source.split(
+            "void always_inline NeuralAmp::compute", maxsplit=1
+        )[1].split(
+            "void always_inline NeuralAmpMulti::compute", maxsplit=1
+        )[0]
+        multi_compute = source.split(
+            "void always_inline NeuralAmpMulti::compute", maxsplit=1
+        )[1].split(
+            "void NeuralAmpMulti::connect", maxsplit=1
+        )[0]
+
+        self.assertLess(
+            standalone_compute.index("scene_smoother_snap_pending"),
+            standalone_compute.index("if (!model_ready) return;"),
+        )
+        self.assertLess(
+            multi_compute.index("scene_smoother_snap_pending"),
+            multi_compute.index("if (!modela && !modelb) return;"),
+        )
+
     def test_song_model_prepare_rpc_uses_the_checked_in_fallback(self) -> None:
         rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
 

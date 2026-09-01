@@ -563,18 +563,25 @@ void always_inline NeuralAmp::compute(int count, float *input0, float *output0)
 {
     if (output0 != input0)
         memcpy(output0, input0, count*sizeof(float));
-    if (!model || !gx_system::atomic_get(ready)) return;
+    const bool model_ready = model && gx_system::atomic_get(ready);
+    const bool snap_pending = gx_system::atomic_get(scene_smoother_snap_pending);
+    if (!model_ready && !snap_pending) return;
     double fSlow0 = 0.0010000000000000009 *
         std::pow(1e+01, 0.05 * double(fVslider0 + nam_input_trim_db));
     double fSlow1 = 0.0010000000000000009 *
         std::pow(1e+01, 0.05 * double(fVslider1 + nam_output_trim_db));
-    if (gx_system::atomic_get(scene_smoother_snap_pending)) {
+    if (snap_pending) {
         const double input_target = 1000.0 * fSlow0;
         const double output_target = 1000.0 * fSlow1;
         fRec0[0] = fRec0[1] = input_target;
         fRec1[0] = fRec1[1] = output_target;
         gx_system::atomic_set(&scene_smoother_snap_pending, 0);
     }
+    // An enabled wrapper can legitimately have no selected model (or still be
+    // waiting for one to become ready).  It must nevertheless consume a muted
+    // scene snap so the RPC acknowledgement cannot be held hostage by this
+    // transparent early-return path.
+    if (!model_ready) return;
     for (int i0 = 0; i0 < count; i0 = i0 + 1) {
         fRec0[0] = fSlow0 + 0.999 * fRec0[1];
         output0[i0] = float(double(output0[i0]) * fRec0[0]);
@@ -1202,11 +1209,12 @@ void always_inline NeuralAmpMulti::compute(int count, float *input0, float *outp
 {
     if (output0 != input0)
         memcpy(output0, input0, count*sizeof(float));
-    if (!modela && !modelb) return;
+    const bool snap_pending = gx_system::atomic_get(scene_smoother_snap_pending);
+    if (!modela && !modelb && !snap_pending) return;
     double fSlow1 = 0.0010000000000000009 * std::pow(1e+01, 0.05 * double(fVslider1));
     double fSlow2 = 0.0010000000000000009 * double(fVslider2);
 
-    if (gx_system::atomic_get(scene_smoother_snap_pending)) {
+    if (snap_pending) {
         const double input_a_target = std::pow(
             1e+01, 0.05 * double(fVslider0 + nam_input_trim_dba));
         const double input_b_target = std::pow(
@@ -1221,6 +1229,12 @@ void always_inline NeuralAmpMulti::compute(int count, float *input0, float *outp
         fRec2[0] = fRec2[1] = mix_target;
         gx_system::atomic_set(&scene_smoother_snap_pending, 0);
     }
+
+    // A model-less fixed amp stage is a valid transparent configuration.  It
+    // still has to consume the scene snap before returning, otherwise
+    // set_scene_muted reports a failed chain commit even though the processing
+    // chain itself was published successfully.
+    if (!modela && !modelb) return;
 
     if (static_cast<size_t>(count) > scratcha.size() ||
         static_cast<size_t>(count) > scratchb.size()) {
