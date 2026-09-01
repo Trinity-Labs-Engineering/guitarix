@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include "gx_rt_cycle_latch.h"
+
 namespace gx_engine {
 
 /****************************************************************
@@ -46,7 +48,7 @@ class ProcessingChainBase {
 public:
     enum RampMode { ramp_mode_down_dead, ramp_mode_down, ramp_mode_up_dead, ramp_mode_up, ramp_mode_off };
 private:
-    sem_t sync_sem; // RT
+    RtCycleLatch rt_cycle_latch; // RT notification, control-thread wait
     list<Plugin*> to_release;
 protected:
     // Modules which entered this processing chain since the previous commit.
@@ -76,14 +78,9 @@ public:
     void set_samplerate(int samplerate);
     bool set_plugin_list(const list<Plugin*> &p);
     void clear_module_states();
-    inline void post_rt_finished() { // RT
-	int val;
-	sem_getvalue(&sync_sem, &val);
-	if (val == 0) {
-	    sem_post(&sync_sem);
-	}
-    }
+    inline void post_rt_finished() { rt_cycle_latch.notify_rt(); } // RT
     bool wait_rt_finished();
+    bool wait_rt_finished_until(const timespec& deadline);
     void set_latch();
     void wait_latch() { wait_rt_finished(); }
     void sync() { set_latch(); wait_latch(); }
@@ -103,6 +100,23 @@ public:
 #ifndef NDEBUG
     void print_chain_state(const char *title);
 #endif
+};
+
+struct SceneAudioCycleStatus {
+    bool mono_requested;
+    bool stereo_requested;
+    bool mono_finished;
+    bool stereo_finished;
+    unsigned int wait_budget_usecs;
+
+    SceneAudioCycleStatus(bool mono, bool stereo, unsigned int budget)
+        : mono_requested(mono), stereo_requested(stereo),
+          mono_finished(!mono), stereo_finished(!stereo),
+          wait_budget_usecs(budget) {}
+
+    bool finished() const {
+        return mono_finished && stereo_finished;
+    }
 };
 
 
@@ -383,10 +397,11 @@ public:
     // been published instead of while it is still in the GLib idle queue.
     bool commit_pending_module_lists(bool externally_muted = false,
                                      bool* commit_ok = 0);
-    // Wait until both RT chains have observed at least one callback. Scene
-    // gain snaps are requested from the control thread and consumed only by
-    // the audio thread, so their acknowledgement needs this explicit barrier.
-    bool wait_scene_audio_cycle();
+    // Wait for only the chains which own pending scene gain snaps. Both waits
+    // share one bounded deadline, so a stalled mono and stereo client cannot
+    // turn one scene batch into two sequential timeout periods.
+    SceneAudioCycleStatus wait_scene_audio_cycle(bool wait_mono,
+                                                  bool wait_stereo);
     bool scene_commit_ready();
     virtual void set_rack_changed();
     virtual bool update_module_lists();

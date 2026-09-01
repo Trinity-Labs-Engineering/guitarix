@@ -471,6 +471,10 @@ void NeuralAmp::request_scene_smoother_snap() {
     gx_system::atomic_set(&scene_smoother_snap_pending, 1);
 }
 
+bool NeuralAmp::is_scene_smoother_snap_pending() {
+    return gx_system::atomic_get(scene_smoother_snap_pending);
+}
+
 bool NeuralAmp::finish_scene_smoother_snap() {
     const bool finished = !gx_system::atomic_get(scene_smoother_snap_pending);
     gx_system::atomic_set(&scene_smoother_snap_pending, 0);
@@ -845,6 +849,10 @@ NeuralAmpMulti::~NeuralAmpMulti() {
 
 void NeuralAmpMulti::request_scene_smoother_snap() {
     gx_system::atomic_set(&scene_smoother_snap_pending, 1);
+}
+
+bool NeuralAmpMulti::is_scene_smoother_snap_pending() {
+    return gx_system::atomic_get(scene_smoother_snap_pending);
 }
 
 bool NeuralAmpMulti::finish_scene_smoother_snap() {

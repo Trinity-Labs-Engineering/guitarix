@@ -656,36 +656,78 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             externally_muted, &commit_ok);
         bool chain_settled = !topology_changed ||
             engine.wait_ramp_up_finished();
-        const bool gain_audio_cycle_finished = !requested_gain_snaps ||
-            engine.wait_scene_audio_cycle();
-        bool gain_smoothers_settled = gain_audio_cycle_finished;
+
+        // A snap can be consumed while module-list publication/release is
+        // completing.  Only arm a chain which still owns a pending request;
+        // waiting for the unrelated chain made mono mNAM-B swaps depend on an
+        // idle/stalled stereo client and doubled the worst-case timeout.
+        const bool output_gain_pending = snap_output_gain &&
+            engine.scene_outputlevel.is_scene_smoother_snap_pending();
+        const bool nam_gain_pending = snap_nam_gain &&
+            engine.neural_amp.is_scene_smoother_snap_pending();
+        const bool snam_gain_pending = snap_snam_gain &&
+            engine.sneural_amp.is_scene_smoother_snap_pending();
+        const bool mnam_gain_pending = snap_mnam_gain &&
+            engine.mneural_amp.is_scene_smoother_snap_pending();
+        const bool mono_gain_pending =
+            nam_gain_pending || snam_gain_pending || mnam_gain_pending;
+        const gx_engine::SceneAudioCycleStatus gain_audio_status =
+            engine.wait_scene_audio_cycle(mono_gain_pending, output_gain_pending);
+        const bool gain_audio_cycle_finished = gain_audio_status.finished();
+
+        bool output_gain_settled = !snap_output_gain;
+        bool nam_gain_settled = !snap_nam_gain;
+        bool snam_gain_settled = !snap_snam_gain;
+        bool mnam_gain_settled = !snap_mnam_gain;
         if (snap_output_gain) {
-            gain_smoothers_settled =
-                engine.scene_outputlevel.finish_scene_smoother_snap() &&
-                gain_smoothers_settled;
+            output_gain_settled =
+                engine.scene_outputlevel.finish_scene_smoother_snap();
         }
         if (snap_nam_gain) {
-            gain_smoothers_settled =
-                engine.neural_amp.finish_scene_smoother_snap() &&
-                gain_smoothers_settled;
+            nam_gain_settled = engine.neural_amp.finish_scene_smoother_snap();
         }
         if (snap_snam_gain) {
-            gain_smoothers_settled =
-                engine.sneural_amp.finish_scene_smoother_snap() &&
-                gain_smoothers_settled;
+            snam_gain_settled =
+                engine.sneural_amp.finish_scene_smoother_snap();
         }
         if (snap_mnam_gain) {
-            gain_smoothers_settled =
-                engine.mneural_amp.finish_scene_smoother_snap() &&
-                gain_smoothers_settled;
+            mnam_gain_settled =
+                engine.mneural_amp.finish_scene_smoother_snap();
         }
+        const bool gain_smoothers_settled =
+            output_gain_settled && nam_gain_settled &&
+            snam_gain_settled && mnam_gain_settled;
 
         if (!commit_ok || !chain_settled || !gain_smoothers_settled) {
-            // Parameters may already have been staged, but failed modules are
-            // kept out of the processing chain and the caller receives no
-            // success acknowledgement. Houston therefore keeps the hardware
-            // guard muted instead of exposing a partial scene.
-            throw RpcError(-32001, "Scene processing chain did not commit");
+            // The audio-cycle semaphore is a wake-up aid, not the transaction
+            // predicate.  A callback can consume every snap and then exceed
+            // the bounded wait while finishing a heavy NAM block; that scene
+            // is safe to acknowledge. Conversely, any unconsumed snap is
+            // cancelled by finish_scene_smoother_snap() and remains fatal.
+            std::ostringstream details;
+            details << "Scene transaction did not settle:"
+                    << " commitOk=" << (commit_ok ? "true" : "false")
+                    << " topologyChanged=" << (topology_changed ? "true" : "false")
+                    << " chainSettled=" << (chain_settled ? "true" : "false")
+                    << " monoAudioRequested="
+                    << (gain_audio_status.mono_requested ? "true" : "false")
+                    << " monoAudioFinished="
+                    << (gain_audio_status.mono_finished ? "true" : "false")
+                    << " stereoAudioRequested="
+                    << (gain_audio_status.stereo_requested ? "true" : "false")
+                    << " stereoAudioFinished="
+                    << (gain_audio_status.stereo_finished ? "true" : "false")
+                    << " waitBudgetUsecs=" << gain_audio_status.wait_budget_usecs
+                    << " outputGainRequested=" << (snap_output_gain ? "true" : "false")
+                    << " outputGainSettled=" << (output_gain_settled ? "true" : "false")
+                    << " namGainRequested=" << (snap_nam_gain ? "true" : "false")
+                    << " namGainSettled=" << (nam_gain_settled ? "true" : "false")
+                    << " snamGainRequested=" << (snap_snam_gain ? "true" : "false")
+                    << " snamGainSettled=" << (snam_gain_settled ? "true" : "false")
+                    << " mnamGainRequested=" << (snap_mnam_gain ? "true" : "false")
+                    << " mnamGainSettled=" << (mnam_gain_settled ? "true" : "false");
+            gx_print_warning("scene switch", details.str());
+            throw RpcError(-32001, details.str());
         }
 
         // The response is written only after any pending module-list commit
@@ -696,12 +738,32 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.begin_object();
         jw.write_kv("applied", static_cast<int>(params.size() / 2));
         jw.write_bool_kv("topologyChanged", topology_changed);
+        jw.write_bool_kv("commitOk", commit_ok);
         jw.write_bool_kv("chainCommitted", topology_changed);
         jw.write_bool_kv("chainSettled", chain_settled);
         jw.write_bool_kv(
             "rampSuppressed", externally_muted && topology_changed);
         jw.write_bool_kv("gainSmoothersSnapped", requested_gain_snaps > 0);
         jw.write_bool_kv("gainSmoothersSettled", gain_smoothers_settled);
+        jw.write_bool_kv("gainAudioCycleFinished", gain_audio_cycle_finished);
+        jw.write_bool_kv(
+            "monoAudioCycleRequested", gain_audio_status.mono_requested);
+        jw.write_bool_kv(
+            "monoAudioCycleFinished", gain_audio_status.mono_finished);
+        jw.write_bool_kv(
+            "stereoAudioCycleRequested", gain_audio_status.stereo_requested);
+        jw.write_bool_kv(
+            "stereoAudioCycleFinished", gain_audio_status.stereo_finished);
+        jw.write_kv("gainAudioCycleWaitUsecs",
+                    gain_audio_status.wait_budget_usecs);
+        jw.write_bool_kv("outputGainSmootherRequested", snap_output_gain);
+        jw.write_bool_kv("outputGainSmootherSettled", output_gain_settled);
+        jw.write_bool_kv("namGainSmootherRequested", snap_nam_gain);
+        jw.write_bool_kv("namGainSmootherSettled", nam_gain_settled);
+        jw.write_bool_kv("snamGainSmootherRequested", snap_snam_gain);
+        jw.write_bool_kv("snamGainSmootherSettled", snam_gain_settled);
+        jw.write_bool_kv("mnamGainSmootherRequested", snap_mnam_gain);
+        jw.write_bool_kv("mnamGainSmootherSettled", mnam_gain_settled);
         jw.end_object();
     }
 

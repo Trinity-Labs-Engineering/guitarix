@@ -33,7 +33,7 @@ namespace gx_engine {
  */
 
 ProcessingChainBase::ProcessingChainBase():
-    sync_sem(),
+    rt_cycle_latch(),
     to_release(),
     to_initialize(),
     ramp_value(0),
@@ -44,7 +44,6 @@ ProcessingChainBase::ProcessingChainBase():
     steps_down(),
     modules(),
     next_commit_needs_ramp() {
-    sem_init(&sync_sem, 0, 0);
     set_samplerate(96000);
 
 }
@@ -69,10 +68,6 @@ bool ProcessingChainBase::wait_rt_finished() {
 	return true;
     }
 
-#ifdef __APPLE__
-    // no timedewait here
-    while (sem_wait(&sync_sem) == -1) {
-#else
     timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     const long ns_in_sec = 1000000000;
@@ -81,32 +76,26 @@ bool ProcessingChainBase::wait_rt_finished() {
 	ts.tv_nsec -= ns_in_sec;
 	ts.tv_sec += 1;
     }
-    while (sem_timedwait(&sync_sem, &ts) == -1) {
-#endif
-        if (errno == EINTR) {
-	    continue;
-	}
-	if (errno == ETIMEDOUT) {
-	    gx_print_warning("sem_timedwait", "timeout");
-	    return false;
-	}
+    return wait_rt_finished_until(ts);
+}
+
+bool ProcessingChainBase::wait_rt_finished_until(const timespec& deadline) {
+    if (stopped) {
+	return true;
+    }
+    if (rt_cycle_latch.wait_until(deadline)) {
+        return true;
+    }
+    if (errno == ETIMEDOUT) {
+	gx_print_warning("sem_timedwait", "timeout");
+    } else {
 	gx_print_error("sem_timedwait", "unknown error");
-	break;
-#ifdef __APPLE__ // make it look like balanced braces for code formatting tools
     }
-#else
-    }
-#endif
-    return true;
+    return false;
 }
 
 void ProcessingChainBase::set_latch() {
-    int val;
-    sem_getvalue(&sync_sem, &val);
-    if (val > 0) {
-	sem_wait(&sync_sem);
-    }
-    assert(sem_getvalue(&sync_sem, &val) == 0 && val == 0);
+    rt_cycle_latch.arm();
 }
 
 void ProcessingChainBase::wait_ramp_down_finished() {
@@ -313,10 +302,8 @@ void ProcessingChainBase::release() {
 
 #ifndef NDEBUG
 void ProcessingChainBase::print_chain_state(const char *title) {
-    int val;
-    sem_getvalue(&sync_sem, &val);
-    printf("%s sync_sem = %d, stopped = %d, ramp_mode = %d\n",
-	   title, val, stopped, ramp_mode);
+    printf("%s rt_generation = %u, stopped = %d, ramp_mode = %d\n",
+	   title, rt_cycle_latch.generation(), stopped, ramp_mode);
 }
 #endif
 
@@ -758,14 +745,53 @@ bool ModuleSequencer::scene_commit_ready() {
 	!(stateflags & (SF_INITIALIZING | SF_JACK_RECONFIG));
 }
 
-bool ModuleSequencer::wait_scene_audio_cycle() {
-    // Arm both latches before waiting for either one; otherwise the second
-    // chain could complete in the gap and add a needless callback of latency.
-    mono_chain.set_latch();
-    stereo_chain.set_latch();
-    const bool mono_finished = mono_chain.wait_rt_finished();
-    const bool stereo_finished = stereo_chain.wait_rt_finished();
-    return mono_finished && stereo_finished;
+SceneAudioCycleStatus ModuleSequencer::wait_scene_audio_cycle(
+    bool wait_mono, bool wait_stereo) {
+    // Three periods permits several real callbacks under normal scheduling;
+    // the floor covers very small JACK buffers and the cap bounds a stalled
+    // scene batch. The same absolute deadline is used by both chains.
+    const unsigned long long period_usecs = get_samplerate()
+        ? (static_cast<unsigned long long>(get_buffersize()) * 1000000ULL +
+           get_samplerate() - 1) / get_samplerate()
+        : 0;
+    const unsigned int wait_budget_usecs = static_cast<unsigned int>(
+        std::max<unsigned long long>(
+            10000ULL,
+            std::min<unsigned long long>(50000ULL, period_usecs * 3 + 2000ULL)));
+    SceneAudioCycleStatus status(wait_mono, wait_stereo, wait_budget_usecs);
+    if (!wait_mono && !wait_stereo) {
+        return status;
+    }
+
+    // Arm every required chain before waiting for either one. Generation-
+    // qualified latches make a callback racing this arm observable even when
+    // its semaphore token is drained.
+    if (wait_mono) {
+        mono_chain.set_latch();
+    }
+    if (wait_stereo) {
+        stereo_chain.set_latch();
+    }
+
+    timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    const long ns_in_sec = 1000000000L;
+    const unsigned long long added_nsecs =
+        static_cast<unsigned long long>(wait_budget_usecs) * 1000ULL;
+    deadline.tv_sec += static_cast<time_t>(added_nsecs / ns_in_sec);
+    deadline.tv_nsec += static_cast<long>(added_nsecs % ns_in_sec);
+    if (deadline.tv_nsec >= ns_in_sec) {
+        deadline.tv_nsec -= ns_in_sec;
+        ++deadline.tv_sec;
+    }
+
+    if (wait_mono) {
+        status.mono_finished = mono_chain.wait_rt_finished_until(deadline);
+    }
+    if (wait_stereo) {
+        status.stereo_finished = stereo_chain.wait_rt_finished_until(deadline);
+    }
+    return status;
 }
 
 bool ModuleSequencer::commit_pending_module_lists(bool externally_muted,

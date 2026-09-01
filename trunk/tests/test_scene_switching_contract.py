@@ -105,9 +105,18 @@ class SceneSwitchingContractTests(unittest.TestCase):
             "if (!commit_ok || !chain_settled || !gain_smoothers_settled)",
             rpc,
         )
-        self.assertIn(
-            'throw RpcError(-32001, "Scene processing chain did not commit")', rpc
-        )
+        self.assertIn('throw RpcError(-32001, details.str())', rpc)
+        for diagnostic in (
+            "commitOk=",
+            "chainSettled=",
+            "monoAudioFinished=",
+            "stereoAudioFinished=",
+            "outputGainSettled=",
+            "namGainSettled=",
+            "snamGainSettled=",
+            "mnamGainSettled=",
+        ):
+            self.assertIn(diagnostic, rpc)
 
     def test_reverse_delay_exposes_a_tail_reset_for_resident_reenable(self) -> None:
         source = (TRUNK / "src" / "plugins" / "reversedelay.cc").read_text(
@@ -177,13 +186,60 @@ class SceneSwitchingContractTests(unittest.TestCase):
         ):
             self.assertIn(parameter_id, rpc)
         self.assertNotIn('attr == "mnam.cdelay"', rpc)
-        self.assertIn("wait_scene_audio_cycle()", rpc)
+        self.assertIn(
+            "wait_scene_audio_cycle(mono_gain_pending, output_gain_pending)", rpc
+        )
         self.assertIn('"gainSmoothersSnapped"', rpc)
         self.assertIn('"gainSmoothersSettled"', rpc)
         self.assertIn("scene_smoother_snap_pending", neural)
         self.assertIn("SceneOutputLevel::request_scene_smoother_snap", internal)
         self.assertIn("pl.add(&scene_outputlevel", engine)
         self.assertNotIn("gx_effects::gx_outputlevel::plugin()", engine)
+
+    def test_scene_audio_wait_is_selective_shared_and_hard_capped(self) -> None:
+        rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
+        audio = (ENGINE / "gx_engine_audio.cpp").read_text(encoding="utf-8")
+        header = (HEADERS / "gx_modulesequencer.h").read_text(encoding="utf-8")
+
+        self.assertIn("mono_gain_pending =", rpc)
+        self.assertIn("nam_gain_pending || snam_gain_pending || mnam_gain_pending", rpc)
+        self.assertIn("output_gain_pending", rpc)
+        self.assertIn("wait_scene_audio_cycle(bool wait_mono", header)
+        scene_wait = audio.split(
+            "SceneAudioCycleStatus ModuleSequencer::wait_scene_audio_cycle", maxsplit=1
+        )[1].split(
+            "bool ModuleSequencer::commit_pending_module_lists", maxsplit=1
+        )[0]
+        self.assertIn("10000ULL", scene_wait)
+        self.assertIn("50000ULL", scene_wait)
+        self.assertEqual(scene_wait.count("timespec deadline;"), 1)
+        self.assertIn("mono_chain.wait_rt_finished_until(deadline)", scene_wait)
+        self.assertIn("stereo_chain.wait_rt_finished_until(deadline)", scene_wait)
+
+    def test_consumed_snap_is_authoritative_over_a_missed_wakeup(self) -> None:
+        rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
+        scene = rpc.split("FUNCTION(set_scene)", maxsplit=1)[1].split(
+            "FUNCTION(get) {", maxsplit=1
+        )[0]
+        failure_predicate = scene.split("if (!commit_ok", maxsplit=1)[1].split(
+            ") {", maxsplit=1
+        )[0]
+
+        self.assertNotIn("gain_audio_cycle_finished", failure_predicate)
+        self.assertIn("gain_smoothers_settled", failure_predicate)
+        for smoother in ("output", "nam", "snam", "mnam"):
+            self.assertIn(f"{smoother}_gain_settled", scene)
+        self.assertIn("finish_scene_smoother_snap()", scene)
+
+    def test_rt_cycle_latch_uses_generation_as_the_wait_predicate(self) -> None:
+        latch = (HEADERS / "gx_rt_cycle_latch.h").read_text(encoding="utf-8")
+        audio = (ENGINE / "gx_engine_audio.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("generation_counter.fetch_add", latch)
+        self.assertIn("generation_counter.load", latch)
+        self.assertIn("armed_generation", latch)
+        self.assertIn("rt_cycle_latch.arm();", audio)
+        self.assertNotIn("sem_getvalue(&sync_sem", audio)
 
     def test_model_less_nam_wrappers_consume_muted_scene_snaps(self) -> None:
         source = (ENGINE / "gx_neural_plugins.cpp").read_text(encoding="utf-8")

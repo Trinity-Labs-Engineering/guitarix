@@ -147,6 +147,7 @@ public:
     NeuralAmp(ParamMap& param_, std::string id, sigc::slot<void> sync);
     ~NeuralAmp();
     void request_scene_smoother_snap();
+    bool is_scene_smoother_snap_pending();
     bool finish_scene_smoother_snap();
 };
 
@@ -264,6 +265,7 @@ public:
     NeuralAmpMulti(ParamMap& param_, std::string id, ParallelThread *pro_, sigc::slot<void> sync);
     ~NeuralAmpMulti();
     void request_scene_smoother_snap();
+    bool is_scene_smoother_snap_pending();
     bool finish_scene_smoother_snap();
     PreparedNamModelResult prepare_song_models(
         const Glib::ustring& generation,

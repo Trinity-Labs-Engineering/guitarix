@@ -166,6 +166,7 @@ private:
 public:
     SceneOutputLevel();
     void request_scene_smoother_snap();
+    bool is_scene_smoother_snap_pending();
     bool finish_scene_smoother_snap();
 };
 

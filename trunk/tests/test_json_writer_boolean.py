@@ -24,6 +24,7 @@ class JsonWriterBooleanWireTests(unittest.TestCase):
 
         for field, value in (
             ("topologyChanged", "topology_changed"),
+            ("commitOk", "commit_ok"),
             ("chainCommitted", "topology_changed"),
             ("chainSettled", "chain_settled"),
         ):

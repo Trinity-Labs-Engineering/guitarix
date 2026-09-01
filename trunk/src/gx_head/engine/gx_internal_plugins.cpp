@@ -188,6 +188,10 @@ void SceneOutputLevel::request_scene_smoother_snap() {
     gx_system::atomic_set(&scene_smoother_snap_pending, 1);
 }
 
+bool SceneOutputLevel::is_scene_smoother_snap_pending() {
+    return gx_system::atomic_get(scene_smoother_snap_pending);
+}
+
 bool SceneOutputLevel::finish_scene_smoother_snap() {
     const bool finished = !gx_system::atomic_get(scene_smoother_snap_pending);
     // A bypassed/stopped chain cannot consume the request.  Never leave a
