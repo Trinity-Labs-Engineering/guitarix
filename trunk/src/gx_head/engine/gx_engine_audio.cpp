@@ -319,8 +319,19 @@ void __rt_func MonoModuleChain::process(int count, float *input, float *output) 
 	return;
     }
     memcpy(output, input, count*sizeof(float));
+    // A small set of input-dependent resident processors (currently the
+    // dynamics pair) must observe the live signal even while their audible
+    // output is bypassed. Reuse one stack buffer for every such processor;
+    // nothing from the background pass is published to the chain.
+    float resident_bypass_output[count];
     for (monochain_data *p = get_rt_chain(); p->func; ++p) {
 	if (p->owner && !p->owner->get_rt_on_off()) {
+	    if (p->plugin->flags & PGNI_RESIDENT_TRACK_BYPASS) {
+		memcpy(resident_bypass_output, output, count*sizeof(float));
+		p->func(
+		    count, resident_bypass_output, resident_bypass_output,
+		    p->plugin);
+	    }
 	    continue;
 	}
 	p->func(count, output, output, p->plugin);

@@ -349,7 +349,8 @@ bool Plugin::commit_rt_scene_state() {
     // leak from its previous scene. Lifecycle-managed modules are cycled here;
     // the mono convolver retains its exact prepared IR across that cycle.
     if (old_state == 2 && (new_state & 1) &&
-        !(pdef->flags & PGNI_RESIDENT_PRESERVE_STATE)) {
+        !(pdef->flags & (PGNI_RESIDENT_PRESERVE_STATE |
+                         PGNI_RESIDENT_TRACK_BYPASS))) {
         if (pdef->clear_state) {
             pdef->clear_state(pdef);
         } else if (pdef->activate_plugin) {

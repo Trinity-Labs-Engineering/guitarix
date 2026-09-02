@@ -1288,6 +1288,7 @@ private:
     bool setParameters( int sampleRate);
     void PitchShift(int count, float *indata, float *outdata);
     void change_buffersize(unsigned int size);
+    static void clear_state_static(PluginDef *p);
     static int  activate_static(bool start, PluginDef*);
     static void del_instance(PluginDef *p);
     static int registerparam(const ParamReg& reg);

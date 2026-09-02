@@ -414,8 +414,85 @@ class SceneSwitchingContractTests(unittest.TestCase):
         self.assertIn("PGNI_RESIDENT_PRESERVE_STATE = 0x200000", header)
         self.assertEqual(source.count("flags = PGNI_RESIDENT_PRESERVE_STATE;"), 2)
         self.assertIn(
-            "!(pdef->flags & PGNI_RESIDENT_PRESERVE_STATE)", loader
+            "PGNI_RESIDENT_PRESERVE_STATE |", loader
         )
+
+    def test_resident_dynamics_track_live_bypass_but_tail_effects_reset(self) -> None:
+        engine = (ENGINE / "gx_engine.cpp").read_text(encoding="utf-8")
+        ladspa = LADSPA_HOST.read_text(encoding="utf-8")
+        audio = (ENGINE / "gx_engine_audio.cpp").read_text(encoding="utf-8")
+        loader = (ENGINE / "gx_pluginloader.cpp").read_text(encoding="utf-8")
+
+        def registration(source: str, plugin: str) -> str:
+            lines = source.splitlines()
+            start = next(
+                index for index, line in enumerate(lines) if plugin in line
+            )
+            statement = lines[start]
+            while ");" not in statement:
+                start += 1
+                statement += " " + lines[start]
+            return statement
+
+        tracker = "PGNI_RESIDENT_TRACK_BYPASS"
+        self.assertIn(
+            tracker,
+            registration(engine, "gx_effects::compressor::plugin()"),
+        )
+        self.assertIn(
+            tracker,
+            registration(engine, "gx_effects::expander::plugin()"),
+        )
+        self.assertIn(
+            tracker,
+            registration(ladspa, "gx_effects::compressor::plugin()"),
+        )
+        self.assertIn("float resident_bypass_output[count];", audio)
+        self.assertIn("memcpy(resident_bypass_output, output", audio)
+        self.assertIn("p->plugin->flags & PGNI_RESIDENT_TRACK_BYPASS", audio)
+        self.assertIn("PGNI_RESIDENT_TRACK_BYPASS", loader)
+
+        for source in (engine, ladspa):
+            for plugin in (
+                "gx_effects::echo::plugin()",
+                "gx_effects::delay::plugin()",
+                "gx_effects::freeverb::plugin()",
+                "pluginlib::reversedelay::plugin()",
+            ):
+                self.assertNotIn(tracker, registration(source, plugin))
+
+    def test_resident_pitch_shift_resets_history_without_rebuilding_fftw(self) -> None:
+        source = (ENGINE / "gx_internal_plugins.cpp").read_text(encoding="utf-8")
+        header = (HEADERS / "gx_internal_plugins.h").read_text(encoding="utf-8")
+
+        constructor = source.split("smbPitchShift::smbPitchShift", maxsplit=1)[1].split(
+            "void smbPitchShift::init", maxsplit=1
+        )[0]
+        reset = source.split("void smbPitchShift::clear_state_static", maxsplit=1)[1].split(
+            "void smbPitchShift::mem_alloc", maxsplit=1
+        )[0]
+        self.assertIn("clear_state = clear_state_static;", constructor)
+        self.assertIn("static void clear_state_static(PluginDef *p);", header)
+        self.assertIn("if (self->mem_allocated)", reset)
+        self.assertIn("self->clear_state();", reset)
+        self.assertNotIn("mem_free", reset)
+        self.assertNotIn("self->mem_alloc(", reset)
+        self.assertNotIn("fftwf_plan_dft_1d", reset)
+
+    def test_legacy_rtneural_audio_reset_does_not_grow_selector_vectors(self) -> None:
+        source = (ENGINE / "gx_neural_plugins.cpp").read_text(encoding="utf-8")
+
+        standalone_clear = source.split(
+            "inline void RtNeural::clear_state_f()", maxsplit=1
+        )[1].split("void RtNeural::clear_state_f_static", maxsplit=1)[0]
+        multi_clear = source.split(
+            "inline void RtNeuralMulti::clear_state_f()", maxsplit=1
+        )[1].split("void RtNeuralMulti::clear_state_f_static", maxsplit=1)[0]
+        self.assertNotIn("file_names.push_back", standalone_clear)
+        self.assertNotIn("file_names.push_back", multi_clear)
+        self.assertIn('rtneural_file_names.assign(128, "None")', source)
+        self.assertIn('rtneural_afile_names.assign(128, "None")', source)
+        self.assertIn('rtneural_bfile_names.assign(128, "None")', source)
 
     def test_resident_mono_convolver_reuses_only_an_exact_prepared_ir(self) -> None:
         source = (ENGINE / "gx_internal_plugins.cpp").read_text(encoding="utf-8")

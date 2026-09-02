@@ -2560,6 +2560,7 @@ smbPitchShift::smbPitchShift(EngineControl& engine_, sigc::slot<void> sync_):
     register_params = registerparam;
     delete_instance = del_instance;
     load_ui = load_ui_f_static;
+    clear_state = clear_state_static;
     plugin = this;
     engine.signal_buffersize_change().connect(
     sigc::mem_fun(*this, &smbPitchShift::change_buffersize));
@@ -2618,6 +2619,17 @@ void smbPitchShift::clear_state()
     gRover = inFifoLatency;
     mem_allocated = true;
     ready = true;
+}
+
+void smbPitchShift::clear_state_static(PluginDef *p)
+{
+    smbPitchShift *self = static_cast<smbPitchShift*>(p);
+    // Initial chain activation owns allocation. Resident re-entry reaches
+    // this hook only after that activation and can therefore reset FIFO/phase
+    // history without tearing down buffers or recreating FFTW plans.
+    if (self->mem_allocated) {
+        self->clear_state();
+    }
 }
 
 void smbPitchShift::mem_alloc()

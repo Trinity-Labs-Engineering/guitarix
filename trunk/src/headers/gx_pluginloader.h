@@ -40,9 +40,15 @@ enum {			       // additional flags for PluginDef (used internally)
     PGNI_UI_REG       = 0x40000, // Plugin registered in user interface
     PGNI_IS_LV2       = 0x80000, // Plugin is in LV2 format
     PGNI_IS_LADSPA    = 0x100000, // Plugin is in LADSPA format
-    // Resetting a resident NAM on re-entry would also rerun model prewarm
-    // synchronously. Preserve its already-warm wrapper/model state instead.
+    // Stateful processors whose cold reset causes a long audible startup may
+    // keep their state across resident bypass/re-entry. Use this narrowly:
+    // effects with audible tails or modulation history must still reset.
     PGNI_RESIDENT_PRESERVE_STATE = 0x200000,
+    // Input-dependent processors can stay current without affecting the
+    // audible chain: while resident and bypassed, run their mono DSP on a
+    // discarded copy of the signal at their rack position. This also implies
+    // that re-entry must not clear the state which the background pass warmed.
+    PGNI_RESIDENT_TRACK_BYPASS = 0x400000,
 };
 
 class Plugin {

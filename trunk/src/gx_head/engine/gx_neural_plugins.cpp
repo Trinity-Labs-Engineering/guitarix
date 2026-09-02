@@ -1779,7 +1779,6 @@ inline void RtNeural::clear_state_f()
 {
     for (int l0 = 0; l0 < 2; l0 = l0 + 1) fRec0[l0] = 0.0;
     for (int l0 = 0; l0 < 2; l0 = l0 + 1) fRec1[l0] = 0.0;
-    for (int l0 = 0; l0 < 127; l0 = l0 + 1) rtneural_file_names.push_back("None");
 }
 
 void RtNeural::clear_state_f_static(PluginDef *p)
@@ -1790,6 +1789,11 @@ void RtNeural::clear_state_f_static(PluginDef *p)
 inline void RtNeural::init(unsigned int sample_rate)
 {
     fSampleRate = sample_rate;
+    // The selector has indices 0..127. Populate its placeholder table once;
+    // audio-state resets must never grow this control-plane vector.
+    if (rtneural_file_names.empty()) {
+        rtneural_file_names.assign(128, "None");
+    }
     clear_state_f();
     ramp.init(fSampleRate);
     is_inited = true;
@@ -2064,8 +2068,6 @@ inline void RtNeuralMulti::clear_state_f()
     for (int l3 = 0; l3 < 2; l3 = l3 + 1) fDel1[l3] = 0.0;
     for (int l4 = 0; l4 < 2; l4 = l4 + 1) fDel2[l4] = 0.0;
     for (int l5 = 0; l5 < 2; l5 = l5 + 1) fDel3[l5] = 0.0;
-    for (int l0 = 0; l0 < 127; l0 = l0 + 1) rtneural_afile_names.push_back("None");
-    for (int l0 = 0; l0 < 127; l0 = l0 + 1) rtneural_bfile_names.push_back("None");
 }
 
 void RtNeuralMulti::clear_state_f_static(PluginDef *p)
@@ -2076,6 +2078,12 @@ void RtNeuralMulti::clear_state_f_static(PluginDef *p)
 inline void RtNeuralMulti::init(unsigned int sample_rate)
 {
     fSampleRate = sample_rate;
+    if (rtneural_afile_names.empty()) {
+        rtneural_afile_names.assign(128, "None");
+    }
+    if (rtneural_bfile_names.empty()) {
+        rtneural_bfile_names.assign(128, "None");
+    }
     clear_state_f();
     IOTA0 = 0;
     is_inited = true;
