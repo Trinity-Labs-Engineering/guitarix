@@ -2560,7 +2560,7 @@ smbPitchShift::smbPitchShift(EngineControl& engine_, sigc::slot<void> sync_):
     register_params = registerparam;
     delete_instance = del_instance;
     load_ui = load_ui_f_static;
-    clear_state = clear_state_static;
+    PluginDef::clear_state = clear_state_static;
     plugin = this;
     engine.signal_buffersize_change().connect(
     sigc::mem_fun(*this, &smbPitchShift::change_buffersize));
