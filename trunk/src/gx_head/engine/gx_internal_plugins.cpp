@@ -145,7 +145,8 @@ void OutPutGate::outputgate_compute(int count, float *input, float *output, Plug
  */
 
 SceneOutputLevel::SceneOutputLevel()
-    : PluginDef(), scene_smoother_snap_pending(0), fVslider0(0.0f) {
+    : PluginDef(), scene_smoother_snap_pending(0),
+      scene_smoother_control_suspended(0), fVslider0(0.0f) {
     version = PLUGINDEF_VERSION;
     flags = 0;
     groups = 0;
@@ -169,6 +170,7 @@ void SceneOutputLevel::clear_state_f() {
     fRec0[0] = 0.0;
     fRec0[1] = 0.0;
     gx_system::atomic_set(&scene_smoother_snap_pending, 0);
+    gx_system::atomic_set(&scene_smoother_control_suspended, 0);
 }
 
 void SceneOutputLevel::clear_state_f_static(PluginDef *p) {
@@ -188,6 +190,22 @@ void SceneOutputLevel::request_scene_smoother_snap() {
     gx_system::atomic_set(&scene_smoother_snap_pending, 1);
 }
 
+void SceneOutputLevel::suspend_scene_smoother_for_control() {
+    gx_system::atomic_set(&scene_smoother_control_suspended, 1);
+}
+
+void SceneOutputLevel::finish_scene_smoother_control(bool preset) {
+    if (preset) {
+        const double slow = 0.0010000000000000009 *
+            std::pow(1e+01, 0.05 * double(fVslider0));
+        const double target = 1000.0 * slow;
+        fRec0[0] = target;
+        fRec0[1] = target;
+        gx_system::atomic_set(&scene_smoother_snap_pending, 0);
+    }
+    gx_system::atomic_set(&scene_smoother_control_suspended, 0);
+}
+
 bool SceneOutputLevel::is_scene_smoother_snap_pending() {
     return gx_system::atomic_get(scene_smoother_snap_pending);
 }
@@ -202,6 +220,19 @@ bool SceneOutputLevel::finish_scene_smoother_snap() {
 
 void always_inline SceneOutputLevel::compute(
     int count, float *input0, float *input1, float *output0, float *output1) {
+    // The hardware mute makes one transparent callback inaudible. It also
+    // gives the control thread a bounded ownership window in which it can
+    // place both accumulator samples at the new scene target without racing
+    // this processor.
+    if (gx_system::atomic_get(scene_smoother_control_suspended)) {
+        if (output0 != input0) {
+            memcpy(output0, input0, count * sizeof(float));
+        }
+        if (output1 != input1) {
+            memcpy(output1, input1, count * sizeof(float));
+        }
+        return;
+    }
     const double slow = 0.0010000000000000009 *
         std::pow(1e+01, 0.05 * double(fVslider0));
     if (gx_system::atomic_get(scene_smoother_snap_pending)) {

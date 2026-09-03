@@ -51,11 +51,9 @@
  *         wait for the data. In case there is no data processed,
  *         or the data is already ready, processWait() returns directly
  *      proc.processWait();
- *         processWait() waits maximal 5 times the timeout. If the
- *         process isn't ready in that time, the data is lost and 
- *         processWait() break to avoid Xruns or dead looks. 
- *         That is the worst case and shouldn't happen 
- *         under normal circumstances.
+ *         processWait() records a capacity miss after 5 timeout periods but
+ *         continues waiting: its caller consumes this exact job's output, so
+ *         returning early would expose partially-written data.
  *      // Finally stop the thread before exit.
  *      proc.stop(); 
  */
@@ -64,6 +62,7 @@
 #define MINGW_STDTHREAD_REDUNDANCY_WARNING
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <unistd.h>
@@ -134,6 +133,8 @@ public:
         : pRun(false)
          ,pWait(false)
          ,isWaiting(false)
+         ,dispatchFallbackCount(0)
+         ,completionDeadlineMissCount(0)
          #if __cplusplus > 201703L
          ,pWorkCond(false)
          #endif
@@ -188,7 +189,8 @@ public:
                     maxDuration +=1;
                     //fprintf(stderr, "%s wait for process %i\n", threadName.c_str(), maxDuration);
                     if (maxDuration > 2) {
-                        //fprintf(stderr, "%s break waitForProcess\n", threadName.c_str());
+                        dispatchFallbackCount.fetch_add(
+                            1, std::memory_order_relaxed);
                         break;
                     }
                 } else {
@@ -208,22 +210,25 @@ public:
         pWorkCond.notify_one();
     }
 
-    // wait for the processed data from the thread, 
-    // in worst case this may fail silent
-    // when to much time expires (5 * timeOut time)
-    // to avoid Xruns or dead looks.
+    // Wait for the exact dispatched job. The caller consumes the worker's
+    // output immediately, so abandoning this rendezvous would permit a read
+    // of a partially-written buffer and let a later callback race the same
+    // model. Record a deadline miss for capacity telemetry, but preserve the
+    // data/lifetime contract and wait for completion.
     inline void processWait() noexcept {
         if (isRunning()) {
             int maxDuration = 0;
+            bool deadlineMissRecorded = false;
             while (pWait.load(std::memory_order_acquire)) {
                 pthread_mutex_lock(&pWaitProc);
                 if (pthread_cond_timedwait(&pProcCond, &pWaitProc, getTimeOut()) == ETIMEDOUT) {
                     pthread_mutex_unlock(&pWaitProc);
                     maxDuration +=1;
                     //fprintf(stderr, "%s wait for data %i\n", threadName.c_str(), maxDuration);
-                    if (maxDuration > 5) {
-                        pWait.store(false, std::memory_order_release);
-                        //fprintf(stderr, "%s break processWait\n", threadName.c_str());
+                    if (maxDuration > 5 && !deadlineMissRecorded) {
+                        completionDeadlineMissCount.fetch_add(
+                            1, std::memory_order_relaxed);
+                        deadlineMissRecorded = true;
                     }
                 } else {
                     pthread_mutex_unlock(&pWaitProc);;
@@ -231,6 +236,14 @@ public:
             }
             //fprintf(stderr, "%s processed data %i\n", threadName.c_str(), maxDuration);
         }
+    }
+
+    uint64_t getDispatchFallbackCount() const noexcept {
+        return dispatchFallbackCount.load(std::memory_order_relaxed);
+    }
+
+    uint64_t getCompletionDeadlineMissCount() const noexcept {
+        return completionDeadlineMissCount.load(std::memory_order_relaxed);
     }
 
     // stop the thread (at least on Destruction)
@@ -253,6 +266,8 @@ private:
     std::atomic<bool> pRun;
     std::atomic<bool> pWait;
     std::atomic<bool> isWaiting;
+    std::atomic<uint64_t> dispatchFallbackCount;
+    std::atomic<uint64_t> completionDeadlineMissCount;
 
     #if __cplusplus > 201703L
     std::atomic<bool> pWorkCond;
@@ -286,6 +301,10 @@ private:
         };
         pRun.store(true, std::memory_order_release);
         pThd = std::thread([this]() {
+            #if defined(__linux__)
+            pthread_setname_np(
+                pthread_self(), threadName.substr(0, 15).c_str());
+            #endif
             #if __cplusplus <= 201703L
             std::unique_lock<std::mutex> lk(pWaitWork);
             #endif
@@ -320,7 +339,13 @@ private:
         if (rt_prio <= 0) {
             rt_prio = sched_get_priority_max(rt_policy);
         }
-        if ((rt_prio/5) > 0) rt_prio = rt_prio/5;
+        // This worker is not background work: the JACK callback synchronously
+        // waits for its model-B result in the same audio period. Lowering it to
+        // one fifth of the caller priority creates priority inversion and can
+        // consume the entire deadline while the high-priority caller waits.
+        const int32_t min_priority = sched_get_priority_min(rt_policy);
+        const int32_t max_priority = sched_get_priority_max(rt_policy);
+        rt_prio = std::max(min_priority, std::min(max_priority, rt_prio));
         sch_params.sched_priority = rt_prio;
         if (pthread_setschedparam(pThd.native_handle(), rt_policy, &sch_params)) {
             fprintf(stderr, "ParallelThread:%s fail to set priority %i shed %i\n", threadName.c_str(), rt_prio, rt_policy);

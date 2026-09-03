@@ -166,6 +166,11 @@ public:
     ~NeuralAmp();
     void begin_scene_parameter_batch(bool externally_muted);
     bool finish_scene_parameter_batch();
+    // Temporarily make the wrapper transparent, then (after the caller has
+    // observed a complete mono callback) publish scene gain accumulator state
+    // from the control thread without racing the RT processor.
+    bool suspend_scene_smoother_for_control();
+    void finish_scene_smoother_control(bool restore_ready, bool preset);
     void request_scene_smoother_snap();
     bool is_scene_smoother_snap_pending();
     bool finish_scene_smoother_snap();
@@ -301,6 +306,8 @@ public:
     ~NeuralAmpMulti();
     void begin_scene_parameter_batch(bool externally_muted);
     bool finish_scene_parameter_batch();
+    bool suspend_scene_smoother_for_control();
+    void finish_scene_smoother_control(bool restore_ready, bool preset);
     void request_scene_smoother_snap();
     bool is_scene_smoother_snap_pending();
     bool finish_scene_smoother_snap();

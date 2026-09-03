@@ -598,8 +598,10 @@ EngineControl::EngineControl()
       samplerate_change(),
       buffersize(0),
       samplerate(0),
-      pluginlist(*this) {
-          pro.start();
+          pluginlist(*this) {
+    // Set the diagnostic/OS name before the thread starts.
+    pro.setThreadName("guitarixRT");
+    pro.start();
 }
 
 EngineControl::~EngineControl() {
@@ -652,7 +654,6 @@ void EngineControl::set_buffersize(unsigned int buffersize_) {
 
 void EngineControl::init(unsigned int samplerate_, unsigned int buffersize_,
 			 int policy_, int priority_) {
-    pro.setThreadName("guitarixRT");
     pro.setTimeOut(std::max(100,static_cast<int>((buffersize/(samplerate*0.000001))*0.1)));
     if (policy_ != policy || priority_ != priority) {
 	policy = policy_;
@@ -791,6 +792,25 @@ SceneAudioCycleStatus ModuleSequencer::wait_scene_audio_cycle(
         std::max<unsigned long long>(
             10000ULL,
             std::min<unsigned long long>(50000ULL, period_usecs * 3 + 2000ULL)));
+    return wait_scene_audio_cycle_with_budget(
+        wait_mono_finish, wait_stereo_finish, observe_scene_start,
+        wait_budget_usecs);
+}
+
+SceneAudioCycleStatus ModuleSequencer::wait_scene_control_cycle(
+    bool wait_mono_finish, bool wait_stereo_finish) {
+    // This is a lifetime/ownership barrier rather than the normal scene-ready
+    // observation. A processor may already be executing when it is made
+    // transparent, so permit that one in-flight callback to finish. All
+    // subsequent callbacks skip the suspended processors and should complete
+    // well inside this hard cap.
+    return wait_scene_audio_cycle_with_budget(
+        wait_mono_finish, wait_stereo_finish, false, 50000U);
+}
+
+SceneAudioCycleStatus ModuleSequencer::wait_scene_audio_cycle_with_budget(
+    bool wait_mono_finish, bool wait_stereo_finish,
+    bool observe_scene_start, unsigned int wait_budget_usecs) {
     SceneAudioCycleStatus status(
         observe_scene_start, wait_mono_finish, wait_stereo_finish,
         wait_budget_usecs);

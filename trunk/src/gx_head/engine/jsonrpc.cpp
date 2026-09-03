@@ -630,9 +630,14 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         engine.neural_amp.begin_scene_parameter_batch(externally_muted);
         engine.sneural_amp.begin_scene_parameter_batch(externally_muted);
         engine.mneural_amp.begin_scene_parameter_batch(externally_muted);
+        bool output_gain_preset = false;
         bool nam_gain_preset = false;
         bool snam_gain_preset = false;
         bool mnam_gain_preset = false;
+        bool output_gain_control_preset = false;
+        bool nam_gain_control_preset = false;
+        bool snam_gain_control_preset = false;
+        bool mnam_gain_control_preset = false;
         try {
             apply_parameter_set(params);
             nam_gain_preset = engine.neural_amp.finish_scene_parameter_batch();
@@ -656,40 +661,79 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             engine.sneural_amp.plugin.get_on_off();
         snap_mnam_gain_rt = snap_mnam_gain_rt &&
             engine.mneural_amp.plugin.get_on_off();
-        int requested_gain_snaps = 0;
-        if (snap_output_gain) {
-            engine.scene_outputlevel.request_scene_smoother_snap();
-            ++requested_gain_snaps;
-        }
-        if (snap_nam_gain_rt) {
-            engine.neural_amp.request_scene_smoother_snap();
-            ++requested_gain_snaps;
-        }
-        if (snap_snam_gain_rt) {
-            engine.sneural_amp.request_scene_smoother_snap();
-            ++requested_gain_snaps;
-        }
-        if (snap_mnam_gain_rt) {
-            engine.mneural_amp.request_scene_smoother_snap();
-            ++requested_gain_snaps;
-        }
+        const int requested_gain_snaps =
+            static_cast<int>(snap_output_gain) +
+            static_cast<int>(snap_nam_gain_rt) +
+            static_cast<int>(snap_snam_gain_rt) +
+            static_cast<int>(snap_mnam_gain_rt);
         bool commit_ok = false;
         bool topology_changed = engine.commit_pending_module_lists(
             externally_muted, &commit_ok);
         bool chain_settled = !topology_changed ||
             engine.wait_ramp_up_finished();
 
+        // Commit first: activation of a newly inserted processor may clear its
+        // state. Once the final chain is published, quiesce every changed
+        // smoother together and use one callback completion as an ownership
+        // barrier. This is independent of processor position and closes the
+        // race where a callback had already passed mNAM/output before the old
+        // RT snap was armed, yet its later completion satisfied the wait.
+        const bool scene_control_barrier_requested =
+            commit_ok && chain_settled && requested_gain_snaps > 0;
+        bool scene_control_barrier_finished =
+            !scene_control_barrier_requested;
+        if (scene_control_barrier_requested) {
+            scene_control_barrier_finished =
+                engine.preset_muted_scene_smoothers(
+                    snap_output_gain, snap_nam_gain_rt,
+                    snap_snam_gain_rt, snap_mnam_gain_rt);
+            if (scene_control_barrier_finished) {
+                output_gain_control_preset = snap_output_gain;
+                nam_gain_control_preset = snap_nam_gain_rt;
+                snam_gain_control_preset = snap_snam_gain_rt;
+                mnam_gain_control_preset = snap_mnam_gain_rt;
+                output_gain_preset = output_gain_control_preset;
+                nam_gain_preset = nam_gain_preset || nam_gain_control_preset;
+                snam_gain_preset = snam_gain_preset || snam_gain_control_preset;
+                mnam_gain_preset = mnam_gain_preset || mnam_gain_control_preset;
+            }
+        }
+
+        // A timed-out ownership barrier leaves accumulator state untouched and
+        // restores every processor. Retain the RT request as a bounded fallback
+        // so a transient scheduling delay can still complete this transaction.
+        const bool output_gain_rt_requested =
+            snap_output_gain && !output_gain_control_preset;
+        const bool nam_gain_rt_requested =
+            snap_nam_gain_rt && !nam_gain_control_preset;
+        const bool snam_gain_rt_requested =
+            snap_snam_gain_rt && !snam_gain_control_preset;
+        const bool mnam_gain_rt_requested =
+            snap_mnam_gain_rt && !mnam_gain_control_preset;
+        if (output_gain_rt_requested) {
+            engine.scene_outputlevel.request_scene_smoother_snap();
+        }
+        if (nam_gain_rt_requested) {
+            engine.neural_amp.request_scene_smoother_snap();
+        }
+        if (snam_gain_rt_requested) {
+            engine.sneural_amp.request_scene_smoother_snap();
+        }
+        if (mnam_gain_rt_requested) {
+            engine.mneural_amp.request_scene_smoother_snap();
+        }
+
         // A snap can be consumed while module-list publication/release is
         // completing.  Only arm a chain which still owns a pending request;
         // waiting for the unrelated chain made mono mNAM-B swaps depend on an
         // idle/stalled stereo client and doubled the worst-case timeout.
-        const bool output_gain_pending = snap_output_gain &&
+        const bool output_gain_pending = output_gain_rt_requested &&
             engine.scene_outputlevel.is_scene_smoother_snap_pending();
-        const bool nam_gain_pending = snap_nam_gain_rt &&
+        const bool nam_gain_pending = nam_gain_rt_requested &&
             engine.neural_amp.is_scene_smoother_snap_pending();
-        const bool snam_gain_pending = snap_snam_gain_rt &&
+        const bool snam_gain_pending = snam_gain_rt_requested &&
             engine.sneural_amp.is_scene_smoother_snap_pending();
-        const bool mnam_gain_pending = snap_mnam_gain_rt &&
+        const bool mnam_gain_pending = mnam_gain_rt_requested &&
             engine.mneural_amp.is_scene_smoother_snap_pending();
         const bool mono_gain_pending =
             nam_gain_pending || snam_gain_pending || mnam_gain_pending;
@@ -706,22 +750,26 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         const bool gain_audio_cycle_finished = scene_audio_status.finished();
         const bool scene_audio_ready = scene_audio_status.started();
 
-        bool output_gain_settled = !snap_output_gain;
-        bool nam_gain_settled = !snap_nam_gain_rt;
-        bool snam_gain_settled = !snap_snam_gain_rt;
-        bool mnam_gain_settled = !snap_mnam_gain_rt;
-        if (snap_output_gain) {
+        bool output_gain_settled =
+            !snap_output_gain || output_gain_control_preset;
+        bool nam_gain_settled =
+            !snap_nam_gain_rt || nam_gain_control_preset;
+        bool snam_gain_settled =
+            !snap_snam_gain_rt || snam_gain_control_preset;
+        bool mnam_gain_settled =
+            !snap_mnam_gain_rt || mnam_gain_control_preset;
+        if (output_gain_rt_requested) {
             output_gain_settled =
                 engine.scene_outputlevel.finish_scene_smoother_snap();
         }
-        if (snap_nam_gain_rt) {
+        if (nam_gain_rt_requested) {
             nam_gain_settled = engine.neural_amp.finish_scene_smoother_snap();
         }
-        if (snap_snam_gain_rt) {
+        if (snam_gain_rt_requested) {
             snam_gain_settled =
                 engine.sneural_amp.finish_scene_smoother_snap();
         }
-        if (snap_mnam_gain_rt) {
+        if (mnam_gain_rt_requested) {
             mnam_gain_settled =
                 engine.mneural_amp.finish_scene_smoother_snap();
         }
@@ -760,7 +808,12 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                     << " sceneAudioReady="
                     << (scene_audio_ready ? "true" : "false")
                     << " waitBudgetUsecs=" << scene_audio_status.wait_budget_usecs
+                    << " sceneControlBarrierRequested="
+                    << (scene_control_barrier_requested ? "true" : "false")
+                    << " sceneControlBarrierFinished="
+                    << (scene_control_barrier_finished ? "true" : "false")
                     << " outputGainRequested=" << (snap_output_gain ? "true" : "false")
+                    << " outputGainPreset=" << (output_gain_preset ? "true" : "false")
                     << " outputGainSettled=" << (output_gain_settled ? "true" : "false")
                     << " namGainRequested=" << (snap_nam_gain_rt ? "true" : "false")
                     << " namGainPreset=" << (nam_gain_preset ? "true" : "false")
@@ -772,7 +825,14 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                     << " mnamGainPreset=" << (mnam_gain_preset ? "true" : "false")
                     << " mnamGainSettled=" << (mnam_gain_settled ? "true" : "false");
             gx_print_warning("scene switch", details.str());
-            throw RpcError(-32001, details.str());
+            // -32001 means publication/activation itself is uncertain and
+            // requires Houston's authoritative full reconciliation. -32002
+            // means the complete parameter set and chain commit succeeded but
+            // the bounded post-commit observation did not; the exact scene
+            // delta can be replayed once without clearing a resident graph.
+            const int error_code = (!commit_ok || !chain_settled)
+                ? -32001 : -32002;
+            throw RpcError(error_code, details.str());
         }
 
         // The response is written only after any pending module-list commit
@@ -791,11 +851,12 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             "rampSuppressed", externally_muted && topology_changed);
         jw.write_bool_kv(
             "gainSmoothersSnapped",
-            requested_gain_snaps > 0 || nam_gain_preset ||
+            requested_gain_snaps > 0 || output_gain_preset || nam_gain_preset ||
                 snam_gain_preset || mnam_gain_preset);
         jw.write_bool_kv(
             "gainSmoothersPreset",
-            nam_gain_preset || snam_gain_preset || mnam_gain_preset);
+            output_gain_preset || nam_gain_preset ||
+                snam_gain_preset || mnam_gain_preset);
         jw.write_bool_kv("gainSmoothersSettled", gain_smoothers_settled);
         jw.write_bool_kv("audioReady", scene_audio_ready);
         jw.write_bool_kv("gainAudioCycleFinished", gain_audio_cycle_finished);
@@ -820,16 +881,25 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             "stereoAudioCycleFinished", scene_audio_status.stereo_finished);
         jw.write_kv("gainAudioCycleWaitUsecs",
                     scene_audio_status.wait_budget_usecs);
+        jw.write_bool_kv(
+            "sceneControlBarrierRequested", scene_control_barrier_requested);
+        jw.write_bool_kv(
+            "sceneControlBarrierFinished", scene_control_barrier_finished);
         jw.write_bool_kv("outputGainSmootherRequested", snap_output_gain);
+        jw.write_bool_kv("outputGainSmootherPreset", output_gain_preset);
+        jw.write_bool_kv("outputGainSmootherRtRequested", output_gain_rt_requested);
         jw.write_bool_kv("outputGainSmootherSettled", output_gain_settled);
         jw.write_bool_kv("namGainSmootherRequested", snap_nam_gain_rt);
         jw.write_bool_kv("namGainSmootherPreset", nam_gain_preset);
+        jw.write_bool_kv("namGainSmootherRtRequested", nam_gain_rt_requested);
         jw.write_bool_kv("namGainSmootherSettled", nam_gain_settled);
         jw.write_bool_kv("snamGainSmootherRequested", snap_snam_gain_rt);
         jw.write_bool_kv("snamGainSmootherPreset", snam_gain_preset);
+        jw.write_bool_kv("snamGainSmootherRtRequested", snam_gain_rt_requested);
         jw.write_bool_kv("snamGainSmootherSettled", snam_gain_settled);
         jw.write_bool_kv("mnamGainSmootherRequested", snap_mnam_gain_rt);
         jw.write_bool_kv("mnamGainSmootherPreset", mnam_gain_preset);
+        jw.write_bool_kv("mnamGainSmootherRtRequested", mnam_gain_rt_requested);
         jw.write_bool_kv("mnamGainSmootherSettled", mnam_gain_settled);
         jw.end_object();
     }
@@ -1109,12 +1179,37 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         unsigned int callback_p99_usecs = 0;
         unsigned int callback_p999_usecs = 0;
         unsigned int callback_max_usecs = 0;
+        unsigned long long amp_callback_count = 0;
+        unsigned int amp_callback_sample_count = 0;
+        unsigned int amp_callback_p99_usecs = 0;
+        unsigned int amp_callback_p999_usecs = 0;
+        unsigned int amp_callback_max_usecs = 0;
+        unsigned long long fx_callback_count = 0;
+        unsigned int fx_callback_sample_count = 0;
+        unsigned int fx_callback_p99_usecs = 0;
+        unsigned int fx_callback_p999_usecs = 0;
+        unsigned int fx_callback_max_usecs = 0;
         serv.jack.get_callback_performance(
             callback_count,
             callback_sample_count,
             callback_p99_usecs,
             callback_p999_usecs,
             callback_max_usecs);
+        serv.jack.get_callback_performance_for_stream(
+            false, amp_callback_count, amp_callback_sample_count,
+            amp_callback_p99_usecs, amp_callback_p999_usecs,
+            amp_callback_max_usecs);
+        serv.jack.get_callback_performance_for_stream(
+            true, fx_callback_count, fx_callback_sample_count,
+            fx_callback_p99_usecs, fx_callback_p999_usecs,
+            fx_callback_max_usecs);
+        const unsigned int sample_rate = serv.jack.get_jack_sr();
+        const unsigned int buffer_size = serv.jack.get_jack_bs();
+        const unsigned int callback_deadline_usecs = sample_rate
+            ? static_cast<unsigned int>(
+                (static_cast<unsigned long long>(buffer_size) * 1000000ULL +
+                 sample_rate - 1) / sample_rate)
+            : 0;
         const gx_engine::NeuralAmp::RuntimeStatus nam_runtime =
             serv.jack.get_engine().neural_amp.get_runtime_status();
         const char* nam_runtime_class = "generic";
@@ -1183,14 +1278,50 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_kv("cpuLoad", serv.jack.get_jcpu_load());
         jw.write_kv("xrunCount", static_cast<double>(serv.jack.get_xrun_count()));
         jw.write_kv("lastXrunUsecs", serv.jack.get_last_xrun());
-        jw.write_kv("sampleRate", serv.jack.get_jack_sr());
-        jw.write_kv("bufferSize", serv.jack.get_jack_bs());
+        jw.write_kv("sampleRate", sample_rate);
+        jw.write_kv("bufferSize", buffer_size);
+        jw.write_kv("callbackDeadlineUsecs", callback_deadline_usecs);
         jw.write_kv("realtime", static_cast<int>(serv.jack.get_is_rt()));
         jw.write_kv("callbackCount", static_cast<double>(callback_count));
         jw.write_kv("callbackSampleCount", callback_sample_count);
         jw.write_kv("callbackP99Usecs", callback_p99_usecs);
         jw.write_kv("callbackP999Usecs", callback_p999_usecs);
         jw.write_kv("callbackMaxUsecs", callback_max_usecs);
+        const auto write_callback_stream = [&jw](
+            const char* name, unsigned long long count,
+            unsigned int sample_count, unsigned int p99_usecs,
+            unsigned int p999_usecs, unsigned int max_usecs) {
+            jw.write_key(name);
+            jw.begin_object();
+            jw.write_kv("count", static_cast<double>(count));
+            jw.write_kv("sampleCount", sample_count);
+            jw.write_kv("p99Usecs", p99_usecs);
+            jw.write_kv("p999Usecs", p999_usecs);
+            jw.write_kv("maxUsecs", max_usecs);
+            jw.end_object();
+        };
+        write_callback_stream(
+            "ampCallback", amp_callback_count, amp_callback_sample_count,
+            amp_callback_p99_usecs, amp_callback_p999_usecs,
+            amp_callback_max_usecs);
+        write_callback_stream(
+            "fxCallback", fx_callback_count, fx_callback_sample_count,
+            fx_callback_p99_usecs, fx_callback_p999_usecs,
+            fx_callback_max_usecs);
+        jw.write_kv(
+            "serialP999UpperBoundUsecs",
+            amp_callback_p999_usecs + fx_callback_p999_usecs);
+        jw.write_kv(
+            "serialMaxUpperBoundUsecs",
+            amp_callback_max_usecs + fx_callback_max_usecs);
+        jw.write_kv(
+            "parallelDispatchFallbackCount",
+            static_cast<double>(
+                serv.jack.get_engine().pro.getDispatchFallbackCount()));
+        jw.write_kv(
+            "parallelCompletionDeadlineMissCount",
+            static_cast<double>(
+                serv.jack.get_engine().pro.getCompletionDeadlineMissCount()));
         jw.write_key("namRuntime");
         jw.begin_object();
         jw.write_kv("schemaVersion", 1);

@@ -1295,6 +1295,42 @@ void GxJack::get_callback_performance(
     max_usecs = samples[last];
 }
 
+void GxJack::get_callback_performance_for_stream(
+    bool insert_stream,
+    unsigned long long& count,
+    unsigned int& sample_count,
+    unsigned int& p99_usecs,
+    unsigned int& p999_usecs,
+    unsigned int& max_usecs) const {
+    const unsigned int stream = insert_stream
+        ? callback_stream_insert : callback_stream_main;
+    count = callback_rings[stream].count.load(std::memory_order_acquire);
+    const unsigned long long available =
+        std::min<unsigned long long>(count, callback_sample_capacity);
+    const unsigned long long first = count - available;
+    std::vector<unsigned int> samples;
+    samples.reserve(static_cast<size_t>(available));
+    for (unsigned long long sequence = first; sequence < count; ++sequence) {
+        const unsigned long long packed =
+            callback_rings[stream].samples[sequence % callback_sample_capacity].load(
+                std::memory_order_acquire);
+        const unsigned int expected = static_cast<unsigned int>(sequence + 1);
+        if (static_cast<unsigned int>(packed >> 32) == expected) {
+            samples.push_back(static_cast<unsigned int>(packed));
+        }
+    }
+    sample_count = static_cast<unsigned int>(samples.size());
+    if (samples.empty()) {
+        p99_usecs = p999_usecs = max_usecs = 0;
+        return;
+    }
+    std::sort(samples.begin(), samples.end());
+    const size_t last = samples.size() - 1;
+    p99_usecs = samples[std::min(last, (samples.size() * 990 + 999) / 1000 - 1)];
+    p999_usecs = samples[std::min(last, (samples.size() * 999 + 999) / 1000 - 1)];
+    max_usecs = samples[last];
+}
+
 
 /****************************************************************
  ** port connection callback

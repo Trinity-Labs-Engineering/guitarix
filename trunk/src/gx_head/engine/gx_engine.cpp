@@ -363,6 +363,56 @@ GxEngine::~GxEngine() {
     pluginlist.cleanup();
 }
 
+bool GxEngine::preset_muted_scene_smoothers(
+    bool output_gain, bool nam_gain, bool snam_gain, bool mnam_gain) {
+    const bool mono_gain = nam_gain || snam_gain || mnam_gain;
+    if (!output_gain && !mono_gain) {
+        return true;
+    }
+
+    // Quiesce every participant before arming the single shared barrier. A
+    // callback which already passed one participant must finish before the
+    // control thread writes any accumulator; later callbacks see that
+    // participant as transparent. This closes the phase-order race inherent
+    // in waiting for one arbitrary callback after arming an RT snap.
+    bool restore_nam_ready = false;
+    bool restore_snam_ready = false;
+    bool restore_mnam_ready = false;
+    if (output_gain) {
+        scene_outputlevel.suspend_scene_smoother_for_control();
+    }
+    if (nam_gain) {
+        restore_nam_ready = neural_amp.suspend_scene_smoother_for_control();
+    }
+    if (snam_gain) {
+        restore_snam_ready = sneural_amp.suspend_scene_smoother_for_control();
+    }
+    if (mnam_gain) {
+        restore_mnam_ready = mneural_amp.suspend_scene_smoother_for_control();
+    }
+
+    const SceneAudioCycleStatus ownership =
+        wait_scene_control_cycle(mono_gain, output_gain);
+    const bool acquired = ownership.finished();
+
+    if (output_gain) {
+        scene_outputlevel.finish_scene_smoother_control(acquired);
+    }
+    if (nam_gain) {
+        neural_amp.finish_scene_smoother_control(
+            restore_nam_ready, acquired);
+    }
+    if (snam_gain) {
+        sneural_amp.finish_scene_smoother_control(
+            restore_snam_ready, acquired);
+    }
+    if (mnam_gain) {
+        mneural_amp.finish_scene_smoother_control(
+            restore_mnam_ready, acquired);
+    }
+    return acquired;
+}
+
 void GxEngine::load_static_plugins() {
     PluginList& pl = pluginlist; // just a shortcut
 

@@ -119,6 +119,12 @@ public:
 public:
     GxEngine(const string& plugin_dir, ParameterGroups& groups, const gx_system::CmdlineOptions& options);
     ~GxEngine();
+    // While an external hardware guard is muted, acquire one callback-wide
+    // ownership window and preset every requested scene gain smoother as one
+    // transaction. Returns false without touching accumulator state if a
+    // genuinely stalled audio callback prevents safe ownership.
+    bool preset_muted_scene_smoothers(bool output_gain, bool nam_gain,
+                                      bool snam_gain, bool mnam_gain);
     void ladspaloader_update_plugins();
     sigc::signal<void,Plugin*,PluginChange::pc>& signal_plugin_changed() { return plugin_changed; }
     std::vector<Glib::ustring>& get_file_list_by_id(const std::string& id);

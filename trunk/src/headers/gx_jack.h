@@ -328,6 +328,13 @@ public:
                                                  unsigned int& p99_usecs,
                                                  unsigned int& p999_usecs,
                                                  unsigned int& max_usecs) const;
+    void                get_callback_performance_for_stream(
+                            bool insert_stream,
+                            unsigned long long& count,
+                            unsigned int& sample_count,
+                            unsigned int& p99_usecs,
+                            unsigned int& p999_usecs,
+                            unsigned int& max_usecs) const;
     JackClientActivityStatus jack_deactivate_clients();
     JackClientActivityStatus jack_activate_clients();
     JackClientActivityStatus get_jack_client_activity_status() const;

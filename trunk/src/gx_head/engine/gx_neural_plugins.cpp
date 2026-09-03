@@ -481,6 +481,21 @@ bool NeuralAmp::finish_scene_parameter_batch() {
     return preset;
 }
 
+bool NeuralAmp::suspend_scene_smoother_for_control() {
+    const bool restore_ready = gx_system::atomic_get(ready);
+    gx_system::atomic_set(&ready, 0);
+    return restore_ready;
+}
+
+void NeuralAmp::finish_scene_smoother_control(
+    bool restore_ready, bool preset) {
+    if (preset) {
+        preset_scene_smoother_targets();
+        gx_system::atomic_set(&scene_smoother_snap_pending, 0);
+    }
+    gx_system::atomic_set(&ready, restore_ready ? 1 : 0);
+}
+
 void NeuralAmp::request_scene_smoother_snap() {
     gx_system::atomic_set(&scene_smoother_snap_pending, 1);
 }
@@ -918,6 +933,21 @@ bool NeuralAmpMulti::finish_scene_parameter_batch() {
     muted_scene_parameter_batch = false;
     scene_smoother_preset = false;
     return preset;
+}
+
+bool NeuralAmpMulti::suspend_scene_smoother_for_control() {
+    const bool restore_ready = gx_system::atomic_get(ready);
+    gx_system::atomic_set(&ready, 0);
+    return restore_ready;
+}
+
+void NeuralAmpMulti::finish_scene_smoother_control(
+    bool restore_ready, bool preset) {
+    if (preset) {
+        preset_scene_smoother_targets();
+        gx_system::atomic_set(&scene_smoother_snap_pending, 0);
+    }
+    gx_system::atomic_set(&ready, restore_ready ? 1 : 0);
 }
 
 void NeuralAmpMulti::request_scene_smoother_snap() {

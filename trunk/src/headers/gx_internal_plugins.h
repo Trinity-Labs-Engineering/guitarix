@@ -149,6 +149,7 @@ public:
 class SceneOutputLevel : public PluginDef {
 private:
     volatile int scene_smoother_snap_pending;
+    volatile int scene_smoother_control_suspended;
     float fVslider0;
     double fRec0[2];
 
@@ -165,6 +166,8 @@ private:
     static int register_params_static(const ParamReg& reg);
 public:
     SceneOutputLevel();
+    void suspend_scene_smoother_for_control();
+    void finish_scene_smoother_control(bool preset);
     void request_scene_smoother_snap();
     bool is_scene_smoother_snap_pending();
     bool finish_scene_smoother_snap();

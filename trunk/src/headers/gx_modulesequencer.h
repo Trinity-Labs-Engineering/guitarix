@@ -381,6 +381,9 @@ protected:
 #endif
 protected:
     void check_overload();
+    SceneAudioCycleStatus wait_scene_audio_cycle_with_budget(
+        bool wait_mono_finish, bool wait_stereo_finish,
+        bool observe_scene_start, unsigned int wait_budget_usecs);
 public:
     MonoModuleChain mono_chain;  // active modules (amp chain, input to insert output)
     StereoModuleChain stereo_chain;  // active stereo modules (effect chain, after insert input)
@@ -423,6 +426,11 @@ public:
     SceneAudioCycleStatus wait_scene_audio_cycle(bool wait_mono_finish,
                                                   bool wait_stereo_finish,
                                                   bool observe_scene_start);
+    // Acquire a bounded control-thread ownership window for scene-local DSP
+    // state. Callers first make the affected processors transparent; a full
+    // callback completion then proves no RT invocation still owns that state.
+    SceneAudioCycleStatus wait_scene_control_cycle(bool wait_mono_finish,
+                                                   bool wait_stereo_finish);
     bool scene_commit_ready();
     virtual void set_rack_changed();
     virtual bool update_module_lists();

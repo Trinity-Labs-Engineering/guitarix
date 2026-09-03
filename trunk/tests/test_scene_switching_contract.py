@@ -104,7 +104,8 @@ class SceneSwitchingContractTests(unittest.TestCase):
         self.assertIn("!commit_ok || !chain_settled", rpc)
         self.assertIn("!gain_smoothers_settled ||", rpc)
         self.assertIn("!scene_audio_ready", rpc)
-        self.assertIn('throw RpcError(-32001, details.str())', rpc)
+        self.assertIn("? -32001 : -32002", rpc)
+        self.assertIn("throw RpcError(error_code, details.str())", rpc)
         for diagnostic in (
             "commitOk=",
             "chainSettled=",
@@ -317,27 +318,78 @@ class SceneSwitchingContractTests(unittest.TestCase):
             multi_compute.index("preset_scene_smoother_targets();"),
         )
 
-    def test_direct_smoother_preset_does_not_mask_a_pending_rt_snap(self) -> None:
+    def test_muted_smoothers_use_one_post_commit_control_ownership_barrier(
+        self,
+    ) -> None:
         rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
+        engine = (ENGINE / "gx_engine.cpp").read_text(encoding="utf-8")
+        neural = (ENGINE / "gx_neural_plugins.cpp").read_text(encoding="utf-8")
+        output = (ENGINE / "gx_internal_plugins.cpp").read_text(encoding="utf-8")
         scene = rpc.split("FUNCTION(set_scene)", maxsplit=1)[1].split(
             "FUNCTION(get) {", maxsplit=1
         )[0]
 
-        # A batch can contain a model replacement followed by a live gain
-        # change. The direct preset is diagnostic only: requested RT work must
-        # still be consumed before the transaction can succeed.
+        self.assertLess(
+            scene.index("apply_parameter_set(params)"),
+            scene.index("commit_pending_module_lists"),
+        )
+        self.assertLess(
+            scene.index("commit_pending_module_lists"),
+            scene.index("preset_muted_scene_smoothers"),
+        )
+        self.assertLess(
+            scene.index("preset_muted_scene_smoothers"),
+            scene.index("wait_scene_audio_cycle("),
+        )
+
+        coordinator = engine.split(
+            "bool GxEngine::preset_muted_scene_smoothers", maxsplit=1
+        )[1].split("void GxEngine::load_static_plugins", maxsplit=1)[0]
+        self.assertEqual(coordinator.count("wait_scene_control_cycle("), 1)
+        self.assertLess(
+            coordinator.index("suspend_scene_smoother_for_control"),
+            coordinator.index("wait_scene_control_cycle("),
+        )
+        self.assertLess(
+            coordinator.index("wait_scene_control_cycle("),
+            coordinator.index("finish_scene_smoother_control"),
+        )
+        self.assertIn("scene_outputlevel.suspend_scene_smoother", coordinator)
+        self.assertIn("neural_amp.suspend_scene_smoother", coordinator)
+        self.assertIn("sneural_amp.suspend_scene_smoother", coordinator)
+        self.assertIn("mneural_amp.suspend_scene_smoother", coordinator)
+        self.assertIn("gx_system::atomic_set(&ready, 0);", neural)
+        self.assertIn("scene_smoother_control_suspended", output)
+
+        # If the checked ownership wait times out, every gate is restored
+        # without a control-thread accumulator write and the RT fallback stays
+        # bounded. A successful authoritative preset suppresses that fallback.
         for plugin in ("nam", "snam", "mnam"):
             self.assertIn(
-                f"bool {plugin}_gain_settled = !snap_{plugin}_gain_rt;", scene
-            )
-            self.assertIn(
-                f"if (snap_{plugin}_gain_rt) {{", scene
+                f"snap_{plugin}_gain_rt && !{plugin}_gain_control_preset", scene
             )
         failure_predicate = scene.split("if (!commit_ok", maxsplit=1)[1].split(
             ") {", maxsplit=1
         )[0]
         self.assertIn("gain_smoothers_settled", failure_predicate)
         self.assertNotIn("gain_preset", failure_predicate)
+
+    def test_parallel_neural_worker_has_no_priority_inversion_or_early_read(self) -> None:
+        parallel = (HEADERS / "ParallelThread.h").read_text(encoding="utf-8")
+        rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
+
+        policy = parallel.split("void setThreadPolicy", maxsplit=1)[1]
+        self.assertNotIn("rt_prio/5", policy)
+        self.assertIn("std::min(max_priority, rt_prio)", policy)
+        wait = parallel.split("inline void processWait", maxsplit=1)[1].split(
+            "uint64_t getDispatchFallbackCount", maxsplit=1
+        )[0]
+        self.assertNotIn("pWait.store(false", wait)
+        self.assertIn("completionDeadlineMissCount.fetch_add", wait)
+        self.assertIn('"parallelDispatchFallbackCount"', rpc)
+        self.assertIn('"parallelCompletionDeadlineMissCount"', rpc)
+        self.assertIn('"ampCallback"', rpc)
+        self.assertIn('"fxCallback"', rpc)
 
     def test_scene_audio_wait_is_selective_shared_and_hard_capped(self) -> None:
         rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
