@@ -1146,6 +1146,7 @@ int __rt_func GxJack::gx_jack_process(jack_nframes_t nframes, void *arg) {
     gx_system::measure_start();
     GxJack& self = *static_cast<GxJack*>(arg);
     if (!self.is_jack_exit()) {
+	self.engine.mono_chain.post_rt_started();
 	if (!self.engine.mono_chain.is_stopped()) {
 	    self.check_overload();
 	}
@@ -1197,6 +1198,7 @@ int __rt_func GxJack::gx_jack_insert_process(jack_nframes_t nframes, void *arg) 
     const jack_time_t callback_started_at = self.single_client ? 0 : jack_get_time();
     gx_system::measure_cont();
     if (!self.is_jack_exit()) {
+	self.engine.stereo_chain.post_rt_started();
 	if (!self.engine.stereo_chain.is_stopped()) {
 	    self.check_overload();
 	}

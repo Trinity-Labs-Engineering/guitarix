@@ -1205,6 +1205,7 @@ void LadspaGuitarixMono::activateGuitarix(LADSPA_Handle Instance) {
 
 void LadspaGuitarixMono::runGuitarix(LADSPA_Handle Instance, unsigned long SampleCount) {
     LadspaGuitarixMono& self = *static_cast<LadspaGuitarixMono*>(Instance);
+    self.engine.mono_chain.post_rt_started();
     self.ladspa_guitarix.prepare_run();
     self.volume_param.set(*self.volume_port);
     if (self.rebuffer.get_bufsize()) {
@@ -1741,6 +1742,7 @@ void LadspaGuitarixStereo::activateGuitarix(LADSPA_Handle Instance) {
 
 void LadspaGuitarixStereo::runGuitarix(LADSPA_Handle Instance, unsigned long SampleCount) {
     LadspaGuitarixStereo& self = *static_cast<LadspaGuitarixStereo*>(Instance);
+    self.engine.stereo_chain.post_rt_started();
     self.ladspa_guitarix.prepare_run();
     self.volume_param.set(*self.volume_port);
     if (self.rebuffer.get_bufsize()) {

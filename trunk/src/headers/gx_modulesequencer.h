@@ -48,7 +48,11 @@ class ProcessingChainBase {
 public:
     enum RampMode { ramp_mode_down_dead, ramp_mode_down, ramp_mode_up_dead, ramp_mode_up, ramp_mode_off };
 private:
-    RtCycleLatch rt_cycle_latch; // RT notification, control-thread wait
+    // Scene acknowledgement needs to distinguish "the committed state has
+    // entered an audio callback" from the stronger lifetime barrier used
+    // when releasing DSP objects after a callback has finished.
+    RtCycleLatch rt_start_latch; // RT callback-entry notification
+    RtCycleLatch rt_cycle_latch; // RT callback-finish notification
     list<Plugin*> to_release;
 protected:
     // Modules which entered this processing chain since the previous commit.
@@ -78,9 +82,12 @@ public:
     void set_samplerate(int samplerate);
     bool set_plugin_list(const list<Plugin*> &p);
     void clear_module_states();
+    inline void post_rt_started() { rt_start_latch.notify_rt(); } // RT
     inline void post_rt_finished() { rt_cycle_latch.notify_rt(); } // RT
+    bool wait_rt_started_until(const timespec& deadline);
     bool wait_rt_finished();
     bool wait_rt_finished_until(const timespec& deadline);
+    void set_start_latch();
     void set_latch();
     void wait_latch() { wait_rt_finished(); }
     void sync() { set_latch(); wait_latch(); }
@@ -103,16 +110,29 @@ public:
 };
 
 struct SceneAudioCycleStatus {
-    bool mono_requested;
-    bool stereo_requested;
+    bool mono_start_requested;
+    bool stereo_start_requested;
+    bool mono_started;
+    bool stereo_started;
+    bool mono_finish_requested;
+    bool stereo_finish_requested;
     bool mono_finished;
     bool stereo_finished;
     unsigned int wait_budget_usecs;
 
-    SceneAudioCycleStatus(bool mono, bool stereo, unsigned int budget)
-        : mono_requested(mono), stereo_requested(stereo),
-          mono_finished(!mono), stereo_finished(!stereo),
+    SceneAudioCycleStatus(bool observe_start, bool mono_finish,
+                          bool stereo_finish, unsigned int budget)
+        : mono_start_requested(observe_start),
+          stereo_start_requested(observe_start),
+          mono_started(!observe_start), stereo_started(!observe_start),
+          mono_finish_requested(mono_finish),
+          stereo_finish_requested(stereo_finish),
+          mono_finished(!mono_finish), stereo_finished(!stereo_finish),
           wait_budget_usecs(budget) {}
+
+    bool started() const {
+        return mono_started && stereo_started;
+    }
 
     bool finished() const {
         return mono_finished && stereo_finished;
@@ -397,11 +417,12 @@ public:
     // been published instead of while it is still in the GLib idle queue.
     bool commit_pending_module_lists(bool externally_muted = false,
                                      bool* commit_ok = 0);
-    // Wait for only the chains which own pending scene gain snaps. Both waits
-    // share one bounded deadline, so a stalled mono and stereo client cannot
-    // turn one scene batch into two sequential timeout periods.
-    SceneAudioCycleStatus wait_scene_audio_cycle(bool wait_mono,
-                                                  bool wait_stereo);
+    // Observe callback entry for the whole scene and callback completion only
+    // for chains which own pending gain snaps. All waits share one bounded
+    // deadline, so a stalled client cannot create additive timeout periods.
+    SceneAudioCycleStatus wait_scene_audio_cycle(bool wait_mono_finish,
+                                                  bool wait_stereo_finish,
+                                                  bool observe_scene_start);
     bool scene_commit_ready();
     virtual void set_rack_changed();
     virtual bool update_module_lists();

@@ -104,6 +104,7 @@ void GxJack::process(jack_nframes_t nframes, float* input_buffer, float *output_
 {
 	gx_system::measure_start();
 
+	engine->mono_chain.post_rt_started();
 	float *obuf = insert_buffer;
 	engine->mono_chain.process(
 		nframes,
@@ -117,6 +118,7 @@ void GxJack::process(jack_nframes_t nframes, float* input_buffer, float *output_
 
 	float *ibuf = insert_buffer;
 
+	engine->stereo_chain.post_rt_started();
 	engine->stereo_chain.process(
 		nframes, ibuf, ibuf,
 		output_buffer[0],
@@ -131,7 +133,8 @@ void GxJack::process(jack_nframes_t nframes, float* input_buffer, float *output_
 void GxJack::process_mono(jack_nframes_t nframes, float* input_buffer, float *output_buffer)
 {
 	gx_system::measure_start();
-	
+
+    engine->mono_chain.post_rt_started();
     engine->mono_chain.process(
 	    nframes,
 	    input_buffer,
@@ -145,6 +148,7 @@ void GxJack::process_stereo(jack_nframes_t nframes, float* input_buffer[2], floa
 {
 	gx_system::measure_start();
 
+	engine->stereo_chain.post_rt_started();
 	engine->stereo_chain.process(
 		nframes, 
 		input_buffer[0], input_buffer[1],

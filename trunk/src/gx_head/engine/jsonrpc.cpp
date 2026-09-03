@@ -693,9 +693,18 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             engine.mneural_amp.is_scene_smoother_snap_pending();
         const bool mono_gain_pending =
             nam_gain_pending || snam_gain_pending || mnam_gain_pending;
-        const gx_engine::SceneAudioCycleStatus gain_audio_status =
-            engine.wait_scene_audio_cycle(mono_gain_pending, output_gain_pending);
-        const bool gain_audio_cycle_finished = gain_audio_status.finished();
+        // Control callbacks and chain publication alone do not prove that the
+        // new resident scene has reached audio. While Houston owns the hardware
+        // mute, observe callback entry on both chains after publication. This
+        // is independent of effect type and avoids making acknowledgement wait
+        // for an expensive plugin to finish its whole DSP block. Callback
+        // completion remains a separate lifetime/smoother predicate and is
+        // requested only on chains which still own a gain snap.
+        const gx_engine::SceneAudioCycleStatus scene_audio_status =
+            engine.wait_scene_audio_cycle(
+                mono_gain_pending, output_gain_pending, externally_muted);
+        const bool gain_audio_cycle_finished = scene_audio_status.finished();
+        const bool scene_audio_ready = scene_audio_status.started();
 
         bool output_gain_settled = !snap_output_gain;
         bool nam_gain_settled = !snap_nam_gain_rt;
@@ -720,26 +729,37 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             output_gain_settled && nam_gain_settled &&
             snam_gain_settled && mnam_gain_settled;
 
-        if (!commit_ok || !chain_settled || !gain_smoothers_settled) {
-            // The audio-cycle semaphore is a wake-up aid, not the transaction
-            // predicate.  A callback can consume every snap and then exceed
-            // the bounded wait while finishing a heavy NAM block; that scene
-            // is safe to acknowledge. Conversely, any unconsumed snap is
-            // cancelled by finish_scene_smoother_snap() and remains fatal.
+        if (!commit_ok || !chain_settled || !gain_smoothers_settled ||
+            !scene_audio_ready) {
+            // Callback entry is the scene-cutover predicate. Callback finish
+            // is only a bounded wake-up aid for smoother work: a processor can
+            // consume its snap and then exceed the finish wait while completing
+            // the block, which is safe to acknowledge. Conversely, any
+            // unconsumed snap is cancelled below and remains fatal.
             std::ostringstream details;
             details << "Scene transaction did not settle:"
                     << " commitOk=" << (commit_ok ? "true" : "false")
                     << " topologyChanged=" << (topology_changed ? "true" : "false")
                     << " chainSettled=" << (chain_settled ? "true" : "false")
-                    << " monoAudioRequested="
-                    << (gain_audio_status.mono_requested ? "true" : "false")
+                    << " monoAudioStartRequested="
+                    << (scene_audio_status.mono_start_requested ? "true" : "false")
+                    << " monoAudioStarted="
+                    << (scene_audio_status.mono_started ? "true" : "false")
+                    << " stereoAudioStartRequested="
+                    << (scene_audio_status.stereo_start_requested ? "true" : "false")
+                    << " stereoAudioStarted="
+                    << (scene_audio_status.stereo_started ? "true" : "false")
+                    << " monoAudioFinishRequested="
+                    << (scene_audio_status.mono_finish_requested ? "true" : "false")
                     << " monoAudioFinished="
-                    << (gain_audio_status.mono_finished ? "true" : "false")
-                    << " stereoAudioRequested="
-                    << (gain_audio_status.stereo_requested ? "true" : "false")
+                    << (scene_audio_status.mono_finished ? "true" : "false")
+                    << " stereoAudioFinishRequested="
+                    << (scene_audio_status.stereo_finish_requested ? "true" : "false")
                     << " stereoAudioFinished="
-                    << (gain_audio_status.stereo_finished ? "true" : "false")
-                    << " waitBudgetUsecs=" << gain_audio_status.wait_budget_usecs
+                    << (scene_audio_status.stereo_finished ? "true" : "false")
+                    << " sceneAudioReady="
+                    << (scene_audio_ready ? "true" : "false")
+                    << " waitBudgetUsecs=" << scene_audio_status.wait_budget_usecs
                     << " outputGainRequested=" << (snap_output_gain ? "true" : "false")
                     << " outputGainSettled=" << (output_gain_settled ? "true" : "false")
                     << " namGainRequested=" << (snap_nam_gain_rt ? "true" : "false")
@@ -758,8 +778,9 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         // The response is written only after any pending module-list commit
         // has published its processing-chain pointer and its chain ramp-up has
         // finished. Under an external hardware mute it also covers the narrow
-        // gain-smoother whitelist above; convolver and time-effect state are
-        // deliberately outside this acknowledgement.
+        // gain-smoother whitelist and callback entry on each processing chain.
+        // This is an audible-cutover boundary, not a claim that a stateful
+        // processor has reached its later mature output.
         jw.begin_object();
         jw.write_kv("applied", static_cast<int>(params.size() / 2));
         jw.write_bool_kv("topologyChanged", topology_changed);
@@ -776,17 +797,29 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             "gainSmoothersPreset",
             nam_gain_preset || snam_gain_preset || mnam_gain_preset);
         jw.write_bool_kv("gainSmoothersSettled", gain_smoothers_settled);
+        jw.write_bool_kv("audioReady", scene_audio_ready);
         jw.write_bool_kv("gainAudioCycleFinished", gain_audio_cycle_finished);
         jw.write_bool_kv(
-            "monoAudioCycleRequested", gain_audio_status.mono_requested);
+            "monoAudioCycleStartRequested",
+            scene_audio_status.mono_start_requested);
         jw.write_bool_kv(
-            "monoAudioCycleFinished", gain_audio_status.mono_finished);
+            "monoAudioCycleStarted", scene_audio_status.mono_started);
         jw.write_bool_kv(
-            "stereoAudioCycleRequested", gain_audio_status.stereo_requested);
+            "stereoAudioCycleStartRequested",
+            scene_audio_status.stereo_start_requested);
         jw.write_bool_kv(
-            "stereoAudioCycleFinished", gain_audio_status.stereo_finished);
+            "stereoAudioCycleStarted", scene_audio_status.stereo_started);
+        jw.write_bool_kv(
+            "monoAudioCycleRequested", scene_audio_status.mono_finish_requested);
+        jw.write_bool_kv(
+            "monoAudioCycleFinished", scene_audio_status.mono_finished);
+        jw.write_bool_kv(
+            "stereoAudioCycleRequested",
+            scene_audio_status.stereo_finish_requested);
+        jw.write_bool_kv(
+            "stereoAudioCycleFinished", scene_audio_status.stereo_finished);
         jw.write_kv("gainAudioCycleWaitUsecs",
-                    gain_audio_status.wait_budget_usecs);
+                    scene_audio_status.wait_budget_usecs);
         jw.write_bool_kv("outputGainSmootherRequested", snap_output_gain);
         jw.write_bool_kv("outputGainSmootherSettled", output_gain_settled);
         jw.write_bool_kv("namGainSmootherRequested", snap_nam_gain_rt);

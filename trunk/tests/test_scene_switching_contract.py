@@ -101,10 +101,9 @@ class SceneSwitchingContractTests(unittest.TestCase):
 
         self.assertIn("bool* commit_ok", header)
         self.assertIn("*commit_ok = ok;", audio)
-        self.assertIn(
-            "if (!commit_ok || !chain_settled || !gain_smoothers_settled)",
-            rpc,
-        )
+        self.assertIn("!commit_ok || !chain_settled", rpc)
+        self.assertIn("!gain_smoothers_settled ||", rpc)
+        self.assertIn("!scene_audio_ready", rpc)
         self.assertIn('throw RpcError(-32001, details.str())', rpc)
         for diagnostic in (
             "commitOk=",
@@ -167,6 +166,19 @@ class SceneSwitchingContractTests(unittest.TestCase):
         self.assertIn("prepared_generation", header)
         self.assertIn("entry.host_sample_rate == fSampleRate", source)
 
+    def test_song_pinned_model_set_cannot_be_evicted_by_displaced_graph(self) -> None:
+        source = (ENGINE / "gx_neural_plugins.cpp").read_text(encoding="utf-8")
+        parking = source.split(
+            "void NeuralAmpMulti::cache_model", maxsplit=1
+        )[1].split("PreparedNamModelResult", maxsplit=1)[0]
+
+        self.assertIn("if (unpinned == model_cache.end())", parking)
+        self.assertIn("return;", parking)
+        self.assertNotIn(
+            "unpinned != model_cache.end() ? unpinned : model_cache.begin()",
+            parking,
+        )
+
     def test_muted_scene_snaps_only_the_bounded_gain_whitelist(self) -> None:
         rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
         neural = (ENGINE / "gx_neural_plugins.cpp").read_text(encoding="utf-8")
@@ -187,7 +199,7 @@ class SceneSwitchingContractTests(unittest.TestCase):
             self.assertIn(parameter_id, rpc)
         self.assertNotIn('attr == "mnam.cdelay"', rpc)
         self.assertIn(
-            "wait_scene_audio_cycle(mono_gain_pending, output_gain_pending)", rpc
+            "mono_gain_pending, output_gain_pending, externally_muted", rpc
         )
         self.assertIn('"gainSmoothersSnapped"', rpc)
         self.assertIn('"gainSmoothersSettled"', rpc)
@@ -335,7 +347,7 @@ class SceneSwitchingContractTests(unittest.TestCase):
         self.assertIn("mono_gain_pending =", rpc)
         self.assertIn("nam_gain_pending || snam_gain_pending || mnam_gain_pending", rpc)
         self.assertIn("output_gain_pending", rpc)
-        self.assertIn("wait_scene_audio_cycle(bool wait_mono", header)
+        self.assertIn("wait_scene_audio_cycle(bool wait_mono_finish", header)
         scene_wait = audio.split(
             "SceneAudioCycleStatus ModuleSequencer::wait_scene_audio_cycle", maxsplit=1
         )[1].split(
@@ -344,10 +356,30 @@ class SceneSwitchingContractTests(unittest.TestCase):
         self.assertIn("10000ULL", scene_wait)
         self.assertIn("50000ULL", scene_wait)
         self.assertEqual(scene_wait.count("timespec deadline;"), 1)
+        self.assertIn("mono_chain.wait_rt_started_until(deadline)", scene_wait)
+        self.assertIn("stereo_chain.wait_rt_started_until(deadline)", scene_wait)
         self.assertIn("mono_chain.wait_rt_finished_until(deadline)", scene_wait)
         self.assertIn("stereo_chain.wait_rt_finished_until(deadline)", scene_wait)
 
-    def test_consumed_snap_is_authoritative_over_a_missed_wakeup(self) -> None:
+    def test_hardware_muted_scene_waits_for_generic_audio_cutover(self) -> None:
+        rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
+        scene = rpc.split("FUNCTION(set_scene)", maxsplit=1)[1].split(
+            "FUNCTION(get) {", maxsplit=1
+        )[0]
+
+        self.assertIn(
+            "mono_gain_pending, output_gain_pending, externally_muted",
+            scene,
+        )
+        self.assertIn(
+            "const bool scene_audio_ready = scene_audio_status.started();",
+            scene,
+        )
+        self.assertIn('jw.write_bool_kv("audioReady", scene_audio_ready);', scene)
+
+    def test_unmuted_snap_is_authoritative_but_muted_scene_requires_callback(
+        self,
+    ) -> None:
         rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
         scene = rpc.split("FUNCTION(set_scene)", maxsplit=1)[1].split(
             "FUNCTION(get) {", maxsplit=1
@@ -358,6 +390,15 @@ class SceneSwitchingContractTests(unittest.TestCase):
 
         self.assertNotIn("gain_audio_cycle_finished", failure_predicate)
         self.assertIn("gain_smoothers_settled", failure_predicate)
+        self.assertIn("scene_audio_ready", failure_predicate)
+        self.assertIn(
+            "scene_audio_ready = scene_audio_status.started()",
+            scene,
+        )
+        self.assertNotIn(
+            "scene_audio_ready = scene_audio_status.finished()",
+            scene,
+        )
         for smoother in ("output", "nam", "snam", "mnam"):
             self.assertIn(f"{smoother}_gain_settled", scene)
         self.assertIn("finish_scene_smoother_snap()", scene)
@@ -369,8 +410,40 @@ class SceneSwitchingContractTests(unittest.TestCase):
         self.assertIn("generation_counter.fetch_add", latch)
         self.assertIn("generation_counter.load", latch)
         self.assertIn("armed_generation", latch)
+        self.assertIn("rt_start_latch.arm();", audio)
         self.assertIn("rt_cycle_latch.arm();", audio)
         self.assertNotIn("sem_getvalue(&sync_sem", audio)
+
+    def test_audio_cutover_entry_notification_is_backend_wide(self) -> None:
+        jack = (ENGINE / "gx_jack.cpp").read_text(encoding="utf-8")
+        wrapper = (ENGINE / "gx_jack_wrapper.cpp").read_text(encoding="utf-8")
+        ladspa = LADSPA_HOST.read_text(encoding="utf-8")
+
+        # The readiness boundary belongs to each processing chain, not to a
+        # named pedal implementation or an effect category.
+        self.assertIn("mono_chain.post_rt_started();", jack)
+        self.assertIn("stereo_chain.post_rt_started();", jack)
+        self.assertGreaterEqual(wrapper.count("mono_chain.post_rt_started();"), 2)
+        self.assertGreaterEqual(wrapper.count("stereo_chain.post_rt_started();"), 2)
+        self.assertIn("mono_chain.post_rt_started();", ladspa)
+        self.assertIn("stereo_chain.post_rt_started();", ladspa)
+
+        main_callback = jack.split(
+            "int __rt_func GxJack::gx_jack_process", maxsplit=1
+        )[1].split(
+            "int __rt_func GxJack::gx_jack_insert_process", maxsplit=1
+        )[0]
+        insert_callback = jack.split(
+            "int __rt_func GxJack::gx_jack_insert_process", maxsplit=1
+        )[1].split("void __rt_func GxJack::record_callback_time", maxsplit=1)[0]
+        self.assertLess(
+            main_callback.index("mono_chain.post_rt_started();"),
+            main_callback.index("mono_chain.process("),
+        )
+        self.assertLess(
+            insert_callback.index("stereo_chain.post_rt_started();"),
+            insert_callback.index("stereo_chain.process("),
+        )
 
     def test_model_less_nam_wrappers_consume_muted_scene_snaps(self) -> None:
         source = (ENGINE / "gx_neural_plugins.cpp").read_text(encoding="utf-8")
