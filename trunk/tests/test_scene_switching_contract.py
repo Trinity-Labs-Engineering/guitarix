@@ -138,6 +138,18 @@ class SceneSwitchingContractTests(unittest.TestCase):
         self.assertIn("vc[i].x1 = vc[i].y1 = 0.0f;", source)
         self.assertIn("fbl = 0.0f;", source)
 
+    def test_pitch_shift_resident_reset_qualifies_the_callback_slot(self) -> None:
+        source = (ENGINE / "gx_internal_plugins.cpp").read_text(encoding="utf-8")
+        constructor = source.split(
+            "smbPitchShift::smbPitchShift", maxsplit=1
+        )[1].split("void smbPitchShift::init", maxsplit=1)[0]
+
+        # smbPitchShift also has a clear_state() member function, so an
+        # unqualified assignment resolves to that function instead of the
+        # PluginDef callback field and fails to compile.
+        self.assertIn("PluginDef::clear_state = clear_state_static;", constructor)
+        self.assertNotIn("\n    clear_state = clear_state_static;", constructor)
+
     def test_multi_nam_uses_the_bounded_prepared_model_cache_for_both_slots(
         self,
     ) -> None:
