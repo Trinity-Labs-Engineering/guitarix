@@ -33,6 +33,7 @@ namespace gx_engine {
  */
 
 ProcessingChainBase::ProcessingChainBase():
+    rt_start_latch(),
     rt_cycle_latch(),
     to_release(),
     to_initialize(),
@@ -59,8 +60,24 @@ void ProcessingChainBase::set_samplerate(int samplerate) {
 void __rt_func ProcessingChainBase::set_stopped(bool v) {
     stopped = v;
     if (v) {
+	post_rt_started();   // in case someone is already waiting
 	post_rt_finished();  // in case someone is already waiting
     }
+}
+
+bool ProcessingChainBase::wait_rt_started_until(const timespec& deadline) {
+    if (stopped) {
+	return true;
+    }
+    if (rt_start_latch.wait_until(deadline)) {
+        return true;
+    }
+    if (errno == ETIMEDOUT) {
+	gx_print_warning("scene audio callback", "start timeout");
+    } else {
+	gx_print_error("scene audio callback", "start wait failed");
+    }
+    return false;
 }
 
 bool ProcessingChainBase::wait_rt_finished() {
@@ -96,6 +113,10 @@ bool ProcessingChainBase::wait_rt_finished_until(const timespec& deadline) {
 
 void ProcessingChainBase::set_latch() {
     rt_cycle_latch.arm();
+}
+
+void ProcessingChainBase::set_start_latch() {
+    rt_start_latch.arm();
 }
 
 void ProcessingChainBase::wait_ramp_down_finished() {
@@ -757,7 +778,8 @@ bool ModuleSequencer::scene_commit_ready() {
 }
 
 SceneAudioCycleStatus ModuleSequencer::wait_scene_audio_cycle(
-    bool wait_mono, bool wait_stereo) {
+    bool wait_mono_finish, bool wait_stereo_finish,
+    bool observe_scene_start) {
     // Three periods permits several real callbacks under normal scheduling;
     // the floor covers very small JACK buffers and the cap bounds a stalled
     // scene batch. The same absolute deadline is used by both chains.
@@ -769,18 +791,24 @@ SceneAudioCycleStatus ModuleSequencer::wait_scene_audio_cycle(
         std::max<unsigned long long>(
             10000ULL,
             std::min<unsigned long long>(50000ULL, period_usecs * 3 + 2000ULL)));
-    SceneAudioCycleStatus status(wait_mono, wait_stereo, wait_budget_usecs);
-    if (!wait_mono && !wait_stereo) {
+    SceneAudioCycleStatus status(
+        observe_scene_start, wait_mono_finish, wait_stereo_finish,
+        wait_budget_usecs);
+    if (!observe_scene_start && !wait_mono_finish && !wait_stereo_finish) {
         return status;
     }
 
-    // Arm every required chain before waiting for either one. Generation-
-    // qualified latches make a callback racing this arm observable even when
-    // its semaphore token is drained.
-    if (wait_mono) {
+    // Arm every required predicate before waiting for any one of them.
+    // Generation-qualified latches make callbacks racing these arms
+    // observable even if a stale semaphore token is drained.
+    if (observe_scene_start) {
+        mono_chain.set_start_latch();
+        stereo_chain.set_start_latch();
+    }
+    if (wait_mono_finish) {
         mono_chain.set_latch();
     }
-    if (wait_stereo) {
+    if (wait_stereo_finish) {
         stereo_chain.set_latch();
     }
 
@@ -796,10 +824,14 @@ SceneAudioCycleStatus ModuleSequencer::wait_scene_audio_cycle(
         ++deadline.tv_sec;
     }
 
-    if (wait_mono) {
+    if (observe_scene_start) {
+        status.mono_started = mono_chain.wait_rt_started_until(deadline);
+        status.stereo_started = stereo_chain.wait_rt_started_until(deadline);
+    }
+    if (wait_mono_finish) {
         status.mono_finished = mono_chain.wait_rt_finished_until(deadline);
     }
-    if (wait_stereo) {
+    if (wait_stereo_finish) {
         status.stereo_finished = stereo_chain.wait_rt_finished_until(deadline);
     }
     return status;

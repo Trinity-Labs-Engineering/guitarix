@@ -1021,8 +1021,14 @@ void NeuralAmpMulti::cache_model(
             [&](const CachedNamModel& entry) {
                 return !prepared_key_matches(entry.slot, entry.filename, entry.size);
             });
-        model_cache.erase(
-            unpinned != model_cache.end() ? unpinned : model_cache.begin());
+        if (unpinned == model_cache.end()) {
+            // The prepared song set owns the complete bounded cache. An
+            // ad-hoc displaced graph must never evict one of those promised
+            // rapid-switch entries; dropping it keeps every prepared selector
+            // truthful without putting model work back on the switch path.
+            return;
+        }
+        model_cache.erase(unpinned);
     }
 
     model_cache.push_back(CachedNamModel{
