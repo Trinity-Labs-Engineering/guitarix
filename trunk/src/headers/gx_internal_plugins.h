@@ -23,6 +23,7 @@
 #pragma once
 
 #include "gx_neural_plugins.h"
+#include "gx_poly_pitch_shifter.h"
 
 namespace gx_jack { class GxJack; }
 
@@ -1209,76 +1210,24 @@ public:
 };
 
 /****************************************************************************
-*
-* NAME: smbPitchShift.cpp
-* VERSION: 1.2
-* HOME URL: http://www.dspdimension.com
-* KNOWN BUGS: none
-* 
-*
-* COPYRIGHT 1999-2009 Stephan M. Bernsee <smb [AT] dspdimension [DOT] com>
-* 
-* Modified for guitarix by Hermann Meyer 2014
-*
-*                         The Wide Open License (WOL)
-*
-* Permission to use, copy, modify, distribute and sell this software and its
-* documentation for any purpose is hereby granted without fee, provided that
-* the above copyright notice and this license appear in all source copies. 
-* THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT EXPRESS OR IMPLIED WARRANTY OF
-* ANY KIND. See http://www.dspguru.com/wol.htm for more information.
-*
-*****************************************************************************/ 
+ * Native low-latency polyphonic pitch shifter.
+ * The legacy class name is retained as part of Guitarix's parameter ABI.
+ ****************************************************************************/
 
-
-#define M_PI 3.14159265358979323846
-#define MAX_FRAME_LENGTH 8096
 
 class smbPitchShift : public PluginDef {
 private:
-    gx_resample::SimpleResampler resamp;
+    PolyphonicPitchShifter pitch_shifter;
     EngineControl&  engine;
     bool            mem_allocated;
     sigc::slot<void> sync;
     volatile bool ready;
-    float gInFIFO[MAX_FRAME_LENGTH];
-    float gOutFIFO[MAX_FRAME_LENGTH];
-    float *fpb;
-    float *expect;
-    float *hanning;
-    float *hanningd;
-    float *resampin;
-    float *resampin2;
-    float *resampout;
-    float *indata2;
-    float gLastPhase[MAX_FRAME_LENGTH/2+1];
-    float gSumPhase[MAX_FRAME_LENGTH/2+1];
-    float gOutputAccum[2*MAX_FRAME_LENGTH];
-    float gAnaFreq[MAX_FRAME_LENGTH];
-    float gAnaMagn[MAX_FRAME_LENGTH];
-    float gSynFreq[MAX_FRAME_LENGTH];
-    float gSynMagn[MAX_FRAME_LENGTH];
     float semitones;
     float a,b,c,d,l;
     float wet;
     float dry;
-    float mpi, mpi1;
-    float tone;
-    int   octave, osamp, numSampsToResamp, numSampsToProcess, fftFrameSize, sampleRate ;
+    int   octave, sampleRate;
     int latency;
-    int ai;
-    int aio;
-    int ii;
-    long  gRover ;
-    double magn, phase, tmp, real, imag;
-    double freqPerBin, freqPerBin1, freqPerBin2, expct;
-    double fftFrameSize3;
-    double fftFrameSize4;
-    double osamp1,osamp2;
-    long   i,k, qpd, index, inFifoLatency, stepSize, fftFrameSize2;
-    
-    fftwf_complex fftw_in[MAX_FRAME_LENGTH], fftw_out[MAX_FRAME_LENGTH];
-    fftwf_plan ftPlanForward, ftPlanInverse;
     
     inline int load_ui_f(const UiBuilder& b, int form);
     int register_par(const ParamReg& reg);
