@@ -4,7 +4,7 @@ b.openHorizontalTableBox("");
 {
     b.openVerticalBox1("");
     {
-	b.create_small_rackknob(PARAM("level1"), _("peak"));
+	b.create_small_rackknob(PARAM("level1"), _("low cut"));
 	b.insertSpacer();
 	b.create_spin_value(PARAM("peak1"), _("frequency"));
 	b.insertSpacer();
@@ -31,7 +31,7 @@ b.openHorizontalTableBox("");
     b.closeBox();
     b.openVerticalBox1("");
     {
-	b.create_small_rackknob(PARAM("level4"), _("peak"));
+	b.create_small_rackknob(PARAM("level4"), _("high cut"));
 	b.insertSpacer();
 	b.create_spin_value(PARAM("peak4"), _("frequency"));
 	b.insertSpacer();

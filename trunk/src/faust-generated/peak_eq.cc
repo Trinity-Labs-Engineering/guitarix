@@ -4,6 +4,47 @@
 
 namespace peak_eq {
 
+struct ShelfBiquad {
+	double b0, b1, b2, a1, a2;
+};
+
+static inline ShelfBiquad make_shelf(double a, double frequency, double q,
+									 double sample_rate, bool high)
+{
+	const double omega = 6.283185307179586 * frequency / sample_rate;
+	const double cosine = std::cos(omega);
+	const double alpha = std::sin(omega) / (2.0 * q);
+	const double root_term = 2.0 * std::sqrt(a) * alpha;
+	const double sum = a + 1.0;
+	const double difference = a - 1.0;
+	double b0, b1, b2, a0, a1, a2;
+	if (high) {
+		b0 = a * (sum + difference * cosine + root_term);
+		b1 = -2.0 * a * (difference + sum * cosine);
+		b2 = a * (sum + difference * cosine - root_term);
+		a0 = sum - difference * cosine + root_term;
+		a1 = 2.0 * (difference - sum * cosine);
+		a2 = sum - difference * cosine - root_term;
+	} else {
+		b0 = a * (sum - difference * cosine + root_term);
+		b1 = 2.0 * a * (difference - sum * cosine);
+		b2 = a * (sum - difference * cosine - root_term);
+		a0 = sum + difference * cosine + root_term;
+		a1 = -2.0 * (difference + sum * cosine);
+		a2 = sum + difference * cosine - root_term;
+	}
+	return {b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0};
+}
+
+static inline double run_shelf(const ShelfBiquad& coefficients, double input,
+								 double& state1, double& state2)
+{
+	const double output = coefficients.b0 * input + state1;
+	state1 = coefficients.b1 * input - coefficients.a1 * output + state2;
+	state2 = coefficients.b2 * input - coefficients.a2 * output;
+	return output;
+}
+
 class Dsp: public PluginDef {
 private:
 	int fSampleRate;
@@ -26,6 +67,10 @@ private:
 	double fRec2[3];
 	double fRec1[3];
 	double fRec0[3];
+	double fLowShelfState1;
+	double fLowShelfState2;
+	double fHighShelfState1;
+	double fHighShelfState2;
 
 	void clear_state_f();
 	int load_ui_f(const UiBuilder& b, int form);
@@ -76,6 +121,8 @@ inline void Dsp::clear_state_f()
 	for (int l1 = 0; l1 < 3; l1 = l1 + 1) fRec2[l1] = 0.0;
 	for (int l2 = 0; l2 < 3; l2 = l2 + 1) fRec1[l2] = 0.0;
 	for (int l3 = 0; l3 < 3; l3 = l3 + 1) fRec0[l3] = 0.0;
+	fLowShelfState1 = fLowShelfState2 = 0.0;
+	fHighShelfState1 = fHighShelfState2 = 0.0;
 }
 
 void Dsp::clear_state_f_static(PluginDef *p)
@@ -99,7 +146,21 @@ void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0)
 {
-	double fSlow0 = double(fVslider0);
+	const double highShelfGain = double(fVslider0);
+	const double highShelfFrequency = double(fVslider1);
+	const double highShelfBandwidth = double(fVslider2);
+	const double highShelfQ = std::min(2.0, std::max(0.25,
+		std::sqrt(highShelfFrequency / std::max(5.0, highShelfBandwidth)) / 2.0));
+	const ShelfBiquad highShelf = make_shelf(std::pow(10.0, highShelfGain / 40.0), highShelfFrequency,
+		highShelfQ, fConst0, true);
+	const double lowShelfGain = double(fVslider9);
+	const double lowShelfFrequency = double(fVslider10);
+	const double lowShelfBandwidth = double(fVslider11);
+	const double lowShelfQ = std::min(2.0, std::max(0.25,
+		std::sqrt(lowShelfFrequency / std::max(5.0, lowShelfBandwidth)) / 2.0));
+	const ShelfBiquad lowShelf = make_shelf(std::pow(10.0, lowShelfGain / 40.0), lowShelfFrequency,
+		lowShelfQ, fConst0, false);
+	double fSlow0 = 0.0;
 	int iSlow1 = fSlow0 > 0.0;
 	double fSlow2 = double(fVslider1);
 	double fSlow3 = std::sin(fConst1 * fSlow2);
@@ -144,7 +205,7 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 	double fSlow42 = fSlow39 * (fSlow39 - fSlow41) + 1.0;
 	double fSlow43 = 2.0 * (1.0 - 1.0 / mydsp_faustpower2_f(fSlow38));
 	double fSlow44 = fSlow39 * (fSlow39 - fSlow37) + 1.0;
-	double fSlow45 = double(fVslider9);
+	double fSlow45 = 0.0;
 	int iSlow46 = fSlow45 > 0.0;
 	double fSlow47 = double(fVslider10);
 	double fSlow48 = std::sin(fConst1 * fSlow47);
@@ -168,11 +229,15 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 		double fTemp1 = fSlow28 * fRec1[1];
 		double fTemp2 = fSlow43 * fRec2[1];
 		double fTemp3 = fSlow58 * fRec3[1];
-		fRec3[0] = double(input0[i0]) - (fRec3[2] * fSlow59 + fTemp3) / fSlow55;
+		const double shelfInput = run_shelf(lowShelf, double(input0[i0]),
+			fLowShelfState1, fLowShelfState2);
+		fRec3[0] = shelfInput - (fRec3[2] * fSlow59 + fTemp3) / fSlow55;
 		fRec2[0] = (fTemp3 + fRec3[0] * fSlow60 + fRec3[2] * fSlow57) / fSlow55 - (fRec2[2] * fSlow44 + fTemp2) / fSlow40;
 		fRec1[0] = (fTemp2 + fRec2[0] * fSlow61 + fRec2[2] * fSlow42) / fSlow40 - (fRec1[2] * fSlow29 + fTemp1) / fSlow25;
 		fRec0[0] = (fTemp1 + fRec1[0] * fSlow62 + fRec1[2] * fSlow27) / fSlow25 - (fRec0[2] * fSlow14 + fTemp0) / fSlow10;
-		output0[i0] = FAUSTFLOAT((fTemp0 + fRec0[0] * fSlow63 + fRec0[2] * fSlow12) / fSlow10);
+		const double peakOutput = (fTemp0 + fRec0[0] * fSlow63 + fRec0[2] * fSlow12) / fSlow10;
+		output0[i0] = FAUSTFLOAT(run_shelf(highShelf, peakOutput,
+			fHighShelfState1, fHighShelfState2));
 		fRec3[2] = fRec3[1];
 		fRec3[1] = fRec3[0];
 		fRec2[2] = fRec2[1];
@@ -195,10 +260,10 @@ int Dsp::register_par(const ParamReg& reg)
 	reg.registerFloatVar("eq.bandwidth2",N_("Q"),"SL",N_("bandwidth (hz)"),&fVslider8, 2.2e+02, 5.0, 2e+04, 1.01, 0);
 	reg.registerFloatVar("eq.bandwidth3",N_("Q"),"SL",N_("bandwidth (hz)"),&fVslider5, 8.8e+02, 5.0, 2e+04, 1.01, 0);
 	reg.registerFloatVar("eq.bandwidth4",N_("Q"),"SL",N_("bandwidth (hz)"),&fVslider2, 1.76e+03, 5.0, 2e+04, 1.01, 0);
-	reg.registerFloatVar("eq.level1",N_("Sub"),"S",N_("gain (dB)"),&fVslider9, 0.0, -5e+01, 5e+01, 0.1, 0);
+	reg.registerFloatVar("eq.level1",N_("Low cut"),"S",N_("gain below the corner (dB)"),&fVslider9, 0.0, -5e+01, 5e+01, 0.1, 0);
 	reg.registerFloatVar("eq.level2",N_("Low"),"S",N_("gain (dB)"),&fVslider6, 0.0, -5e+01, 5e+01, 0.1, 0);
 	reg.registerFloatVar("eq.level3",N_("Mid"),"S",N_("gain (dB)"),&fVslider3, 0.0, -5e+01, 5e+01, 0.1, 0);
-	reg.registerFloatVar("eq.level4",N_("High"),"S",N_("gain (dB)"),&fVslider0, 0.0, -5e+01, 5e+01, 0.1, 0);
+	reg.registerFloatVar("eq.level4",N_("High cut"),"S",N_("gain above the corner (dB)"),&fVslider0, 0.0, -5e+01, 5e+01, 0.1, 0);
 	reg.registerFloatVar("eq.peak1","","SL",N_("frequency (hz)"),&fVslider10, 1.1e+02, 2e+01, 2.2e+04, 1.01, 0);
 	reg.registerFloatVar("eq.peak2","","SL",N_("frequency (hz)"),&fVslider7, 4.4e+02, 2e+01, 2.2e+04, 1.01, 0);
 	reg.registerFloatVar("eq.peak3","","SL",N_("frequency (hz)"),&fVslider4, 1.76e+03, 2e+01, 2.2e+04, 1.01, 0);
@@ -529,7 +594,7 @@ b.openHorizontalTableBox("");
 {
     b.openVerticalBox1("");
     {
-	b.create_small_rackknob(PARAM("level1"), _("peak"));
+	b.create_small_rackknob(PARAM("level1"), _("low cut"));
 	b.insertSpacer();
 	b.create_spin_value(PARAM("peak1"), _("frequency"));
 	b.insertSpacer();
@@ -556,7 +621,7 @@ b.openHorizontalTableBox("");
     b.closeBox();
     b.openVerticalBox1("");
     {
-	b.create_small_rackknob(PARAM("level4"), _("peak"));
+	b.create_small_rackknob(PARAM("level4"), _("high cut"));
 	b.insertSpacer();
 	b.create_spin_value(PARAM("peak4"), _("frequency"));
 	b.insertSpacer();
