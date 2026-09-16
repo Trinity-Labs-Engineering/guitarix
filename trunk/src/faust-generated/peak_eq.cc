@@ -149,15 +149,15 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 	const double highShelfGain = double(fVslider0);
 	const double highShelfFrequency = double(fVslider1);
 	const double highShelfBandwidth = double(fVslider2);
-	const double highShelfQ = std::min(2.0, std::max(0.25,
-		std::sqrt(highShelfFrequency / std::max(5.0, highShelfBandwidth)) / 2.0));
+	const double highShelfQ = std::min<double>(2.0, std::max<double>(0.25,
+		std::sqrt(highShelfFrequency / std::max<double>(5.0, highShelfBandwidth)) / 2.0));
 	const ShelfBiquad highShelf = make_shelf(std::pow(10.0, highShelfGain / 40.0), highShelfFrequency,
 		highShelfQ, fConst0, true);
 	const double lowShelfGain = double(fVslider9);
 	const double lowShelfFrequency = double(fVslider10);
 	const double lowShelfBandwidth = double(fVslider11);
-	const double lowShelfQ = std::min(2.0, std::max(0.25,
-		std::sqrt(lowShelfFrequency / std::max(5.0, lowShelfBandwidth)) / 2.0));
+	const double lowShelfQ = std::min<double>(2.0, std::max<double>(0.25,
+		std::sqrt(lowShelfFrequency / std::max<double>(5.0, lowShelfBandwidth)) / 2.0));
 	const ShelfBiquad lowShelf = make_shelf(std::pow(10.0, lowShelfGain / 40.0), lowShelfFrequency,
 		lowShelfQ, fConst0, false);
 	double fSlow0 = 0.0;
