@@ -37,6 +37,7 @@ ProcessingChainBase::ProcessingChainBase():
     rt_cycle_latch(),
     to_release(),
     to_initialize(),
+    pending_module_list(false),
     ramp_value(0),
     ramp_mode(ramp_mode_down_dead),
     stopped(true),
@@ -274,6 +275,15 @@ bool lists_equal(const list<Plugin*>& p1, const list<Plugin*>& p2, bool *need_ra
 
 bool ProcessingChainBase::set_plugin_list(const list<Plugin*> &p) {
     if (lists_equal(p, modules, &next_commit_needs_ramp)) {
+	if (pending_module_list) {
+	    // The previous activation may have omitted failed nodes. Drain that
+	    // publication before reusing its alternate array on an exact retry.
+	    wait_latch();
+	    if (check_release()) {
+		release();
+	    }
+	    next_commit_needs_ramp = true;
+	}
 	return false;
     }
     wait_latch();
@@ -299,6 +309,7 @@ bool ProcessingChainBase::set_plugin_list(const list<Plugin*> &p) {
 	}
     }
     modules = p;
+    pending_module_list = true;
     return true;
 }
 
@@ -733,6 +744,8 @@ bool ModuleSequencer::update_module_lists() {
     }
     bool changed = prepare_module_lists();
     changed = pluginlist.rt_scene_state_changed() || changed;
+    changed = mono_chain.has_pending_module_list() ||
+        stereo_chain.has_pending_module_list() || changed;
     if (changed) {
 	commit_module_lists();
 	if (stateflags & SF_OVERLOAD) {
@@ -858,7 +871,15 @@ SceneAudioCycleStatus ModuleSequencer::wait_scene_audio_cycle_with_budget(
 }
 
 bool ModuleSequencer::commit_pending_module_lists(bool externally_muted,
-						  bool* commit_ok) {
+                                                  bool* commit_ok,
+                                                  bool* processing_topology_changed,
+                                                  bool* rt_state_changed) {
+    if (processing_topology_changed) {
+        *processing_topology_changed = false;
+    }
+    if (rt_state_changed) {
+        *rt_state_changed = false;
+    }
     if (commit_ok) {
 	*commit_ok = false;
     }
@@ -868,15 +889,27 @@ bool ModuleSequencer::commit_pending_module_lists(bool externally_muted,
     if (commit_ok) {
 	*commit_ok = true;
     }
-    if (!get_rack_changed()) {
+    if (!get_rack_changed() && !mono_chain.has_pending_module_list() &&
+        !stereo_chain.has_pending_module_list()) {
 	return false;
     }
 
     // Keep the idle connection visible while selectors are evaluated. Their
     // on/off signals then coalesce into this transaction instead of queuing a
     // redundant second idle callback.
-    bool changed = prepare_module_lists();
-    changed = pluginlist.rt_scene_state_changed() || changed;
+    const bool lists_changed = prepare_module_lists();
+    const bool bypass_changed = pluginlist.rt_scene_state_changed();
+    const bool publication_pending = mono_chain.has_pending_module_list() ||
+        stereo_chain.has_pending_module_list();
+    if (processing_topology_changed) {
+        // Retrying an omitted node changes the published graph even when the
+        // desired module order still matches the previous attempted scene.
+        *processing_topology_changed = lists_changed || publication_pending;
+    }
+    if (rt_state_changed) {
+        *rt_state_changed = bypass_changed;
+    }
+    const bool changed = lists_changed || bypass_changed || publication_pending;
     if (changed) {
 	const bool ok = commit_module_lists(externally_muted);
 	if (commit_ok) {

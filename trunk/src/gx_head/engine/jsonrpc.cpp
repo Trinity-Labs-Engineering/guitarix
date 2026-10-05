@@ -20,6 +20,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <ctime>
+#include <chrono>
 #include <sys/types.h>
 #include <sys/socket.h>
 #if HAVE_BLUEZ
@@ -532,6 +533,12 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
 
     FUNCTION(set_scene)
     case RPCM_set_scene_muted: {
+        typedef std::chrono::steady_clock SceneClock;
+        const auto scene_started_at = SceneClock::now();
+        const auto elapsed_ms = [](SceneClock::time_point start,
+                                   SceneClock::time_point end) {
+            return std::chrono::duration<double, std::milli>(end - start).count();
+        };
         const bool externally_muted = mn->m_id == RPCM_set_scene_muted;
         bool snap_output_gain = false;
         bool snap_nam_gain_rt = false;
@@ -621,6 +628,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             }
         }
 
+        const auto validation_finished_at = SceneClock::now();
         gx_engine::GxEngine& engine = serv.jack.get_engine();
         // A model replacement already obtains exclusive ownership of its DSP
         // state via sync(). During an externally-muted scene, finish the gain
@@ -651,6 +659,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             engine.mneural_amp.finish_scene_parameter_batch();
             throw;
         }
+        const auto parameters_finished_at = SceneClock::now();
 
         // Do not arm a bypassed NAM wrapper: it cannot consume an RT request,
         // and carrying the request into a later unmuted activation would turn
@@ -667,10 +676,15 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             static_cast<int>(snap_snam_gain_rt) +
             static_cast<int>(snap_mnam_gain_rt);
         bool commit_ok = false;
+        bool processing_topology_changed = false;
+        bool rt_state_changed = false;
         bool topology_changed = engine.commit_pending_module_lists(
-            externally_muted, &commit_ok);
+            externally_muted, &commit_ok,
+            &processing_topology_changed, &rt_state_changed);
+        const auto module_commit_finished_at = SceneClock::now();
         bool chain_settled = !topology_changed ||
             engine.wait_ramp_up_finished();
+        const auto chain_ramp_finished_at = SceneClock::now();
 
         // Commit first: activation of a newly inserted processor may clear its
         // state. Once the final chain is published, quiesce every changed
@@ -698,6 +712,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                 mnam_gain_preset = mnam_gain_preset || mnam_gain_control_preset;
             }
         }
+        const auto smoother_barrier_finished_at = SceneClock::now();
 
         // A timed-out ownership barrier leaves accumulator state untouched and
         // restores every processor. Retain the RT request as a bounded fallback
@@ -749,6 +764,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                 mono_gain_pending, output_gain_pending, externally_muted);
         const bool gain_audio_cycle_finished = scene_audio_status.finished();
         const bool scene_audio_ready = scene_audio_status.started();
+        const auto audio_cycle_finished_at = SceneClock::now();
 
         bool output_gain_settled =
             !snap_output_gain || output_gain_control_preset;
@@ -843,7 +859,12 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         // processor has reached its later mature output.
         jw.begin_object();
         jw.write_kv("applied", static_cast<int>(params.size() / 2));
+        // Preserve the historical aggregate for older clients. It includes
+        // resident bypass changes, so use the explicit field below to measure
+        // real processing-graph churn.
         jw.write_bool_kv("topologyChanged", topology_changed);
+        jw.write_bool_kv("processingTopologyChanged", processing_topology_changed);
+        jw.write_bool_kv("rtStateChanged", rt_state_changed);
         jw.write_bool_kv("commitOk", commit_ok);
         jw.write_bool_kv("chainCommitted", topology_changed);
         jw.write_bool_kv("chainSettled", chain_settled);
@@ -859,6 +880,12 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                 snam_gain_preset || mnam_gain_preset);
         jw.write_bool_kv("gainSmoothersSettled", gain_smoothers_settled);
         jw.write_bool_kv("audioReady", scene_audio_ready);
+        // No crossfade/mature-DSP observation exists yet. Null explicitly
+        // means unknown; neither callback entry nor gain snapping proves it.
+        jw.write_key("steadyReady");
+        jw.write_null();
+        jw.write_kv("readinessBoundary",
+                    externally_muted ? "callback-entry" : "control-commit");
         jw.write_bool_kv("gainAudioCycleFinished", gain_audio_cycle_finished);
         jw.write_bool_kv(
             "monoAudioCycleStartRequested",
@@ -901,6 +928,16 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_bool_kv("mnamGainSmootherPreset", mnam_gain_preset);
         jw.write_bool_kv("mnamGainSmootherRtRequested", mnam_gain_rt_requested);
         jw.write_bool_kv("mnamGainSmootherSettled", mnam_gain_settled);
+        jw.write_key("phaseTimingsMs");
+        jw.begin_object();
+        jw.write_kv("validation", elapsed_ms(scene_started_at, validation_finished_at));
+        jw.write_kv("parameterApply", elapsed_ms(validation_finished_at, parameters_finished_at));
+        jw.write_kv("moduleCommit", elapsed_ms(parameters_finished_at, module_commit_finished_at));
+        jw.write_kv("chainRampWait", elapsed_ms(module_commit_finished_at, chain_ramp_finished_at));
+        jw.write_kv("smootherBarrier", elapsed_ms(chain_ramp_finished_at, smoother_barrier_finished_at));
+        jw.write_kv("audioCycleWait", elapsed_ms(smoother_barrier_finished_at, audio_cycle_finished_at));
+        jw.write_kv("total", elapsed_ms(scene_started_at, audio_cycle_finished_at));
+        jw.end_object();
         jw.end_object();
     }
 

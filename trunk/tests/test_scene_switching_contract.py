@@ -11,6 +11,39 @@ LADSPA_HOST = TRUNK / "src" / "ladspa" / "ladspa_guitarix.cpp"
 
 
 class SceneSwitchingContractTests(unittest.TestCase):
+    def test_ack_distinguishes_bypass_publication_from_topology_and_steady_audio(self):
+        rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
+        audio = (ENGINE / "gx_engine_audio.cpp").read_text(encoding="utf-8")
+        scene = rpc.split("FUNCTION(set_scene)", maxsplit=1)[1].split(
+            "FUNCTION(get) {", maxsplit=1
+        )[0]
+        commit = audio.split(
+            "bool ModuleSequencer::commit_pending_module_lists", maxsplit=1
+        )[1].split("void ModuleSequencer::set_rack_changed", maxsplit=1)[0]
+        self.assertIn(
+            "*processing_topology_changed = lists_changed || publication_pending;",
+            commit,
+        )
+        self.assertIn(
+            "if (!get_rack_changed() && !mono_chain.has_pending_module_list() &&",
+            commit,
+        )
+        self.assertIn(
+            "const bool changed = lists_changed || bypass_changed || publication_pending;",
+            commit,
+        )
+        self.assertIn("*rt_state_changed = bypass_changed;", commit)
+        self.assertIn('"processingTopologyChanged", processing_topology_changed', scene)
+        self.assertIn('"rtStateChanged", rt_state_changed', scene)
+        self.assertIn('jw.write_key("steadyReady");\n        jw.write_null();', scene)
+        self.assertIn('externally_muted ? "callback-entry" : "control-commit"', scene)
+        self.assertIn('jw.write_key("phaseTimingsMs");', scene)
+        for phase in (
+            "validation", "parameterApply", "moduleCommit", "chainRampWait",
+            "smootherBarrier", "audioCycleWait", "total",
+        ):
+            self.assertIn(f'jw.write_kv("{phase}", elapsed_ms(', scene)
+
     def test_muted_scene_rpc_is_present_in_template_and_generated_contract(self) -> None:
         template = (ENGINE / "jsonrpc_methods.gperf_tmpl").read_text(encoding="utf-8")
         generated_header = (ENGINE / "jsonrpc_methods-generated.h").read_text(

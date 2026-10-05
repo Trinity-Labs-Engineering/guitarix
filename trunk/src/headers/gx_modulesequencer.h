@@ -60,6 +60,9 @@ protected:
     // separate from `modules` prevents an unrelated rack edit from resetting
     // every resident DSP module.
     list<Plugin*> to_initialize;
+    // RT bypass state is published separately. Rebuild the pointer array only
+    // when the ordered processing modules actually changed.
+    bool pending_module_list;
 private:
     int ramp_value; // RT
     int ramp_mode; // RT  should be RampMode, but gcc 4.5 doesn't accept it for g_atomic_int_compare_and_exchange
@@ -81,6 +84,7 @@ public:
     inline int get_ramp_value() { return gx_system::atomic_get(ramp_value); } // RT
     void set_samplerate(int samplerate);
     bool set_plugin_list(const list<Plugin*> &p);
+    bool has_pending_module_list() const { return pending_module_list; }
     void clear_module_states();
     inline void post_rt_started() { rt_start_latch.notify_rt(); } // RT
     inline void post_rt_finished() { rt_cycle_latch.notify_rt(); } // RT
@@ -242,9 +246,13 @@ template <class F>
 bool ThreadSafeChainPointer<F>::commit(bool clear, ParamMap& pmap) {
     (void)clear;
     (void)pmap;
+    if (!pending_module_list) {
+        return true;
+    }
     setsize(modules.size()+1);  // leave one slot for 0 marker
     int active_counter = 0;
     bool ok = true;
+    list<Plugin*> failed_initializations;
     for (list<Plugin*>::const_iterator p = modules.begin(); p != modules.end(); p++) {
 	PluginDef* pd = (*p)->get_pdef();
 	bool initialize = std::find(to_initialize.begin(), to_initialize.end(), *p)
@@ -254,6 +262,7 @@ bool ThreadSafeChainPointer<F>::commit(bool clear, ParamMap& pmap) {
 		if (pd->activate_plugin(true, pd) != 0) {
 		    (*p)->set_on_off(false);
 		    (*p)->commit_rt_scene_state();
+		    failed_initializations.push_back(*p);
 		    ok = false;
 		    continue;
 		}
@@ -265,9 +274,13 @@ bool ThreadSafeChainPointer<F>::commit(bool clear, ParamMap& pmap) {
 	assert(f.func);
 	current_pointer[active_counter++] = f;
     }
-    to_initialize.clear();
+    // A partially published chain is not reusable. Preserve failed nodes so
+    // an identical scene retry activates them before publishing their audio
+    // callbacks; established processors must keep their current DSP state.
+    to_initialize.swap(failed_initializations);
     current_pointer[active_counter].func = 0;
     gx_system::atomic_set(&processing_pointer, current_pointer);
+    pending_module_list = !ok;
     set_latch();
     current_index = (current_index+1) % 2;
     current_pointer = rack_order_ptr[current_index];
@@ -419,7 +432,9 @@ public:
     // lets acknowledged control transactions reply after their topology has
     // been published instead of while it is still in the GLib idle queue.
     bool commit_pending_module_lists(bool externally_muted = false,
-                                     bool* commit_ok = 0);
+                                     bool* commit_ok = 0,
+                                     bool* processing_topology_changed = 0,
+                                     bool* rt_state_changed = 0);
     // Observe callback entry for the whole scene and callback completion only
     // for chains which own pending gain snaps. All waits share one bounded
     // deadline, so a stalled client cannot create additive timeout periods.

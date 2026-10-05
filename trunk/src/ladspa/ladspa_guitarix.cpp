@@ -802,6 +802,7 @@ void MonoEngine::commit_module_lists() {
 bool MonoEngine::update_module_lists() {
     bool changed = prepare_module_lists();
     changed = pluginlist.rt_scene_state_changed() || changed;
+    changed = mono_chain.has_pending_module_list() || changed;
     if (changed) {
 	commit_module_lists();
 	return true;
@@ -1513,6 +1514,7 @@ void StereoEngine::commit_module_lists() {
 bool StereoEngine::update_module_lists() {
     bool changed = prepare_module_lists();
     changed = pluginlist.rt_scene_state_changed() || changed;
+    changed = stereo_chain.has_pending_module_list() || changed;
     if (changed) {
 	commit_module_lists();
 	return true;
