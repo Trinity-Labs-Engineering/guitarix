@@ -13,7 +13,7 @@ FIXTURE = Path(__file__).with_name("poly_pitch_shifter_fixture.cpp")
 
 
 class PolyPitchShifterTests(unittest.TestCase):
-    def test_polyphonic_octaves_latency_and_rt_contract(self) -> None:
+    def test_tone3000_pitch_audio_and_realtime_contract(self) -> None:
         compiler = os.environ.get("CXX", "c++")
         if shutil.which(compiler) is None:
             self.skipTest(f"C++ compiler is unavailable: {compiler}")
@@ -40,12 +40,12 @@ class PolyPitchShifterTests(unittest.TestCase):
             )
             completed = subprocess.run(
                 [str(executable)],
-                check=True,
                 capture_output=True,
                 text=True,
                 timeout=20,
             )
 
+        self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stdout.strip(), "poly-pitch-shifter-ok")
 
 

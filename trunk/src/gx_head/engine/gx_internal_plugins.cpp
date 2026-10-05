@@ -2518,11 +2518,12 @@ int DrumSequencer::drum_load_ui(const UiBuilder& builder, int format) {
 }
 
 /****************************************************************************
- * Native low-latency polyphonic pitch shifter
+ * TONE3000 low-latency polyphonic pitch shifter
  *
  * The historical smbPitchShift parameter and plugin IDs are intentionally
  * retained for preset, remote-control, and Houston compatibility.  The DSP is
- * implemented by PolyphonicPitchShifter in gx_poly_pitch_shifter.h.
+ * adapted from TONE3000's correlation-spliced delay line by
+ * PolyphonicPitchShifter in gx_poly_pitch_shifter.h.
  ****************************************************************************/
 
 bool smbPitchShift::setParameters(int sampleRate_)

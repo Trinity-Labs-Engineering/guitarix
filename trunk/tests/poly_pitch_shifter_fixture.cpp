@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <new>
@@ -12,7 +13,6 @@ namespace {
 
 bool count_allocations = false;
 size_t callback_allocations = 0;
-
 const double pi2 = 6.28318530717958647692;
 
 double tone_amplitude(const std::vector<float>& signal, int start,
@@ -39,19 +39,255 @@ double strongest_near(const std::vector<float>& signal, int start,
     return strongest;
 }
 
+std::vector<float> sine(int length, int sample_rate, double frequency)
+{
+    std::vector<float> signal(length);
+    for (int i = 0; i < length; ++i)
+        signal[i] = static_cast<float>(0.5*std::sin(pi2*frequency*i/sample_rate));
+    return signal;
+}
+
+std::vector<float> noise(int length)
+{
+    std::vector<float> signal(length);
+    uint32_t state = 123456789;
+    for (int i = 0; i < length; ++i) {
+        state = state*1664525u + 1013904223u;
+        signal[i] = static_cast<float>((state >> 8)/16777216.0 - 0.5);
+    }
+    return signal;
+}
+
+void process(gx_engine::PolyphonicPitchShifter& shifter,
+             const float* input, float* output, int count, double ratio,
+             float wet = 1.0f, float dry = 0.0f, bool compensate_dry = false)
+{
+    // Neither a new search nor an automated ratio may allocate in JACK.
+    count_allocations = true;
+    shifter.process(input, output, count, ratio, wet, dry,
+        compensate_dry, 1.0f, 1.0f, 1.0f, 1.0f);
+    count_allocations = false;
+    assert(callback_allocations == 0);
+}
+
 void render(gx_engine::PolyphonicPitchShifter& shifter,
             const std::vector<float>& input, std::vector<float>& output,
-            double ratio, bool in_place)
+            double ratio, int block_size = 127, bool in_place = false,
+            float wet = 1.0f, float dry = 0.0f, bool compensate_dry = false)
 {
-    const int block_size = 127; // Deliberately unrelated to any FFT size.
     if (in_place) output = input;
     for (int position = 0; position < static_cast<int>(input.size());
          position += block_size) {
         const int count = std::min(block_size,
             static_cast<int>(input.size()) - position);
-        const float *source = in_place ? &output[position] : &input[position];
-        shifter.process(source, &output[position], count, ratio,
-            1.0f, 0.0f, true, 1.0f, 1.0f, 1.0f, 1.0f);
+        const float* source = in_place ? &output[position] : &input[position];
+        process(shifter, source, &output[position], count, ratio,
+            wet, dry, compensate_dry);
+    }
+}
+
+void assert_equal(const std::vector<float>& actual,
+                  const std::vector<float>& expected)
+{
+    assert(actual.size() == expected.size());
+    for (size_t i = 0; i < actual.size(); ++i) {
+        assert(std::isfinite(actual[i]));
+        assert(std::abs(actual[i] - expected[i]) < 2.0e-6f);
+    }
+}
+
+void test_pitch_and_chords()
+{
+    const int sample_rate = 48000;
+    const int length = sample_rate*3;
+    const std::vector<float> tone = sine(length, sample_rate, 440.0);
+    const double ratios[] = {0.25, 0.5, std::pow(2.0, -1.5/12.0), 2.0, 4.0};
+    for (double ratio : ratios) {
+        gx_engine::PolyphonicPitchShifter shifter;
+        shifter.prepare(sample_rate, 1);
+        std::vector<float> output(length);
+        render(shifter, tone, output, ratio);
+        const double shifted = strongest_near(output, sample_rate,
+            440.0*ratio, sample_rate);
+        assert(shifted > 0.35);
+        assert(tone_amplitude(output, sample_rate, 440.0*ratio, sample_rate)
+            > 10.0*tone_amplitude(output, sample_rate, 440.0, sample_rate));
+    }
+
+    const double chord[] = {110.0, 196.0, 329.627557};
+    std::vector<float> input(length, 0.0f);
+    for (int i = 0; i < length; ++i)
+        for (int note = 0; note < 3; ++note)
+            input[i] += static_cast<float>(0.2*std::sin(
+                pi2*chord[note]*i/sample_rate + note*0.31));
+
+    for (double ratio : {std::pow(2.0, -2.0/12.0), std::pow(2.0, 2.0/12.0)}) {
+        gx_engine::PolyphonicPitchShifter shifter;
+        shifter.prepare(sample_rate, 1);
+        std::vector<float> output(length);
+        render(shifter, input, output, ratio);
+        // Preserve every note through common transpose intervals. Upstream
+        // correlation splices compromise the individual note pitches of
+        // dissonant chords at octave shifts; single notes cover that range.
+        for (int note = 0; note < 3; ++note)
+            assert(strongest_near(output, sample_rate,
+                chord[note]*ratio, sample_rate) > 0.10);
+        for (float sample : output) {
+            assert(std::isfinite(sample));
+            assert(std::abs(sample) < 2.0f);
+        }
+    }
+}
+
+void test_unison_and_rates()
+{
+    gx_engine::PolyphonicPitchShifter shifter;
+    for (int rate : {44100, 48000, 96000}) {
+        const std::vector<float> input = noise(rate/4);
+        std::vector<float> output(input.size());
+        for (int mode = 0; mode < 3; ++mode) {
+            shifter.prepare(rate, mode); // Also exercise device-rate changes.
+            const int window_ms[] = {60, 30, 20};
+            const int floor = static_cast<int>(rate*0.002);
+            const int window = static_cast<int>(rate*window_ms[mode]*0.001);
+            assert(shifter.latency_samples() == (floor + window)/2);
+            render(shifter, input, output, 1.0);
+            // TONE3000 starts its tap at the 2 ms floor. Its reported
+            // latency is the mean shifting delay, not this unison delay.
+            // Ignore the upstream 25 ms startup blend into the wet signal.
+            for (int i = rate/10; i < static_cast<int>(input.size()); ++i)
+                assert(std::abs(output[i] - input[i - floor]) < 2.0e-6f);
+        }
+        shifter.prepare(rate, 1);
+        const auto tone = sine(rate, rate, 220.0);
+        output.resize(tone.size());
+        const double ratio = std::pow(2.0, -2.0/12.0);
+        render(shifter, tone, output, ratio, 4097);
+        // Rate-scaled correlation and fades retain a shifted steady tone's
+        // gain (within 1 dB) at the device's actual sample rate.
+        const double gain = strongest_near(output, rate/2, 220.0*ratio, rate)/0.5;
+        assert(gain > 0.89 && gain < 1.13);
+    }
+}
+
+void test_blocks_in_place_and_reset()
+{
+    const auto input = noise(48000);
+    const double ratio = std::pow(2.0, -5.0/12.0);
+    gx_engine::PolyphonicPitchShifter reference;
+    reference.prepare(48000, 1);
+    std::vector<float> expected(input.size());
+    render(reference, input, expected, ratio);
+
+    gx_engine::PolyphonicPitchShifter shifter;
+    for (int block : {1, 16, 512, 4097}) {
+        shifter.prepare(48000, 1);
+        std::vector<float> output(input.size());
+        render(shifter, input, output, ratio, block);
+        assert_equal(output, expected);
+    }
+    shifter.prepare(48000, 1);
+    std::vector<float> in_place;
+    render(shifter, input, in_place, ratio, 127, true);
+    assert_equal(in_place, expected);
+
+    // A reset clears audio, onset history, tap/search/fade state and the
+    // previous ratio, including resets partway through a correlation splice.
+    process(shifter, input.data(), in_place.data(), 733, 4.0);
+    count_allocations = true;
+    shifter.reset();
+    count_allocations = false;
+    assert(callback_allocations == 0);
+    render(shifter, input, in_place, ratio);
+    assert_equal(in_place, expected);
+    shifter.reset();
+    std::vector<float> silence(4800, 0.0f);
+    std::vector<float> silent_output(silence.size(), 1.0f);
+    render(shifter, silence, silent_output, 0.25);
+    assert_equal(silent_output, silence);
+}
+
+void test_wet_dry()
+{
+    const auto input = noise(48000);
+    const double ratio = std::pow(2.0, 7.0/12.0);
+    std::vector<float> wet(input.size()), mixed(input.size()), dry(input.size());
+    gx_engine::PolyphonicPitchShifter shifter;
+    shifter.prepare(48000, 1);
+    render(shifter, input, wet, ratio);
+    for (bool compensate : {false, true}) {
+        shifter.reset();
+        render(shifter, input, dry, ratio, 127, false, 0.0f, 1.0f, compensate);
+        const int delay = compensate ? shifter.latency_samples() : 0;
+        for (int i = 0; i < static_cast<int>(input.size()); ++i)
+            assert(std::abs(dry[i] - (i >= delay ? input[i - delay] : 0.0f)) < 2.0e-6f);
+        shifter.reset();
+        render(shifter, input, mixed, ratio, 127, false, 0.7f, 0.3f, compensate);
+        for (size_t i = 0; i < input.size(); ++i)
+            assert(std::abs(mixed[i] - (0.7f*wet[i] + 0.3f*dry[i])) < 2.0e-6f);
+    }
+}
+
+void test_pitch_automation()
+{
+    const int sample_rate = 48000;
+    const int block = 512;
+    const int blocks = 4*sample_rate/block;
+    const auto input = sine(blocks*block, sample_rate, 220.0);
+    std::vector<float> output(input.size());
+    gx_engine::PolyphonicPitchShifter shifter;
+    shifter.prepare(sample_rate, 1);
+    for (int b = 0; b < blocks; ++b) {
+        // Same smooth 0 -> +24 -> -24 -> 0 semitone sweep as upstream:
+        // searches must survive small changes and restart on direction flips.
+        const double phase = static_cast<double>(b)/blocks;
+        const double semitones = phase < 0.25 ? 96.0*phase
+            : phase < 0.75 ? 24.0 - 96.0*(phase - 0.25)
+            : -24.0 + 96.0*(phase - 0.75);
+        process(shifter, &input[b*block], &output[b*block], block,
+            std::pow(2.0, semitones/12.0));
+    }
+    for (int i = sample_rate; i < static_cast<int>(output.size()); ++i) {
+        assert(std::isfinite(output[i]));
+        assert(std::abs(output[i] - output[i - 1]) < 0.12f);
+    }
+    for (int end = sample_rate; end <= static_cast<int>(output.size()); end += 480) {
+        double energy = 0.0;
+        for (int i = end - 480; i < end; ++i) energy += output[i]*output[i];
+        assert(std::sqrt(energy/480) > 0.15);
+    }
+}
+
+void test_attack_resync()
+{
+    const int rate = 48000;
+    const double ratio = std::pow(2.0, -2.0/12.0);
+    for (int hold_ms : {700, 1600}) {
+        const int hold = hold_ms*48;
+        auto input = sine(hold + rate/2, rate, 110.0);
+        for (float& sample : input) sample *= 0.2f;
+        const auto burst = noise(rate/2);
+        for (size_t i = 0; i < burst.size(); ++i)
+            input[hold + i] = 1.8f*burst[i];
+        gx_engine::PolyphonicPitchShifter shifter;
+        shifter.prepare(rate, 1);
+        std::vector<float> output(input.size());
+        render(shifter, input, output, ratio);
+
+        // A pick-like broadband burst after a quiet low sustain should
+        // arrive at the floor plus onset-search/fade allowance, regardless
+        // of where the drifting read tap sat before the attack.
+        int arrival = -1;
+        for (int end = hold + 48; end < static_cast<int>(output.size()); ++end) {
+            double energy = 0.0;
+            for (int i = end - 48; i < end; ++i) energy += output[i]*output[i];
+            if (std::sqrt(energy/48) > 0.3) {
+                arrival = end;
+                break;
+            }
+        }
+        assert(arrival >= hold + 96); // 2 ms floor.
+        assert(arrival <= hold + 96 + 192 + 96 + 96);
     }
 }
 
@@ -79,72 +315,12 @@ void operator delete[](void *memory) noexcept { std::free(memory); }
 
 int main()
 {
-    const int sample_rate = 48000;
-    const int length = sample_rate*2;
-    const int analysis_start = sample_rate;
-    const double chord[] = {110.0, 196.0, 329.627557};
-    std::vector<float> input(length, 0.0f);
-    for (int i = 0; i < length; ++i) {
-        for (int note = 0; note < 3; ++note) {
-            input[i] += static_cast<float>(0.2*std::sin(
-                pi2*chord[note]*i/sample_rate + note*0.31));
-        }
-    }
-
-    for (int direction = 0; direction < 2; ++direction) {
-        const double ratio = direction ? 2.0 : 0.5;
-        gx_engine::PolyphonicPitchShifter shifter;
-        shifter.prepare(sample_rate, 1); // Mode selected by Houston.
-        assert(shifter.latency_samples() <= sample_rate*0.026);
-
-        std::vector<float> output(length, 0.0f);
-        count_allocations = true;
-        callback_allocations = 0;
-        render(shifter, input, output, ratio, false);
-        count_allocations = false;
-        assert(callback_allocations == 0);
-
-        // Every note in a widely-spaced guitar chord must retain a strong
-        // component around its independently shifted destination frequency.
-        for (int note = 0; note < 3; ++note) {
-            assert(strongest_near(output, analysis_start,
-                chord[note]*ratio, sample_rate) > 0.10);
-        }
-        for (size_t i = analysis_start; i < output.size(); ++i)
-            assert(std::isfinite(output[i]));
-
-        // Guitarix commonly processes mono effects in-place.
-        gx_engine::PolyphonicPitchShifter in_place_shifter;
-        in_place_shifter.prepare(sample_rate, 1);
-        std::vector<float> in_place_output;
-        render(in_place_shifter, input, in_place_output, ratio, true);
-        assert(in_place_output.size() == output.size());
-        for (size_t i = 0; i < output.size(); ++i)
-            assert(std::abs(in_place_output[i] - output[i]) < 1.0e-6f);
-    }
-
-    // At unison the wet path is an exact, compensated delay rather than a
-    // collection of stationary read heads which would comb-filter the input.
-    gx_engine::PolyphonicPitchShifter unison;
-    unison.prepare(sample_rate, 1);
-    std::vector<float> unison_output(length, 0.0f);
-    render(unison, input, unison_output, 1.0, false);
-    const int delay = unison.latency_samples();
-    for (int i = delay; i < length; ++i)
-        assert(std::abs(unison_output[i] - input[i - delay]) < 2.0e-6f);
-
-    // Returning an automated shift to zero must also converge to that exact
-    // delay, rather than leaving the read head at an arbitrary sweep phase.
-    gx_engine::PolyphonicPitchShifter automated;
-    automated.prepare(sample_rate, 1);
-    std::vector<float> automated_output(length, 0.0f);
-    automated.process(&input[0], &automated_output[0], length/2, 0.5,
-        1.0f, 0.0f, true, 1.0f, 1.0f, 1.0f, 1.0f);
-    automated.process(&input[length/2], &automated_output[length/2], length/2,
-        1.0, 1.0f, 0.0f, true, 1.0f, 1.0f, 1.0f, 1.0f);
-    for (int i = length - sample_rate/4; i < length; ++i)
-        assert(std::abs(automated_output[i] - input[i - delay]) < 2.0e-5f);
-
+    test_pitch_and_chords();
+    test_unison_and_rates();
+    test_blocks_in_place_and_reset();
+    test_wet_dry();
+    test_pitch_automation();
+    test_attack_resync();
     std::cout << "poly-pitch-shifter-ok\n";
     return 0;
 }
