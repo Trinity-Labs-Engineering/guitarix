@@ -154,7 +154,7 @@ void test_unison_and_rates()
             render(shifter, input, output, 1.0);
             // TONE3000 starts its tap at the 2 ms floor. Its reported
             // latency is the mean shifting delay, not this unison delay.
-            // Ignore the upstream 25 ms startup blend into the wet signal.
+            // Ignore the 25 ms fade-in of the wet signal.
             for (int i = rate/10; i < static_cast<int>(input.size()); ++i)
                 assert(std::abs(output[i] - input[i - floor]) < 2.0e-6f);
         }
@@ -209,22 +209,119 @@ void test_blocks_in_place_and_reset()
 
 void test_wet_dry()
 {
-    const auto input = noise(48000);
-    const double ratio = std::pow(2.0, 7.0/12.0);
-    std::vector<float> wet(input.size()), mixed(input.size()), dry(input.size());
+    const auto input = noise(8192);
+    std::vector<float> wet(input.size()), output(input.size());
     gx_engine::PolyphonicPitchShifter shifter;
     shifter.prepare(48000, 1);
-    render(shifter, input, wet, ratio);
-    for (bool compensate : {false, true}) {
+    for (double ratio : {0.5, 1.0, std::pow(2.0, 7.0/12.0)}) {
         shifter.reset();
-        render(shifter, input, dry, ratio, 127, false, 0.0f, 1.0f, compensate);
-        const int delay = compensate ? shifter.latency_samples() : 0;
-        for (int i = 0; i < static_cast<int>(input.size()); ++i)
-            assert(std::abs(dry[i] - (i >= delay ? input[i - delay] : 0.0f)) < 2.0e-6f);
+        render(shifter, input, wet, ratio);
+        for (bool compensate : {false, true}) {
+            const int delay = compensate ? shifter.latency_samples() : 0;
+            for (bool in_place : {false, true}) {
+                for (float wet_gain : {0.0f, 0.25f, 0.5f, 1.0f}) {
+                    for (float dry_gain : {0.0f, 0.25f, 0.5f, 1.0f}) {
+                        shifter.reset();
+                        render(shifter, input, output, ratio, 127, in_place,
+                            wet_gain, dry_gain, compensate);
+                        for (int i = 0; i < static_cast<int>(input.size()); ++i) {
+                            // The dry reference comes directly from the input;
+                            // it must never depend on the shifted signal or Wet.
+                            const float raw = i >= delay ? input[i - delay] : 0.0f;
+                            const float expected = wet_gain*wet[i] + dry_gain*raw;
+                            assert(std::abs(output[i] - expected) < 2.0e-6f);
+                            if (wet_gain == 0.0f)
+                                assert(output[i] == dry_gain*raw);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+void test_wet_only_startup()
+{
+    // A wet-only unison signal must contain only delayed impulses, even
+    // during startup. An upstream dry-to-wet blend leaks each impulse at
+    // its original, undelayed position for the first 25 ms.
+    std::vector<float> input(4096, 0.0f), output(input.size());
+    for (int position : {0, 240, 1000}) input[position] = 0.5f;
+    for (bool in_place : {false, true}) {
+        gx_engine::PolyphonicPitchShifter shifter;
+        shifter.prepare(48000, 1);
+        render(shifter, input, output, 1.0, 127, in_place);
+        for (int position : {0, 240, 1000})
+            assert(output[position] == 0.0f);
+        for (int position : {240, 1000})
+            assert(output[position + 96] > 0.0f);
+    }
+}
+
+void test_live_mix_and_mute()
+{
+    const int block = 512;
+    const auto input = noise(block*32);
+    const double ratio = std::pow(2.0, -5.0/12.0);
+    std::vector<float> wet(input.size()), output(input.size());
+    gx_engine::PolyphonicPitchShifter reference;
+    reference.prepare(48000, 1);
+    render(reference, input, wet, ratio, block);
+
+    for (bool in_place : {false, true}) {
+        gx_engine::PolyphonicPitchShifter shifter;
+        shifter.prepare(48000, 1);
+        if (in_place) output = input;
+        const float levels[] = {0.0f, 0.25f, 0.5f, 1.0f};
+        // Sweep every combination twice without resetting. Both-zero must
+        // mute from startup and immediately after a full-level block; the
+        // wet history must remain valid when the user raises a knob again.
+        for (int b = 0; b < 32; ++b) {
+            const float wet_gain = levels[(b/4)%4];
+            const float dry_gain = levels[b%4];
+            const int position = b*block;
+            const float* source = in_place ? &output[position] : &input[position];
+            process(shifter, source, &output[position], block, ratio,
+                wet_gain, dry_gain);
+            for (int i = position; i < position + block; ++i) {
+                const float expected = wet_gain*wet[i] + dry_gain*input[i];
+                assert(std::abs(output[i] - expected) < 2.0e-6f);
+                if (wet_gain == 0.0f && dry_gain == 0.0f)
+                    assert(output[i] == 0.0f);
+            }
+        }
+
+        count_allocations = true;
         shifter.reset();
-        render(shifter, input, mixed, ratio, 127, false, 0.7f, 0.3f, compensate);
-        for (size_t i = 0; i < input.size(); ++i)
-            assert(std::abs(mixed[i] - (0.7f*wet[i] + 0.3f*dry[i])) < 2.0e-6f);
+        count_allocations = false;
+        assert(callback_allocations == 0);
+        render(shifter, input, output, ratio, block, in_place, 0.0f, 0.0f);
+        for (float sample : output) assert(sample == 0.0f);
+
+        // Clear the accumulated audio before processing genuine silence.
+        shifter.reset();
+        const std::vector<float> silence(input.size(), 0.0f);
+        render(shifter, silence, output, ratio, block, in_place, 1.0f, 1.0f);
+        for (float sample : output) assert(sample == 0.0f);
+    }
+}
+
+void test_unprepared_mix()
+{
+    const auto input = noise(512);
+    std::vector<float> output(input.size());
+    gx_engine::PolyphonicPitchShifter shifter;
+    for (bool in_place : {false, true}) {
+        for (bool compensate : {false, true}) {
+            for (float wet_gain : {0.0f, 0.25f, 0.5f, 1.0f}) {
+                for (float dry_gain : {0.0f, 0.25f, 0.5f, 1.0f}) {
+                    render(shifter, input, output, 2.0, 127, in_place,
+                        wet_gain, dry_gain, compensate);
+                    for (size_t i = 0; i < input.size(); ++i)
+                        assert(output[i] == dry_gain*input[i]);
+                }
+            }
+        }
     }
 }
 
@@ -319,6 +416,9 @@ int main()
     test_unison_and_rates();
     test_blocks_in_place_and_reset();
     test_wet_dry();
+    test_wet_only_startup();
+    test_live_mix_and_mute();
+    test_unprepared_mix();
     test_pitch_automation();
     test_attack_resync();
     std::cout << "poly-pitch-shifter-ok\n";

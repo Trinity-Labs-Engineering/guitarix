@@ -94,7 +94,7 @@ constexpr double kUpshiftLandShare = 0.5;
 // pending search: the landing moves by at most the change times the lead,
 // ~20 samples, which the landing range's margins cover.
 constexpr double kSearchKeepRatio = 0.1;
-// Prime the delay then blend it in over the same 25 ms as TONE3000.
+// Prime the delay then fade the wet signal in over the same 25 ms as TONE3000.
 constexpr double kBlendSeconds = 0.025;
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kMinDelayMs = 2.0;
@@ -160,7 +160,7 @@ struct State {
   Ring ring;
   MirroredRing control;
   int primeLeft = 0, blendLength = 1, blendLeft = 0;
-  float wetMix = 0.0f, blendStep = 1.0f;
+  float startupGain = 0.0f, blendStep = 1.0f;
 
   int64_t written = 0;  // samples written so far; the newest is written - 1
 
@@ -256,7 +256,7 @@ struct State {
     written = 0;
     ratio = 1.0;
     updateFadeRange();
-    wetMix = 0.0f;
+    startupGain = 0.0f;
     blendLeft = 0;
     rA = rB = static_cast<double>(written - dMin);  // start at the floor
     primeLeft = dMin + 8;
@@ -398,8 +398,8 @@ struct State {
  * TONE3000's correlation-spliced delay line: Hermite read taps, incremental
  * damage-per-splice lag search, correlation-dependent fades and onset re-sync.
  * This mono adapter preserves Guitarix's parameter ABI and independent Wet/Dry
- * gains without linking JUCE. With neutral legacy bands and full Wet it follows
- * the upstream pure-shift path, including its startup blend. At unity the tap
+ * gains without linking JUCE. Its wet path fades in from silence after priming;
+ * only the Dry control adds unshifted input. At unity the tap
  * stops drifting; nominal latency is the mean delay, not a fixed wet delay.
  *
  * prepare() is the only allocating operation. reset() clears resident scene
@@ -496,7 +496,8 @@ public:
         if (count <= 0) return;
         auto& s = state;
         if (s.sampleRate <= 0.0 || s.ring.buf.empty()) {
-            if (input != output) std::copy(input, input + count, output);
+            // An unavailable wet path must not bypass the Dry level.
+            for (int i = 0; i < count; ++i) output[i] = dry * input[i];
             return;
         }
         target_ratio = std::isfinite(target_ratio)
@@ -596,12 +597,14 @@ public:
           }
           if (s.primeLeft > 0 && --s.primeLeft == 0) s.blendLeft = s.blendLength;
           if (s.blendLeft > 0) {
-            if (--s.blendLeft > 0) s.wetMix += s.blendStep;
-            else s.wetMix = 1.0f;
+            if (--s.blendLeft > 0) s.startupGain += s.blendStep;
+            else s.startupGain = 1.0f;
           }
           float shifted = s.ring.read(s.rA);
           if (s.fading) shifted = shifted * gainA + gainB * s.ring.read(s.rB);
-          shifted = raw + s.wetMix * (shifted - raw);
+          // TONE3000 blends from dry on power-up. Here Wet and Dry are
+          // independent levels, so prime/fade only the shifted contribution.
+          shifted *= s.startupGain;
           shifted = colour(shifted, low, low_mid, high_mid, high);
           // Independent Guitarix Wet/Dry gains, including the legacy option to
           // delay the dry by the nominal mean latency. Tonality is off in TONE3000's

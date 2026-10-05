@@ -2668,9 +2668,10 @@ void __rt_func smbPitchShift::compute_static(int count, float *input0, float *ou
 void always_inline smbPitchShift::PitchShift(int count, float *indata, float *outdata)
 {
     if (!ready) {
-        if (indata != outdata) {
-            memcpy(outdata,indata,count*sizeof(float));
-        }
+        // While the wet path is unavailable, keep honoring the Dry knob.
+        // A unity passthrough here leaked input even with both levels at zero.
+        const float dry_gain = 0.01f*dry;
+        for (int i = 0; i < count; ++i) outdata[i] = dry_gain*indata[i];
         return;
     }
 
