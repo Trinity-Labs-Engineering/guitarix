@@ -2552,7 +2552,7 @@ smbPitchShift::smbPitchShift(EngineControl& engine_, sigc::slot<void> sync_):
   ready(false),
   semitones(0.0f),
   a(1.0f), b(1.0f), c(1.0f), d(1.0f), l(0.0f),
-  wet(100.0f),
+  wet(50.0f),
   dry(0.0f),
   octave(0),
   sampleRate(48000),
@@ -2667,10 +2667,16 @@ void __rt_func smbPitchShift::compute_static(int count, float *input0, float *ou
 
 void always_inline smbPitchShift::PitchShift(int count, float *indata, float *outdata)
 {
+    // The level pots retain their historical 0..100 parameter range, but act
+    // as gain trims: 0 is silence, 50 is unity, and 100 is 2x (about +6 dB).
+    // In particular, do not convert zero as a 0 dB value: each path must be
+    // independently removable from the output.
+    const float wet_gain = 0.02f*wet;
+    const float dry_gain = 0.02f*dry;
+
     if (!ready) {
         // While the wet path is unavailable, keep honoring the Dry knob.
         // A unity passthrough here leaked input even with both levels at zero.
-        const float dry_gain = 0.01f*dry;
         for (int i = 0; i < count; ++i) outdata[i] = dry_gain*indata[i];
         return;
     }
@@ -2681,7 +2687,7 @@ void always_inline smbPitchShift::PitchShift(int count, float *indata, float *ou
     const double ratio = pow(2.0,
         (semitones + octave_semitones)*(1.0/12.0));
     pitch_shifter.process(indata, outdata, count, ratio,
-        0.01f*wet, 0.01f*dry, l >= 0.5f, a, b, c, d);
+        wet_gain, dry_gain, l >= 0.5f, a, b, c, d);
 }
 
 int smbPitchShift::register_par(const ParamReg& reg) 
@@ -2693,8 +2699,8 @@ int smbPitchShift::register_par(const ParamReg& reg)
     reg.registerFloatVar("smbPitchShift.l",N_("compensate latency"),"S",N_("compensate latency"),&l, 0.0f, 0.0f, 1.0f, 1.0f, latency_values);
     static const value_pair latency_set[] = {{"high quality"},{"low quality"},{"realtime"},{0}};
     reg.registerIntVar("smbPitchShift.latency",N_("latency settings"),"B",N_("latency settings"),&latency, 0, 0, 0, latency_set);
-    reg.registerFloatVar("smbPitchShift.wet", N_("Wet"), "S", N_("Wet amount"), &wet, 100.0, 0.0, 100.0, 1, 0);
-    reg.registerFloatVar("smbPitchShift.dry", N_("Dry"), "S", N_("Dry amount"), &dry, 0.0, 0.0, 100.0, 1, 0);
+    reg.registerFloatVar("smbPitchShift.wet", N_("Wet"), "S", N_("Wet level: 0 = off, 50 = unity, 100 = +6 dB"), &wet, 50.0, 0.0, 100.0, 1, 0);
+    reg.registerFloatVar("smbPitchShift.dry", N_("Dry"), "S", N_("Dry level: 0 = off, 50 = unity, 100 = +6 dB"), &dry, 0.0, 0.0, 100.0, 1, 0);
     reg.registerFloatVar("smbPitchShift.a", N_("low"), "S", N_("Sub"), &a, 1.0, 0.0, 2.0, 0.01, 0);
     reg.registerFloatVar("smbPitchShift.b", N_("middle low"), "S", N_("Low"), &b, 1.0, 0.0, 2.0, 0.01, 0);
     reg.registerFloatVar("smbPitchShift.c", N_("middle treble"), "S", N_("Mid"), &c, 1.0, 0.0, 2.0, 0.01, 0);

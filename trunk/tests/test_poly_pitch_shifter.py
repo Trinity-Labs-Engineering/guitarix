@@ -79,7 +79,7 @@ class PolyPitchShifterTests(unittest.TestCase):
                 bool ready = false;
                 float semitones = 7.0f;
                 float a = 1.0f, b = 1.0f, c = 1.0f, d = 1.0f, l = 0.0f;
-                float wet = 100.0f, dry = 0.0f;
+                float wet = 50.0f, dry = 0.0f;
                 int octave = 0;
                 void PitchShift(int count, float *indata, float *outdata);
             };
@@ -118,9 +118,9 @@ class PolyPitchShifterTests(unittest.TestCase):
                                     plugin.PitchShift(length, source, output.data());
                                     for (int i = 0; i < length; ++i) {
                                         const float raw = i >= delay ? input[i - delay] : 0.0f;
-                                        const float dry_sample = 0.01f*dry_percent*raw;
+                                        const float dry_sample = 0.02f*dry_percent*raw;
                                         const float expected = dry_sample
-                                            + (ready ? 0.01f*wet_percent*wet[i] : 0.0f);
+                                            + (ready ? 0.02f*wet_percent*wet[i] : 0.0f);
                                         assert(std::abs(output[i] - expected) < 2.0e-6f);
                                         if (!ready || wet_percent == 0.0f)
                                             assert(output[i] == dry_sample);
@@ -133,6 +133,20 @@ class PolyPitchShifterTests(unittest.TestCase):
                     plugin.PitchShift(0, nullptr, &sentinel);
                     assert(sentinel == 0.37f);
                 }
+                // Endpoint semantics: either path can be fully removed, the
+                // midpoint is unity, and the maximum is 2x (about +6 dB).
+                plugin.ready = false;
+                float sample = 0.25f;
+                float endpoint = -1.0f;
+                plugin.dry = 0.0f;
+                plugin.PitchShift(1, &sample, &endpoint);
+                assert(endpoint == 0.0f);
+                plugin.dry = 50.0f;
+                plugin.PitchShift(1, &sample, &endpoint);
+                assert(endpoint == sample);
+                plugin.dry = 100.0f;
+                plugin.PitchShift(1, &sample, &endpoint);
+                assert(endpoint == 2.0f*sample);
                 std::cout << "poly-pitch-plugin-mix-ok\\n";
             }
         """)

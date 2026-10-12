@@ -15,11 +15,12 @@ and forced recentering near unison have been removed.
 
 ## Guitarix integration
 
-The `smbPitchShift` plugin and parameter IDs, Pitch/Wet/Dry controls, ranges,
-and defaults remain unchanged. Wet and Dry are independent linear gains from
-0% (silence) to 100% (unity). Both at zero produce silence; Dry alone passes
-the input at its selected level, Wet alone passes only shifted audio, and
-their intermediate settings add the two independently scaled signals.
+The `smbPitchShift` plugin and parameter IDs and Pitch/Wet/Dry control ranges
+remain unchanged. Wet and Dry are independent linear gain trims: 0% is exact
+silence, 50% is unity, and 100% is 2x amplitude (about +6 dB). Both at zero
+produce silence; Dry alone passes the input at its selected level, Wet alone
+passes only shifted audio, and their intermediate settings add the two
+independently scaled signals. Wet defaults to 50% (unity) and Dry to off.
 The existing octave control still adds ±12 semitones; the core accepts the
 resulting full ±24-semitone range. Neutral legacy band controls leave the
 shifted signal unchanged; existing band settings still apply after shifting.
