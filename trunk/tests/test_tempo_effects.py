@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import json
 import shutil
 import subprocess
 import tempfile
@@ -26,7 +27,14 @@ class TempoEffectsTests(unittest.TestCase):
                 "-o", str(executable),
             ], capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
-            result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=60)
+            catalog = TRUNK.parents[1] / "houston/models/objects/base/lib/pytarix/models/pedals/lib/Delay.json"
+            defaults = {"dide.highpass": 120, "dide.howpass": 12000}
+            # Exercise Houston's actual metadata in the bundle workspace while
+            # keeping Guitarix's tests runnable in a standalone checkout.
+            if catalog.is_file():
+                delay = next(pedal for pedal in json.loads(catalog.read_text()) if pedal["name"] == "Digital Delay")
+                defaults = {pot["gtx_name"]: pot["default_val"] for pot in delay["pots"]}
+            result = subprocess.run([str(executable), str(defaults["dide.highpass"]), str(defaults["dide.howpass"])], capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
 
 

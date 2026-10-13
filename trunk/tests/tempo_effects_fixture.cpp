@@ -96,6 +96,24 @@ float digital_decay(float feedback, float level) {
     release(p);
     return b / a;
 }
+// Test the actual Houston filter defaults with guitar-frequency audio, not an
+// impulse that can hide the loss of fundamentals inside the feedback filters.
+void digital_catalog_tail(float highpass, float lowpass) {
+    auto* p = effects::digital_delay::plugin(); prepare(p);
+    set("dide.highpass", highpass); set("dide.howpass", lowpass);
+    set("dide.feedback", 90); set("dide.bpm", 120);
+    render(p, std::vector<float>(48000));
+    std::vector<float> input(7 * 24000);
+    for (int i = 0; i < 2400; ++i) {
+        const float envelope = std::pow(std::sin(3.141592653589793 * i / 2400), 2);
+        input[i] = .2f * envelope * std::sin(2 * 3.141592653589793 * 440 * i / 48000);
+    }
+    auto output = render(p, input);
+    const float first = peak(output, 24000, 27000);
+    const float sixth = peak(output, 6 * 24000, 6 * 24000 + 3000);
+    assert(first > .09 && sixth / first > .5);
+    release(p);
+}
 void modulation(PluginDef* p, const std::string& bpm, const std::string& depth = "") {
     prepare(p);
     assert(controls.at(bpm).low == 24 && controls.at(bpm).high == 360);
@@ -134,7 +152,9 @@ void vibe_rate() {
     for (size_t i = 1; i < samples.size(); ++i) if (samples[i-1] < .5 && samples[i] >= .5) ++crossings;
     assert(crossings == 1 || crossings == 2);
 }
-int main() {
+int main(int argc, char** argv) {
+    assert(argc == 3);
+    digital_catalog_tail(std::stof(argv[1]), std::stof(argv[2]));
     delay_tail();
     auto quiet = digital_decay(80, 20), loud = digital_decay(80, 90);
     assert(std::abs(quiet - loud) < 0.0001);

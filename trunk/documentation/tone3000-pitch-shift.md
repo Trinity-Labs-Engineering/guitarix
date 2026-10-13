@@ -53,6 +53,21 @@ onset history, startup blend, and legacy band history without allocating.
 It also resets the sample counter and pitch ratio, so re-entry behaves like
 a fresh instance regardless of the preceding scene.
 
+## Dual Pitch
+
+The additional `dual_pitch` plugin runs two independent instances of the same
+engine at the 30 ms setting. `voice1` and `voice2` each span −12 to +12 semitones,
+in whole-semitone steps. `level1`, `level2`, and `dry` are independent 0–100 trims
+with the same off/unity/+6 dB mapping as the original plugin. Defaults are −12
+and +12 semitones, both voices at unity, and dry off. The original `smbPitchShift`
+plugin remains available unchanged.
+
+Both voices consume the original input; neither processes the other voice.
+The audio callback uses bounded stack scratch buffers for arbitrary block sizes,
+including in-place calls. Sample-rate setup prepares both engines, and scene
+reset clears both without allocating. Houston exposes five matching controls,
+including expression assignments, on the Dual Pitch pedal artwork.
+
 ## Regression checks
 
 From `trunk`:
