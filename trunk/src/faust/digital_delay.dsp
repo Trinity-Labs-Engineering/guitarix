@@ -30,7 +30,7 @@ dide         = _<:*(dry),(delx(B) : *(wet)):>_ with {
   B          = checkbox("Freeze[name:Freeze][tooltip:Freeze the current delay]");
   delx(n)    = _<:(*(1.0-B):digd), !:>_;
 
-  digd       = (+:(delayed:lback(B)))~(fback(B)) with {
+  digd       = ((+:delayed)~(fback(B))) : lback(B) with {
     fback(n) = _<:select2(n, feed, freeze):>_;
     lback(n) = _<:select2(n, *(level), *(1.0)):>_;
     feed     = *(feedback): fi.highpass(2,hifr1):fi.lowpass(2,lofr1) : selfilter(sl);

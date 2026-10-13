@@ -61,7 +61,7 @@
                                     <property name="visible">True</property>
                                     <property name="can_focus">True</property>
                                     <property name="receives_default">True</property>
-                                    <property name="var_id">univibe.freq</property>
+                                    <property name="var_id">univibe.bpm</property>
                                     <property name="label_ref">label11:rack_label</property>
                                   </object>
                                   <packing>

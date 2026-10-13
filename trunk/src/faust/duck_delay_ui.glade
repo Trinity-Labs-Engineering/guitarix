@@ -45,7 +45,7 @@
                         <property name="visible">True</property>
                         <property name="can_focus">True</property>
                         <property name="receives_default">True</property>
-                        <property name="var_id">duckDelay.time</property>
+                        <property name="var_id">duckDelay.bpm</property>
                         <property name="label_ref">label1:rack_label</property>
                       </object>
                       <packing>

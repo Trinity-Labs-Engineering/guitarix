@@ -44,7 +44,7 @@
                         <property name="visible">True</property>
                         <property name="can_focus">True</property>
                         <property name="receives_default">True</property>
-                        <property name="var_id">flanger_mono_gx.freq</property>
+                        <property name="var_id">flanger_mono_gx.bpm</property>
                         <property name="label_ref">label1:rack_label</property>
                       </object>
                       <packing>

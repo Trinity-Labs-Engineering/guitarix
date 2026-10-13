@@ -269,13 +269,13 @@ int Vibe::uiloader(const UiBuilder& b, int form) {
     }
     const char *univibe_freq, *univibe_width, *univibe_depth, *univibe_wet_dry, *univibe_fb;
     if (self.Pstereo) {
-	univibe_freq = "univibe.freq";
+	univibe_freq = "univibe.bpm";
 	univibe_width = "univibe.width";
 	univibe_depth = "univibe.depth";
 	univibe_wet_dry = "univibe.wet_dry";
 	univibe_fb = "univibe.fb";
     } else {
-	univibe_freq = "univibe_mono.freq";
+	univibe_freq = "univibe_mono.bpm";
 	univibe_width = "univibe_mono.width";
 	univibe_depth = "univibe_mono.depth";
 	univibe_wet_dry = "univibe_mono.wet_dry";
@@ -291,7 +291,7 @@ int Vibe::uiloader(const UiBuilder& b, int form) {
 	b.openVerticalBox("");
 	b.openHorizontalBox("");
     }
-    b.create_small_rackknobr(univibe_freq,N_("Freq"));
+    b.create_small_rackknobr(univibe_freq,N_("BPM"));
     b.create_small_rackknobr(univibe_depth,N_("Depth"));
     b.create_small_rackknobr(univibe_width,N_("Width"));
     b.create_small_rackknobr(univibe_fb,NC_("Feedback", "F/B"));

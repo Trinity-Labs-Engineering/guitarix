@@ -567,7 +567,7 @@ class Parser(object):
     def add_var_free(self):
         l = []
         for v, t, s in self.memlist:
-            l.append("if (%s) { delete %s; %s = 0; }\n" % (v, v, v))
+            l.append("if (%s) { delete[] %s; %s = 0; }\n" % (v, v, v))
         return l
 
     def __init__(self, lines, modname, options):

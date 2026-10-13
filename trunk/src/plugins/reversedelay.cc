@@ -19,9 +19,9 @@ private:
     float feedback_buf;
 
     //Params
-    float time, feedback, window, drywet;
+    float bpm, feedback, window, drywet;
     //Params buffs
-    float time_old, window_old;
+    float bpm_old, window_old;
 
     //Indicator
     float buf_indication;
@@ -136,7 +136,7 @@ ReverseDelay::ReverseDelay():
     buf_size    = 0;
     cur_buf_size = 0;
     feedback_buf = 0;
-    time_old = 0;
+    bpm_old = 0;
     window_old = 0;
 
     buf_indication = 0;
@@ -150,7 +150,7 @@ void ReverseDelay::clear_state_impl(PluginDef *plugin) {
     self.counter = 0;
     self.cur_buf_size = 0;
     self.feedback_buf = 0.0f;
-    self.time_old = -1.0f;
+    self.bpm_old = -1.0f;
     self.window_old = -1.0f;
     self.buf_indication = 0.0f;
     self.ow = overlap_window();
@@ -158,7 +158,7 @@ void ReverseDelay::clear_state_impl(PluginDef *plugin) {
 
 int ReverseDelay::registerparam(const ParamReg& reg) {
     ReverseDelay& self = *static_cast<ReverseDelay*>(reg.plugin);
-    reg.registerFloatVar("reversedelay.time", N_("Time (ms)"), "S", N_("Delay time in milliseconds"), &self.time, 500, 200, 2000, 1, 0);
+    reg.registerFloatVar("reversedelay.bpm", N_("BPM"), "S", N_("Delay in Beats per Minute"), &self.bpm, 120, 24, 360, 1, 0);
     reg.registerFloatVar("reversedelay.feedback", N_("Feedback"), "S", N_("Feedback"), &self.feedback, 0, 0, 1, 0.05, 0);
     reg.registerFloatVar("reversedelay.window", N_("Window (%)"), "S", N_("Crossfade between delayed chunks in percents"), &self.window, 50, 0, 100, 1, 0);
     reg.registerFloatVar("reversedelay.drywet", N_("Dry/Wet"), "S", N_("Dry/Wet"), &self.drywet, 0.5, 0, 1, 0.05, 0);
@@ -175,8 +175,8 @@ void ReverseDelay::init(unsigned int samplingFreq, PluginDef *plugin) {
 
     float* old_buf = self.buffer;
 
-    //Provide dual buf size, with 2 seconds length for every part
-    unsigned int new_buf_size = (unsigned int)(samplingFreq * 2 * 2);
+    // Two buffers, each holding the 2.5-second interval at 24 BPM.
+    unsigned int new_buf_size = samplingFreq * 5;
 
     float *new_buf = new float[new_buf_size];
     for (size_t i = 0; i < new_buf_size; i++)
@@ -195,12 +195,12 @@ void ReverseDelay::process(int count, float *input, float *output, PluginDef *pl
     ReverseDelay& self = *static_cast<ReverseDelay*>(plugin);
 
     //Update params
-    if(self.time_old != self.time) {
-	self.cur_buf_size = (self.time/1000.0)*self.sample_rate;
+    if(self.bpm_old != self.bpm) {
+	self.cur_buf_size = (60.0 / std::max(24.0f, std::min(360.0f, self.bpm))) * self.sample_rate;
 	self.counter = 0;
 	self.ow.set_coef((self.window)/(100.0 + 1.0), self.cur_buf_size/2); //Avoid to pass 1
 
-	self.time_old = self.time;
+	self.bpm_old = self.bpm;
 	self.window_old = self.window;
     }
     else if(self.window_old != self.window) {
@@ -241,7 +241,7 @@ int ReverseDelay::uiloader(const UiBuilder& b, int form) {
     b.closeBox();
     b.openHorizontalBox("");
     {
-	b.create_small_rackknob("reversedelay.time",N_("Time (ms)"));
+	b.create_small_rackknob("reversedelay.bpm",N_("BPM"));
 
         b.openVerticalBox("");
         b.insertSpacer();

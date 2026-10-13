@@ -1,5 +1,5 @@
 b.openHorizontalhideBox("");
-b.create_master_slider(PARAM("freq"), _("Freq"));
+b.create_master_slider(PARAM("bpm"), _("BPM"));
 b.closeBox();
 b.openVerticalBox("");
 {
@@ -11,7 +11,7 @@ b.openVerticalBox("");
 	b.insertSpacer();
 	b.openHorizontalTableBox("");
 	{
-	    b.create_small_rackknobr(PARAM("freq"), _("Freq"));
+	    b.create_small_rackknobr(PARAM("bpm"), _("BPM"));
 	    b.insertSpacer();
 	    b.create_small_rackknobr(PARAM("depth"), _("Depth"));
 	    b.insertSpacer();

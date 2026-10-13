@@ -1,4 +1,4 @@
-// generated from file '../src/faust/delay.dsp' by dsp2cc:
+// generated from file 'src/faust/delay.dsp' by dsp2cc:
 // Code generated with Faust (https://faust.grame.fr)
 
 
@@ -7,18 +7,19 @@ namespace delay {
 class Dsp: public PluginDef {
 private:
 	int fSampleRate;
+	FAUSTFLOAT fVslider0;
+	float fRec0[2];
 	int IOTA0;
 	float *fVec0;
-	FAUSTFLOAT fHslider0;
 	float fConst0;
 	float fConst1;
+	FAUSTFLOAT fHslider0;
 	float fConst2;
-	float fRec0[2];
-	float fRec1[2];
 	float fRec2[2];
 	float fRec3[2];
-	FAUSTFLOAT fVslider0;
 	float fRec4[2];
+	float fRec5[2];
+	float fRec1[2];
 
 	bool mem_allocated;
 	void mem_alloc();
@@ -72,12 +73,13 @@ Dsp::~Dsp() {
 
 inline void Dsp::clear_state_f()
 {
-	for (int l0 = 0; l0 < 1048576; l0 = l0 + 1) fVec0[l0] = 0.0f;
-	for (int l1 = 0; l1 < 2; l1 = l1 + 1) fRec0[l1] = 0.0f;
-	for (int l2 = 0; l2 < 2; l2 = l2 + 1) fRec1[l2] = 0.0f;
-	for (int l3 = 0; l3 < 2; l3 = l3 + 1) fRec2[l3] = 0.0f;
-	for (int l4 = 0; l4 < 2; l4 = l4 + 1) fRec3[l4] = 0.0f;
-	for (int l5 = 0; l5 < 2; l5 = l5 + 1) fRec4[l5] = 0.0f;
+	for (int l0 = 0; l0 < 2; l0 = l0 + 1) fRec0[l0] = 0.0f;
+	for (int l1 = 0; l1 < 1048576; l1 = l1 + 1) fVec0[l1] = 0.0f;
+	for (int l2 = 0; l2 < 2; l2 = l2 + 1) fRec2[l2] = 0.0f;
+	for (int l3 = 0; l3 < 2; l3 = l3 + 1) fRec3[l3] = 0.0f;
+	for (int l4 = 0; l4 < 2; l4 = l4 + 1) fRec4[l4] = 0.0f;
+	for (int l5 = 0; l5 < 2; l5 = l5 + 1) fRec5[l5] = 0.0f;
+	for (int l6 = 0; l6 < 2; l6 = l6 + 1) fRec1[l6] = 0.0f;
 }
 
 void Dsp::clear_state_f_static(PluginDef *p)
@@ -88,7 +90,7 @@ void Dsp::clear_state_f_static(PluginDef *p)
 inline void Dsp::init(unsigned int sample_rate)
 {
 	fSampleRate = sample_rate;
-	fConst0 = std::min<float>(1.92e+05f, std::max<float>(1.0f, float(fSampleRate)));
+	fConst0 = std::min<float>(1.92e+05f, std::max<float>(1.0f, static_cast<float>(fSampleRate)));
 	fConst1 = 6e+01f * fConst0;
 	fConst2 = 1e+01f / fConst0;
 	IOTA0 = 0;
@@ -108,7 +110,7 @@ void Dsp::mem_alloc()
 void Dsp::mem_free()
 {
 	mem_allocated = false;
-	if (fVec0) { delete fVec0; fVec0 = 0; }
+	if (fVec0) { delete[] fVec0; fVec0 = 0; }
 }
 
 int Dsp::activate(bool start)
@@ -131,25 +133,29 @@ int Dsp::activate_static(bool start, PluginDef *p)
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0)
 {
-	float fSlow0 = fConst1 / float(fHslider0);
-	float fSlow1 = 0.001f * std::pow(1e+01f, 0.05f * float(fVslider0));
+	float fSlow0 = 0.001f * std::pow(1e+01f, 0.05f * static_cast<float>(fVslider0));
+	float fSlow1 = std::max<float>(1.0f, fConst1 / static_cast<float>(fHslider0) + -1.0f);
 	for (int i0 = 0; i0 < count; i0 = i0 + 1) {
-		float fTemp0 = float(input0[i0]);
-		fVec0[IOTA0 & 1048575] = fTemp0;
-		float fTemp1 = ((fRec0[1] != 0.0f) ? (((fRec1[1] > 0.0f) & (fRec1[1] < 1.0f)) ? fRec0[1] : 0.0f) : (((fRec1[1] == 0.0f) & (fSlow0 != fRec2[1])) ? fConst2 : (((fRec1[1] == 1.0f) & (fSlow0 != fRec3[1])) ? -fConst2 : 0.0f)));
-		fRec0[0] = fTemp1;
-		fRec1[0] = std::max<float>(0.0f, std::min<float>(1.0f, fRec1[1] + fTemp1));
-		fRec2[0] = (((fRec1[1] >= 1.0f) & (fRec3[1] != fSlow0)) ? fSlow0 : fRec2[1]);
-		fRec3[0] = (((fRec1[1] <= 0.0f) & (fRec2[1] != fSlow0)) ? fSlow0 : fRec3[1]);
-		float fTemp2 = fVec0[(IOTA0 - int(std::min<float>(524288.0f, std::max<float>(0.0f, fRec2[0])))) & 1048575];
-		fRec4[0] = fSlow1 + 0.999f * fRec4[1];
-		output0[i0] = FAUSTFLOAT(fTemp0 + fRec4[0] * (fTemp2 + fRec1[0] * (fVec0[(IOTA0 - int(std::min<float>(524288.0f, std::max<float>(0.0f, fRec3[0])))) & 1048575] - fTemp2)));
-		IOTA0 = IOTA0 + 1;
+		float fTemp0 = static_cast<float>(input0[i0]);
+		fRec0[0] = fSlow0 + 0.999f * fRec0[1];
+		float fTemp1 = fRec0[0] + 1.0f;
+		float fTemp2 = fTemp0 + fRec0[0] * fRec1[1] / fTemp1;
+		fVec0[IOTA0 & 1048575] = fTemp2;
+		float fTemp3 = ((fRec2[1] != 0.0f) ? (((fRec3[1] > 0.0f) & (fRec3[1] < 1.0f)) ? fRec2[1] : 0.0f) : (((fRec3[1] == 0.0f) & (fSlow1 != fRec4[1])) ? fConst2 : (((fRec3[1] == 1.0f) & (fSlow1 != fRec5[1])) ? -fConst2 : 0.0f)));
+		fRec2[0] = fTemp3;
+		fRec3[0] = std::max<float>(0.0f, std::min<float>(1.0f, fRec3[1] + fTemp3));
+		fRec4[0] = (((fRec3[1] >= 1.0f) & (fRec5[1] != fSlow1)) ? fSlow1 : fRec4[1]);
+		fRec5[0] = (((fRec3[1] <= 0.0f) & (fRec4[1] != fSlow1)) ? fSlow1 : fRec5[1]);
+		float fTemp4 = fVec0[(IOTA0 - static_cast<int>(std::min<float>(524288.0f, std::max<float>(0.0f, fRec4[0])))) & 1048575];
+		fRec1[0] = fTemp4 + fRec3[0] * (fVec0[(IOTA0 - static_cast<int>(std::min<float>(524288.0f, std::max<float>(0.0f, fRec5[0])))) & 1048575] - fTemp4);
+		output0[i0] = static_cast<FAUSTFLOAT>(fTemp0 + fRec0[0] * fRec1[0] / fTemp1);
 		fRec0[1] = fRec0[0];
-		fRec1[1] = fRec1[0];
+		IOTA0 = IOTA0 + 1;
 		fRec2[1] = fRec2[0];
 		fRec3[1] = fRec3[0];
 		fRec4[1] = fRec4[0];
+		fRec5[1] = fRec5[0];
+		fRec1[1] = fRec1[0];
 	}
 }
 

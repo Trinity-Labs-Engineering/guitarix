@@ -85,7 +85,7 @@
                         <property name="visible">True</property>
                         <property name="can_focus">True</property>
                         <property name="receives_default">True</property>
-                        <property name="var_id">reversedelay.time</property>
+                        <property name="var_id">reversedelay.bpm</property>
                         <property name="label_ref">label2:rack_label</property>
                       </object>
                       <packing>
