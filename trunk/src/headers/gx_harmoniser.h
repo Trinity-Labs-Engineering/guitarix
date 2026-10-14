@@ -13,6 +13,8 @@ namespace harmony {
 
 // DOCS/MODEPY/MODE_ENCODING.py is the reference. Notes are A=0 .. G#=11;
 // modes retain dictionary order; the interval pot is -7 .. +7 diatonic steps.
+// In-mode harmony is unchanged. Chromatic/unknown notes now stay within the
+// requested interval family instead of falling back to an octave.
 inline int interval_shift(int note, int tonic, int mode, int interval) {
     static const char* const patterns[] = {
         "110111", "101110", "011101", "111011", "110110", "101101", "011011"
@@ -27,7 +29,25 @@ inline int interval_shift(int note, int tonic, int mode, int interval) {
     for (int i = 1; i < 7; ++i)
         notes[i] = (notes[i - 1] + (patterns[mode][i - 1] == '1' ? 2 : 1)) % 12;
     for (int i = 0; i < 7; ++i) if (notes[i] == note) index = i;
-    if (index < 0) return direction * 12; // intentional out-of-mode behaviour
+    if (index < 0) {
+        // Prefer an ordinary minor/major/perfect interval that lands in the
+        // chosen mode. When both work, use the less surprising default below.
+        // Fourths/fifths also retain the mode's augmented/diminished variant.
+        static const int preferred[] = {0, 2, 3, 5, 7, 9, 10, 12};
+        static const int alternate[] = {0, 1, 4, 6, 6, 8, 11, 12};
+        const int degree = std::abs(interval);
+        const int first = preferred[degree] * direction;
+        const int second = alternate[degree] * direction;
+        if (note >= 0 && note < 12) {
+            const auto in_mode = [&](int shift) {
+                const int target = (note + shift + 12) % 12;
+                for (int pitch : notes) if (pitch == target) return true;
+                return false;
+            };
+            if (!in_mode(first) && in_mode(second)) return second;
+        }
+        return first;
+    }
     const int target = notes[(index + interval + 7) % 7];
     return direction > 0 ? (target - note + 12) % 12 : -((note - target + 12) % 12);
 }
@@ -107,7 +127,8 @@ class FundamentalTracker {
     }
 
     void analyse() {
-        if (spectral_filled == spectral_size && ++spectral_hop >= 4) {
+        const bool fresh_spectrum = spectral_filled == spectral_size && ++spectral_hop >= 4;
+        if (fresh_spectrum) {
             spectral_hop = 0;
             analyse_spectrum();
         }
@@ -127,7 +148,7 @@ class FundamentalTracker {
             if (sum < band.energy * 1e-5) continue;
             int best = -1;
             for (int tau = lag_min; tau < lag_max; ++tau) {
-                if (yin[tau] < 0.15) {
+                if (yin[tau] < 0.10) {
                     while (tau + 1 <= lag_max && yin[tau + 1] < yin[tau]) ++tau;
                     best = tau;
                     break;
@@ -142,7 +163,8 @@ class FundamentalTracker {
             const bool matches = !spectral_frequency || std::abs(12 * std::log2(frequency / spectral_frequency)) < 0.45;
             if (matches && frequency >= 55 && frequency <= 1500 && (!lowest || frequency < lowest)) lowest = frequency;
         }
-        if (!lowest) lowest = spectral_frequency;
+        const bool spectral_only = !lowest;
+        if (spectral_only) lowest = spectral_frequency;
         if (!lowest) {
             candidate = -1; candidate_count = 0;
             // Hold through brief attacks/dropouts, then mute the untracked wet path.
@@ -151,13 +173,17 @@ class FundamentalTracker {
         }
         missed = 0;
         const double detected = 69 + 12 * std::log2(lowest / 440.0);
-        if (midi >= 0 && std::abs(detected - midi) < 0.65) {
+        if (midi >= 0 && std::abs(detected - midi) < 0.70) {
             candidate = midi; candidate_count = 0; last_frequency = lowest;
             return;
         }
         const int rounded = static_cast<int>(std::lround(detected));
         if (candidate != rounded) { candidate = rounded; candidate_count = 0; }
-        if (++candidate_count >= 2) { midi = rounded; last_frequency = lowest; }
+        // Don't count a cached spectral result as repeated evidence. YIN must
+        // agree for 20 ms; spectral-only chord estimates need two fresh frames.
+        if (spectral_only && !fresh_spectrum) return;
+        candidate_count += spectral_only ? 2 : 1;
+        if (candidate_count >= 4) { midi = rounded; last_frequency = lowest; }
     }
 
 public:

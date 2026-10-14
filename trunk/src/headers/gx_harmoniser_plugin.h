@@ -15,6 +15,7 @@ template<bool Dual> class Harmoniser : public PluginDef {
     float tonic = 3, mode = 0, interval1 = 2, interval2 = 4;
     float wet = 50, mix = 50, dry = 50;
     float gate[2] = {0, 0}, gate_step = 1.0f / 240;
+    int held_note = -1;
 
     static void init(unsigned int rate, PluginDef* plugin) {
         auto& self = *static_cast<Harmoniser*>(plugin);
@@ -28,6 +29,7 @@ template<bool Dual> class Harmoniser : public PluginDef {
         self.tracker.reset();
         for (auto& voice : self.voices) voice.reset();
         self.gate[0] = self.gate[1] = 0;
+        self.held_note = -1;
     }
     static int activate(bool, PluginDef* plugin) { reset(plugin); return 0; }
     static int discrete(float value, int low, int high) {
@@ -49,11 +51,15 @@ template<bool Dual> class Harmoniser : public PluginDef {
             const int size = std::min(std::min(256, count - offset), self.tracker.samples_until_analysis());
             std::copy(input + offset, input + offset + size, original);
             const int note = self.tracker.note();
+            if (note >= 0) self.held_note = note;
             for (int i = 0; i < size; ++i) output[offset + i] = dry_gain * original[i];
             for (int voice = 0; voice < (Dual ? 2 : 1); ++voice) {
                 const int interval = intervals[voice];
                 const bool voiced = note >= 0 || interval == 0 || std::abs(interval) == 7;
-                const double ratio = std::pow(2.0, harmony::interval_shift(note, root, scale, interval) / 12.0);
+                // Retain the last accepted harmony through tracking dropouts.
+                // Cold start uses an interval-family default, never an octave
+                // unless the player explicitly selected an octave.
+                const double ratio = std::pow(2.0, harmony::interval_shift(self.held_note, root, scale, interval) / 12.0);
                 self.voices[voice].process(original, shifted, size, ratio, gains[voice], 0);
                 for (int i = 0; i < size; ++i) {
                     self.gate[voice] = voiced ? std::min(1.0f, self.gate[voice] + self.gate_step)
@@ -79,7 +85,7 @@ template<bool Dual> class Harmoniser : public PluginDef {
             {"Lydian", "Lydian"}, {"Mixolydian", "Mixolydian"}, {"Minor", "Minor"}, {"Locrian", "Locrian"}, {nullptr, nullptr}};
         add("tonic", "Tonic", "Key tonic (A = 0)", &self.tonic, 3, 0, 11, tonics);
         add("mode", "Mode", "Musical mode", &self.mode, 0, 0, 6, modes);
-        const char* interval_help = "Diatonic steps: -7 = octave down, 0 = unison, +7 = octave up; out-of-mode notes shift an octave";
+        const char* interval_help = "Diatonic steps: -7 = octave down, 0 = unison, +7 = octave up; chromatic notes retain the selected interval family";
         add(Dual ? "voice1" : "interval", Dual ? "Voice 1 Interval" : "Interval", interval_help, &self.interval1, 2, -7, 7);
         if (Dual) {
             add("voice2", "Voice 2 Interval", interval_help, &self.interval2, 4, -7, 7);

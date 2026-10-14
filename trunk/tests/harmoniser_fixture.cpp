@@ -43,6 +43,20 @@ int main(int argc, char** argv) {
                 std::cout << gx_engine::harmony::interval_shift(note,root,mode,interval) << '\n';
         return 0;
     }
+    if (command == "trace") {
+        assert(argc == 3);
+        const int rate = std::atoi(argv[2]);
+        std::vector<float> input(2 * rate);
+        std::cin.read(reinterpret_cast<char*>(input.data()), input.size() * sizeof(float));
+        assert(std::cin.gcount() == std::streamsize(input.size() * sizeof(float)));
+        gx_engine::harmony::FundamentalTracker tracker;
+        tracker.prepare(rate);
+        for (int i = 0; i < int(input.size()); ++i) {
+            tracker.push(&input[i], 1);
+            if ((i + 1) % (rate / 200) == 0) std::cout << tracker.note() << '\n';
+        }
+        return 0;
+    }
     if (command == "tracker") {
         for (int rate : {44100,48000,96000,192000}) {
             gx_engine::harmony::FundamentalTracker tracker;
@@ -86,7 +100,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     // render dual rate frequency tonic mode interval1 interval2 mix wet dry block inplace kind
-    assert(command=="render" && argc==15);
+    assert((command=="render" || command=="render-input") && argc==15);
     const bool dual=std::atoi(argv[2]);
     const int rate=std::atoi(argv[3]), block=std::atoi(argv[12]), kind=std::atoi(argv[14]);
     const double frequency=std::atof(argv[4]);
@@ -104,7 +118,10 @@ int main(int argc, char** argv) {
     *controls.at(prefix+"dry")=std::atof(argv[11]);
     plugin->set_samplerate(rate,plugin);
     std::vector<float> input(rate*2), output(rate*2), repeat(rate*2);
-    for (int i=0; i<rate*2; ++i) input[i]=signal(i,rate,frequency,kind);
+    if (command == "render-input") {
+        std::cin.read(reinterpret_cast<char*>(input.data()), input.size() * sizeof(float));
+        assert(std::cin.gcount() == std::streamsize(input.size() * sizeof(float)));
+    } else for (int i=0; i<rate*2; ++i) input[i]=signal(i,rate,frequency,kind);
     const size_t before=allocations;
     for (auto* result : {&output,&repeat}) {
         std::copy(input.begin(),input.end(),result->begin());
