@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+import numpy as np
 
 
 TRUNK = Path(__file__).resolve().parents[1]
@@ -14,6 +15,24 @@ FIXTURE = Path(__file__).with_name("poly_pitch_shifter_fixture.cpp")
 
 
 class PolyPitchShifterTests(unittest.TestCase):
+    def test_bass_low_b_drop_d_and_low_e_stay_in_tune(self):
+        with tempfile.TemporaryDirectory(prefix="bass-pitch-") as directory:
+            executable = Path(directory) / 'render'
+            subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++11', '-O2',
+                            f'-I{TRUNK / "src/headers"}', str(FIXTURE), '-o', str(executable)], check=True)
+            for rate in (44100,48000,96000):
+                for frequency in (30.867706,36.708096,41.203445):
+                    for semitones in (-12,-7,3,7,12,24):
+                        for kind in (0,1):
+                            with self.subTest(rate=rate,frequency=frequency,semitones=semitones,kind=kind):
+                                result=subprocess.check_output([str(executable),'render',str(rate),str(frequency),str(semitones),str(kind),'1'])
+                                audio=np.frombuffer(result,dtype=np.float32)[rate:]
+                                spectrum=np.abs(np.fft.rfft(audio*np.hanning(len(audio)),n=rate*8))
+                                peak=np.argmax(spectrum)/8
+                                expected=frequency*2**(semitones/12)
+                                self.assertLess(abs(1200*np.log2(peak/expected)),12,(peak,expected))
+                                self.assertGreater(np.sqrt(np.mean(audio**2)),.25)
+
     def run_cpp_fixture(self, source: Path | str, expected_stdout: str) -> None:
         compiler = os.environ.get("CXX", "c++")
         if shutil.which(compiler) is None:

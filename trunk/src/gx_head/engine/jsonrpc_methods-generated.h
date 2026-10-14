@@ -14,6 +14,7 @@ enum jsonrpc_method {
 	RPNM_setstate,
 	RPCM_jack_cpu_load,
 	RPCM_jack_performance_status,
+	RPCM_harmoniser_status,
 	RPCM_jack_deactivate,
 	RPCM_jack_activate,
 	RPCM_jack_status,

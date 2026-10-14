@@ -238,6 +238,38 @@ class HarmoniserTests(unittest.TestCase):
             notes=self.trace(audio,rate)
             self.assertTrue(np.all(notes[50:]==0),np.unique(notes[50:],return_counts=True))
 
+    def test_bass_register_and_drop_d_harmonies(self):
+        for rate in (44100,48000,96000):
+            t=np.arange(2*rate)/rate
+            for midi in (23,26,28,33,38):
+                frequency=440*2**((midi-69)/12)
+                phase=2*np.pi*frequency*t
+                audio=.1*(np.sin(phase)+.5*np.sin(2*phase)+.25*np.sin(3*phase))
+                notes=self.trace(audio,rate)
+                self.assertTrue(np.all(notes[self.trace_times(notes,rate)>.080]==(midi+3)%12),(rate,midi,np.unique(notes)))
+            for dual,mix in ((0,50),(1,0),(1,100)):
+                # Bass D1 in C major selects an upward minor third: D -> F.
+                self.assert_frequency(self.render(rate=rate,dual=dual,mix=mix,frequency=36.708096,
+                    interval=2,interval2=2,kind=1),rate,43.653529)
+
+    def test_blended_notes_renew_the_lock_without_silence(self):
+        for rate in (44100,48000,96000):
+            t=np.arange(2*rate)/rate
+            for midis in ((45,47,48,50),(26,28,29,31)):
+                audio=np.zeros(len(t))
+                for index,midi in enumerate(midis):
+                    start=index*.4
+                    # Equal-level, overlapping fingered notes; neither a gap
+                    # nor a large amplitude spike is needed to change degree.
+                    envelope=np.clip((t-start)/.015,0,1)*np.clip((start+.415-t)/.015,0,1)
+                    phase=2*np.pi*440*2**((midi-69)/12)*t
+                    audio+=.1*envelope*(np.sin(phase)+.3*np.sin(2*phase))
+                notes=self.trace(audio,rate)
+                times=self.trace_times(notes,rate)
+                for index,midi in enumerate(midis):
+                    chosen=notes[(times>index*.4+.1)&(times<index*.4+.39)]
+                    self.assertTrue(np.all(chosen==(midi+3)%12),(rate,midis,index,np.unique(chosen)))
+
     def test_chromatic_attack_and_retrigger_never_emit_octave_fallback(self):
         for rate in (44100,48000,96000):
             t=np.arange(2*rate)/rate

@@ -15,19 +15,29 @@ namespace harmony {
 // modes retain dictionary order; the interval pot is -7 .. +7 diatonic steps.
 // In-mode harmony is unchanged. Chromatic/unknown notes now stay within the
 // requested interval family instead of falling back to an octave.
-inline int interval_shift(int note, int tonic, int mode, int interval) {
+inline void mode_notes(int tonic, int mode, int (&notes)[7]) {
     static const char* const patterns[] = {
         "110111", "101110", "011101", "111011", "110110", "101101", "011011"
     };
+    mode = std::max(0, std::min(6, mode));
+    notes[0] = (tonic % 12 + 12) % 12;
+    for (int i = 1; i < 7; ++i)
+        notes[i] = (notes[i - 1] + (patterns[mode][i - 1] == '1' ? 2 : 1)) % 12;
+}
+
+inline bool note_in_mode(int note, int tonic, int mode) {
+    int notes[7]; mode_notes(tonic, mode, notes);
+    for (int pitch : notes) if (pitch == note) return true;
+    return false;
+}
+
+inline int interval_shift(int note, int tonic, int mode, int interval) {
     interval = std::max(-7, std::min(7, interval));
     if (!interval) return 0;
     const int direction = interval > 0 ? 1 : -1;
     if (std::abs(interval) == 7) return direction * 12;
-    tonic = (tonic % 12 + 12) % 12;
-    mode = std::max(0, std::min(6, mode));
-    int notes[7] = {tonic}, index = -1;
-    for (int i = 1; i < 7; ++i)
-        notes[i] = (notes[i - 1] + (patterns[mode][i - 1] == '1' ? 2 : 1)) % 12;
+    int notes[7], index = -1;
+    mode_notes(tonic, mode, notes);
     for (int i = 0; i < 7; ++i) if (notes[i] == note) index = i;
     if (index < 0) {
         // Prefer an ordinary minor/major/perfect interval that lands in the
@@ -59,13 +69,15 @@ inline int interval_shift(int note, int tonic, int mode, int interval) {
 // A windowed spectral check identifies the lowest actual component of chords;
 // YIN alone would follow their common subharmonic or an upper voice. The short
 // YIN path acquires single notes first; the spectral path needs ~128 ms history.
-// Accepted notes are held until a fresh attack or silence. No allocation,
+// Accepted notes survive fading tails; attacks or sustained new pitches renew
+// the lock without requiring silence. No allocation,
 // mutex, external FFT dependency or worker-thread scheduling is required.
 class FundamentalTracker {
     static constexpr int ring_size = 1024;
     static constexpr int spectral_size = 768;
     static constexpr int window = 80;
-    static constexpr int max_lag = 160;
+    static constexpr int max_lag = 256;
+    static constexpr double minimum_frequency = 28;
     struct Band {
         std::array<float, ring_size> ring{};
         std::array<double, max_lag + 1> difference{};
@@ -84,7 +96,7 @@ class FundamentalTracker {
     int spectral_filled = 0, spectral_hop = 0;
     double spectral_frequency = 0;
     bool locked = false;
-    double fast_envelope = 0, slow_envelope = 0;
+    double fast_envelope = 0, slow_envelope = 0, locked_level = 0;
     double fast_release = 0, slow_attack = 0, slow_release = 0;
     int refractory = 0, refractory_samples = 0, quiet = 0, quiet_samples = 0;
 
@@ -105,12 +117,12 @@ class FundamentalTracker {
         slow_envelope += (fast_envelope > slow_envelope ? slow_attack : slow_release)
             * (fast_envelope - slow_envelope);
         if (refractory > 0) --refractory;
-        if (!refractory && fast_envelope > 1e-4 && fast_envelope > slow_envelope * 2.5) {
+        if (!refractory && fast_envelope > 1e-4 && fast_envelope > slow_envelope * 2.2) {
             clear_analysis();
             locked = false;
             refractory = refractory_samples;
         }
-        if (fast_envelope < 1e-5) quiet = std::min(quiet + 1, quiet_samples);
+        if (magnitude < 1e-5) quiet = std::min(quiet + 1, quiet_samples);
         else quiet = 0;
     }
 
@@ -139,7 +151,7 @@ class FundamentalTracker {
             }
         }
         const double bin_hz = analysis_rate / 2048;
-        const int begin = std::max(2, static_cast<int>(55 / bin_hz));
+        const int begin = std::max(2, static_cast<int>(minimum_frequency / bin_hz));
         const int end = std::min(1022, static_cast<int>(1500 / bin_hz) + 1);
         double maximum = 0;
         for (int i = begin; i <= end; ++i) maximum = std::max(maximum, std::norm(spectrum[i]));
@@ -153,7 +165,7 @@ class FundamentalTracker {
             const double right = std::log(std::max(1e-20, std::norm(spectrum[i + 1])));
             const double delta = 0.5 * (left - right) / (left - 2 * centre + right);
             const double frequency = (i + delta) * bin_hz;
-            if (frequency >= 55 && frequency <= 1500) { spectral_frequency = frequency; break; }
+            if (frequency >= minimum_frequency && frequency <= 1500) { spectral_frequency = frequency; break; }
         }
     }
 
@@ -179,7 +191,7 @@ class FundamentalTracker {
     }
 
     void analyse() {
-        const bool fresh_spectrum = spectral_filled == spectral_size && ++spectral_hop >= 4;
+        const bool fresh_spectrum = !locked && spectral_filled == spectral_size && ++spectral_hop >= 4;
         if (fresh_spectrum) {
             spectral_hop = 0;
             analyse_spectrum();
@@ -249,7 +261,7 @@ class FundamentalTracker {
             }
             // The spectrum rejects virtual subharmonics and upper chord tones.
             const bool matches = !spectral_frequency || std::abs(12 * std::log2(frequency / spectral_frequency)) < 0.45;
-            if (matches && frequency >= 55 && frequency <= 1500 && (!lowest || frequency < lowest)) lowest = frequency;
+            if (matches && frequency >= minimum_frequency && frequency <= 1500 && (!lowest || frequency < lowest)) lowest = frequency;
         }
         if (!spectral_frequency) {
             if (broad_agreement < 2 || !lowest ||
@@ -264,19 +276,32 @@ class FundamentalTracker {
         if (!lowest) {
             candidate = -1; candidate_count = 0;
             // Hold through brief attacks/dropouts, then mute the untracked wet path.
-            if (++missed * hop > analysis_rate * 0.1) { midi = -1; last_frequency = 0; }
+            if (!locked && ++missed * hop > analysis_rate * 0.1) { midi = -1; last_frequency = 0; }
             return;
         }
         missed = 0;
         const double detected = 69 + 12 * std::log2(lowest / 440.0);
         // Acquisition always rounds to the nearest semitone (a 50-cent bin).
-        // Once accepted, this classification is held until a new attack/silence.
+        // Keep this classification through decay; sustained new notes may renew it.
         const int rounded = static_cast<int>(std::lround(detected));
+        if (locked && (rounded == midi || rounded % 12 == midi % 12 ||
+            fast_envelope < locked_level * 0.65 || fast_envelope < slow_envelope * 0.8)) {
+            candidate = -1; candidate_count = 0;
+            return;
+        }
         if (candidate != rounded) { candidate = rounded; candidate_count = 0; }
-        // Two independent YIN frames suffice for a clear periodic note. Chords
+        // Two fresh YIN frames suffice for a clear periodic note. Chords
         // still require two fresh spectra; a cached result cannot vote twice.
         if (spectral_only && !fresh_spectrum) return;
-        if (++candidate_count >= 2) { midi = rounded; last_frequency = lowest; locked = true; }
+        // A blended/legato note can renew the lock without an amplitude spike,
+        // but needs three clear frames at a sustained level. Fading tails keep
+        // their original harmony even when the fundamental deteriorates.
+        if (++candidate_count >= (locked ? 3 : 2)) {
+            midi = rounded; last_frequency = lowest; locked = true;
+            locked_level = fast_envelope;
+            spectral_frequency = 0;
+            candidate = -1; candidate_count = 0;
+        }
     }
 
 public:
@@ -284,13 +309,13 @@ public:
         rate = rate > 0 ? rate : 48000;
         decimation = std::max(1, static_cast<int>(std::lround(rate / 6000)));
         analysis_rate = rate / decimation;
-        lag_max = std::min(int(max_lag), static_cast<int>(std::ceil(analysis_rate / 55)) + 1);
+        lag_max = std::min(int(max_lag), static_cast<int>(std::ceil(analysis_rate / minimum_frequency)) + 1);
         lag_min = std::max(2, static_cast<int>(analysis_rate / 1500));
         hop = std::max(1, static_cast<int>(std::lround(analysis_rate * 0.005)));
-        fast_release = std::exp(-1 / (rate * 0.020));
+        fast_release = std::exp(-1 / (rate * 0.040));
         slow_attack = 1 - std::exp(-1 / (rate * 0.020));
         slow_release = 1 - std::exp(-1 / (rate * 0.060));
-        refractory_samples = static_cast<int>(rate * 0.060);
+        refractory_samples = static_cast<int>(rate * 0.040);
         quiet_samples = static_cast<int>(rate * 0.050);
         const double cutoffs[] = {120, 240, 480, 1600};
         for (int i = 0; i < 4; ++i)
@@ -311,17 +336,18 @@ public:
         clear_analysis();
         decimation_phase = 0; until_analysis = hop;
         midi = -1; last_frequency = 0; locked = false;
-        fast_envelope = slow_envelope = 0; refractory = quiet = 0;
+        fast_envelope = slow_envelope = locked_level = 0; refractory = quiet = 0;
     }
     int note() const { return midi < 0 ? -1 : (midi + 3) % 12; }
     double frequency() const { return last_frequency; }
+    bool is_locked() const { return locked; }
     int samples_until_analysis() const { return until_analysis * decimation - decimation_phase; }
     void push(const float* input, int count) {
         for (int i = 0; i < count; ++i) {
             const double input_value = std::isfinite(input[i]) ? input[i] : 0;
             follow_attack(input_value);
             const bool sample = ++decimation_phase == decimation;
-            if (!locked) for (auto& band : bands) {
+            for (auto& band : bands) {
                 double value = input_value;
                 for (auto& pole : band.filter) {
                     pole += band.coefficient * (value - pole); value = pole;
@@ -339,12 +365,10 @@ public:
             }
             if (!sample) continue;
             decimation_phase = 0;
-            if (!locked) {
-                spectral_ring[position] = bands.back().ring[position];
-                spectral_filled = std::min(int(spectral_size), spectral_filled + 1);
-                position = (position + 1) & (ring_size - 1);
-                filled = std::min(window + lag_max, filled + 1);
-            }
+            spectral_ring[position] = bands.back().ring[position];
+            spectral_filled = std::min(int(spectral_size), spectral_filled + 1);
+            position = (position + 1) & (ring_size - 1);
+            filled = std::min(window + lag_max, filled + 1);
             if (--until_analysis == 0) {
                 until_analysis = hop;
                 // Publish every note change on a detector boundary, including
@@ -352,7 +376,7 @@ public:
                 if (quiet >= quiet_samples) {
                     if (locked || midi >= 0) clear_analysis();
                     locked = false; midi = -1; last_frequency = 0;
-                } else if (!locked && filled >= window + lag_min + 1) analyse();
+                } else if (filled >= window + lag_min + 1) analyse();
             }
         }
     }

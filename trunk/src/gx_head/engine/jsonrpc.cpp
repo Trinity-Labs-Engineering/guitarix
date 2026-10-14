@@ -17,6 +17,7 @@
  */
 
 #include "jsonrpc.h"
+#include "gx_harmoniser_plugin.h"
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <ctime>
@@ -998,6 +999,27 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
 
     FUNCTION(pluginlist) {
         serv.jack.get_engine().pluginlist.writeJSON(jw);
+    }
+
+    FUNCTION(harmoniser_status) {
+        if (params.size() != 1) throw RpcError(-32602, "expected harmoniser plugin id");
+        const std::string id = params[0]->getString();
+        if (id != "harmoniser" && id != "dual_harmoniser")
+            throw RpcError(-32602, "unknown harmoniser");
+        auto& engine = serv.jack.get_engine();
+        auto* plugin = engine.pluginlist.find_plugin(id);
+        if (!plugin) throw RpcError(-32602, "harmoniser unavailable");
+        const unsigned int status = id == "harmoniser"
+            ? static_cast<gx_engine::Harmoniser<false>*>(plugin->get_pdef())->tracking_status()
+            : static_cast<gx_engine::Harmoniser<true>*>(plugin->get_pdef())->tracking_status();
+        const bool active = plugin->get_on_off() && engine.get_state() == gx_engine::kEngineOn;
+        jw.begin_object();
+        jw.write_kv("active", static_cast<int>(active));
+        jw.write_kv("locked", static_cast<int>(active && (status & 1)));
+        jw.write_kv("outOfKey", static_cast<int>(active && (status & 2)));
+        jw.write_kv("note", active ? static_cast<int>((status >> 2) & 15) - 1 : -1);
+        jw.write_kv("generation", status >> 6);
+        jw.end_object();
     }
 
     FUNCTION(plugin_load_ui) {

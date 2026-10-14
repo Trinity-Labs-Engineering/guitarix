@@ -15,7 +15,7 @@ class DualPitch : public PluginDef {
 
     static void init(unsigned int rate, PluginDef* plugin) {
         auto& self = *static_cast<DualPitch*>(plugin);
-        // Both voices use the same 30 ms mode selected by Houston's mono pedal.
+        // Both voices use the same adaptive 30 ms base mode as the mono pedal.
         // All allocation happens here, never in process/reset/activation.
         self.voices[0].prepare(rate, 1);
         self.voices[1].prepare(rate, 1);

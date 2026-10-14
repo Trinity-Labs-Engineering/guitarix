@@ -47,7 +47,8 @@
 namespace gx_engine {
 
 // Tuning, all in ms so every rate behaves the same. The values are the ones
-// upstream's plugin/docs/pitch-shift.md bench settled on; none is exposed.
+// upstream's plugin/docs/pitch-shift.md bench settled on, plus bounded bass
+// window adaptation below; none is exposed.
 namespace tone3000_pitch {
 // A drift splice crossfades over kFadeMs when its lag matches well and
 // stretches toward kFadeMaxMs as the match worsens (ncc from kFadeNccHi
@@ -98,6 +99,8 @@ constexpr double kSearchKeepRatio = 0.1;
 constexpr double kBlendSeconds = 0.025;
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kMinDelayMs = 2.0;
+constexpr double kBassWindowMs = 100.0;
+constexpr double kBassCorrMs = 45.0;
 
 struct State {
   // Power-of-two ring indexed by absolute sample number; sample i lives at
@@ -169,6 +172,11 @@ struct State {
   // (the constants above, cut down by the buffer and the ratio, see
   // updateFadeRange).
   int dMin = 0, dMax = 0, corrLen = 0;
+  int baseMax = 0, desiredMax = 0, maxWindow = 0, baseCorr = 0, maxCorr = 0, desiredCorr = 0;
+  std::array<double, 4> bassFilter{};
+  double bassCoefficient = 0, bassPeak = 0, bassRelease = 0, bassPeriod = 0;
+  int64_t bassCrossing = -1;
+  bool bassPositive = false;
   int fadeLen = 0, fadeMaxLen = 0, fadeMinLen = 0, fadeLo = 0, fadeHi = 0, onsetFadeLen = 0;
   int onsetSpan = 0, refractory = 0, cellLen = 1, coarseStep = 1, searchLead = 1, searchLeadNow = 1;
 
@@ -255,6 +263,10 @@ struct State {
     control.clear();
     written = 0;
     ratio = 1.0;
+    dMax = baseMax; corrLen = baseCorr;
+    desiredMax = maxWindow; desiredCorr = maxCorr;
+    bassFilter.fill(0); bassPeak = bassPeriod = 0;
+    bassCrossing = -1; bassPositive = false;
     updateFadeRange();
     startupGain = 0.0f;
     blendLeft = 0;
@@ -269,6 +281,51 @@ struct State {
     minAcc = 1e9;
     maxAcc = 0.0;
     lastOnset = -(1 << 30);
+  }
+
+  void followBass(double input) {
+    // Only size the splice search here; fixed Pitch/Dual Pitch do not quantise
+    // notes. Low-pass zero crossings estimate the longest dominant cycle.
+    // Start with bass-safe geometry until two consistent cycles are available.
+    for (auto& pole : bassFilter) {
+      pole += bassCoefficient * (input - pole);
+      input = pole;
+    }
+    bassPeak = std::max(std::abs(input), bassPeak * bassRelease);
+    if (input < -bassPeak * 0.1) bassPositive = false;
+    if (!bassPositive && input > bassPeak * 0.1 && bassPeak > 1e-10) {
+      bassPositive = true;
+      const double period = static_cast<double>(written - bassCrossing);
+      if (bassCrossing >= 0 && period >= sampleRate / 1800 && period <= sampleRate / 28) {
+        if (bassPeriod > 0 && std::abs(period - bassPeriod) < bassPeriod * 0.15) {
+          desiredMax = std::max(baseMax, std::min(maxWindow, static_cast<int>(std::ceil(period * 2.4))));
+          desiredCorr = std::max(baseCorr, std::min(maxCorr, static_cast<int>(std::ceil(period * 1.5))));
+        } else {
+          // A new low note must not inherit a preceding high note's short
+          // range while its period is still being acquired.
+          desiredMax = maxWindow; desiredCorr = maxCorr;
+        }
+        bassPeriod = period;
+      }
+      bassCrossing = written;
+    }
+    // Geometry never changes halfway through a search or crossfade. Changes
+    // are sample-driven, hence independent of the host's callback block size.
+    const int nextMax = ratio == 1.0 ? baseMax : desiredMax;
+    const int nextCorr = ratio == 1.0 ? baseCorr : desiredCorr;
+    if (!fading && !search.active && !search.ready && (nextMax != dMax || nextCorr != corrLen)) {
+      const int previousFade = fadeHi, previousLead = searchLeadNow;
+      dMax = nextMax; corrLen = nextCorr;
+      updateFadeRange();
+      if (ratio > 1.0) {
+        // Enlarging the landing range must not also move the safety floor
+        // ahead of the current tap. Retain the already-safe fade/search times;
+        // the extra range supplies the missing bass period without a tap jump.
+        fadeHi = std::min(fadeHi, previousFade);
+        fadeLo = std::min(fadeLo, fadeHi);
+        searchLeadNow = std::min(searchLeadNow, previousLead);
+      }
+    }
   }
 
   // Normalised cross-correlation of the reference with the corrLen control
@@ -445,12 +502,17 @@ public:
         auto& s = state;
         const double sampleRate = std::max(8000, new_sample_rate);
         s.sampleRate = sampleRate;
-        // Houston already selects mode 1: use TONE3000's default 30 ms.
+        // Houston selects mode 1: use a 30 ms base with adaptive bass headroom.
         // Preserve the legacy quality setting for existing Guitarix presets.
         const double windowMs = quality <= 0 ? 60.0 : quality >= 2 ? 20.0 : 30.0;
         s.dMin = static_cast<int>(sampleRate * kMinDelayMs * 0.001);
         s.dMax = static_cast<int>(sampleRate * windowMs * 0.001);
         s.corrLen = std::min(s.dMax, static_cast<int>(sampleRate * kMaxCorrMs * 0.001));
+        s.baseMax = s.dMax; s.baseCorr = s.corrLen;
+        s.maxWindow = static_cast<int>(sampleRate * kBassWindowMs * 0.001);
+        s.maxCorr = static_cast<int>(sampleRate * kBassCorrMs * 0.001);
+        s.bassCoefficient = 1 - std::exp(-2.0 * kPi * 55.0 / sampleRate);
+        s.bassRelease = std::exp(-1.0 / (sampleRate * 0.060));
         s.fadeLen = std::max(8, static_cast<int>(sampleRate * kFadeMs * 0.001));
         s.fadeMaxLen = std::max(s.fadeLen, static_cast<int>(sampleRate * kFadeMaxMs * 0.001));
         s.fadeMinLen = std::max(8, static_cast<int>(sampleRate * kFadeMinMs * 0.001));
@@ -466,8 +528,8 @@ public:
         // Rings hold the largest window plus the correlation reach behind the
         // farthest candidate and the overshoot of a late search and of a
         // downshift tap running deeper through the longest fade.
-        const int maxCorr = static_cast<int>(sampleRate * kMaxCorrMs * 0.001);
-        const int reach = static_cast<int>(sampleRate * 0.060) + maxCorr + s.fadeMaxLen + 2 * s.searchLead + 64;
+        const int maxCorr = s.maxCorr;
+        const int reach = s.maxWindow + maxCorr + s.fadeMaxLen + 2 * s.searchLead + 64;
         s.ring.init(reach);
         s.control.init(reach);
         s.ref.assign(static_cast<size_t>(maxCorr), 0.0f);
@@ -485,7 +547,9 @@ public:
         tone_low = tone_low_mid = tone_high_mid = 0.0f;
     }
 
-    int latency_samples() const { return (state.dMin + state.dMax) / 2; }
+    // Keep the legacy fixed dry-compensation delay. Moving it with the adaptive
+    // wet window would create discontinuities in an otherwise untouched dry path.
+    int latency_samples() const { return (state.dMin + state.baseMax) / 2; }
 
     void process(const float *input, float *output, int count,
                  double target_ratio, float wet, float dry,
@@ -517,17 +581,15 @@ public:
         // padded by a few samples so a planned search always completes before
         // the tap reaches the trigger.
         const double drift = std::abs(1.0 - ratio);
-        const double leadDrift = drift * (s.searchLeadNow + 4);
-        const int leadDriftI = static_cast<int>(std::ceil(leadDrift));
-        // An upshift fade always runs fadeHi (fadeLo meets it there); a downshift
-        // one is planned for the shortest and gets whatever room the landing has.
-        const int fadeDrift = static_cast<int>(std::ceil(drift * (ratio > 1.0 ? s.fadeHi : s.fadeMinLen)));
-
         for (int i = 0; i < count; ++i) {
           const int64_t now = s.written++;
           const float raw = input[i];
           s.ring.write(now, raw);
           s.control.write(now, raw);
+          s.followBass(raw);
+          const double leadDrift = drift * (s.searchLeadNow + 4);
+          const int leadDriftI = static_cast<int>(std::ceil(leadDrift));
+          const int fadeDrift = static_cast<int>(std::ceil(drift * (ratio > 1.0 ? s.fadeHi : s.fadeMinLen)));
 
           const double delay = static_cast<double>(now) - s.rA;
           const int guard = s.lowGuard();

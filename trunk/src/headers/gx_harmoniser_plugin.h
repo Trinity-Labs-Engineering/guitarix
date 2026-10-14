@@ -6,6 +6,8 @@
 #include "gx_harmoniser.h"
 #include "gx_poly_pitch_shifter.h"
 #include <string>
+#include <atomic>
+#include <cstdint>
 
 namespace gx_engine {
 
@@ -16,6 +18,11 @@ template<bool Dual> class Harmoniser : public PluginDef {
     float wet = 50, mix = 50, dry = 50;
     float gate[2] = {0, 0}, gate_step = 1.0f / 240;
     int held_note = -1;
+    // A single lock-free snapshot for the non-realtime status endpoint. No
+    // sockets, allocation, locks or UI callbacks run on the audio thread.
+    std::atomic<unsigned int> status{0};
+    unsigned int status_generation = 0;
+    static_assert(ATOMIC_INT_LOCK_FREE == 2, "Harmoniser status must be lock-free");
 
     static void init(unsigned int rate, PluginDef* plugin) {
         auto& self = *static_cast<Harmoniser*>(plugin);
@@ -30,6 +37,7 @@ template<bool Dual> class Harmoniser : public PluginDef {
         for (auto& voice : self.voices) voice.reset();
         self.gate[0] = self.gate[1] = 0;
         self.held_note = -1;
+        self.status.store(0, std::memory_order_relaxed);
     }
     static int activate(bool, PluginDef* plugin) { reset(plugin); return 0; }
     static int discrete(float value, int low, int high) {
@@ -70,6 +78,13 @@ template<bool Dual> class Harmoniser : public PluginDef {
             self.tracker.push(original, size); // once, shared by both voices
             offset += size;
         }
+        if (count > 0) {
+            const int note = self.tracker.note();
+            const unsigned int flags = (self.tracker.is_locked() ? 1u : 0u)
+                | (note >= 0 && !harmony::note_in_mode(note, root, scale) ? 2u : 0u)
+                | (static_cast<unsigned int>(note + 1) << 2);
+            self.status.store((++self.status_generation << 6) | flags, std::memory_order_relaxed);
+        }
     }
     static int register_parameters(const ParamReg& reg) {
         auto& self = *static_cast<Harmoniser*>(reg.plugin);
@@ -109,6 +124,7 @@ template<bool Dual> class Harmoniser : public PluginDef {
     }
     static void destroy(PluginDef* plugin) { delete static_cast<Harmoniser*>(plugin); }
 public:
+    unsigned int tracking_status() const { return status.load(std::memory_order_relaxed); }
     Harmoniser() : PluginDef() {
         version = PLUGINDEF_VERSION;
         id = Dual ? "dual_harmoniser" : "harmoniser";

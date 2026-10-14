@@ -410,8 +410,24 @@ void *operator new[](size_t size)
 
 void operator delete[](void *memory) noexcept { std::free(memory); }
 
-int main()
+int main(int argc, char** argv)
 {
+    if (argc == 7 && std::string(argv[1]) == "render") {
+        const int rate = std::atoi(argv[2]), kind = std::atoi(argv[5]), quality = std::atoi(argv[6]);
+        const double frequency = std::atof(argv[3]), ratio = std::pow(2., std::atof(argv[4]) / 12.);
+        auto input = sine(rate * 3, rate, frequency);
+        if (kind) for (int i = 0; i < int(input.size()); ++i)
+            input[i] += .25 * std::sin(pi2 * 2 * frequency * i / rate) + .125 * std::sin(pi2 * 3 * frequency * i / rate);
+        gx_engine::PolyphonicPitchShifter shifter;
+        shifter.prepare(rate, quality);
+        std::vector<float> output(input.size()), repeat(input.size());
+        render(shifter, input, output, ratio, 37);
+        shifter.reset();
+        render(shifter, input, repeat, ratio, 1111, true);
+        assert_equal(output, repeat);
+        std::cout.write(reinterpret_cast<char*>(output.data()), output.size() * sizeof(float));
+        return 0;
+    }
     test_pitch_and_chords();
     test_unison_and_rates();
     test_blocks_in_place_and_reset();

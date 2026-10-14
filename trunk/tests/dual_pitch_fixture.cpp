@@ -72,6 +72,14 @@ int main() {
         p->clear_state(p); p->activate_plugin(false,p); p->activate_plugin(true,p);
         assert(allocations==before);
         near(run(p,input,50,0,0),one);
+        for (double frequency : {30.867706,36.708096,41.203445}) {
+            for (size_t i=0;i<input.size();++i) input[i]=.1f*std::sin(2*3.141592653589793*frequency*i/rate);
+            const auto down=run(p,input,50,0,0), up=run(p,input,0,50,0);
+            assert(amplitude(down,frequency*.5,rate)>.06);
+            assert(amplitude(up,frequency*2,rate)>.06);
+            for(size_t i=0;i<input.size();++i) expected[i]=down[i]+up[i];
+            near(run(p,input,50,50,0,true,37),expected);
+        }
     }
     // Automation of one voice must not affect the other voice's state.
     set("dual_pitch.voice1",7); set("dual_pitch.voice2",-5);
