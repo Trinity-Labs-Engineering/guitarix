@@ -12,9 +12,9 @@ namespace gx_engine {
 namespace harmony {
 
 // DOCS/MODEPY/MODE_ENCODING.py is the reference. Notes are A=0 .. G#=11;
-// modes retain dictionary order; the interval pot is -7 .. +7 diatonic steps.
-// In-mode harmony is unchanged. Chromatic/unknown notes now stay within the
-// requested interval family instead of falling back to an octave.
+// Modes retain dictionary order; interval slots remain -7 .. +7. Slots 1, 3,
+// and 5 select compound ninths, elevenths, and thirteenths in either direction.
+// Chromatic/unknown notes stay within the requested interval family.
 inline void mode_notes(int tonic, int mode, int (&notes)[7]) {
     static const char* const patterns[] = {
         "110111", "101110", "011101", "111011", "110110", "101101", "011011"
@@ -36,6 +36,8 @@ inline int interval_shift(int note, int tonic, int mode, int interval) {
     if (!interval) return 0;
     const int direction = interval > 0 ? 1 : -1;
     if (std::abs(interval) == 7) return direction * 12;
+    const int degree = std::abs(interval);
+    const int extension = (degree == 1 || degree == 3 || degree == 5) ? direction * 12 : 0;
     int notes[7], index = -1;
     mode_notes(tonic, mode, notes);
     for (int i = 0; i < 7; ++i) if (notes[i] == note) index = i;
@@ -45,7 +47,6 @@ inline int interval_shift(int note, int tonic, int mode, int interval) {
         // Fourths/fifths also retain the mode's augmented/diminished variant.
         static const int preferred[] = {0, 2, 3, 5, 7, 9, 10, 12};
         static const int alternate[] = {0, 1, 4, 6, 6, 8, 11, 12};
-        const int degree = std::abs(interval);
         const int first = preferred[degree] * direction;
         const int second = alternate[degree] * direction;
         if (note >= 0 && note < 12) {
@@ -54,12 +55,13 @@ inline int interval_shift(int note, int tonic, int mode, int interval) {
                 for (int pitch : notes) if (pitch == target) return true;
                 return false;
             };
-            if (!in_mode(first) && in_mode(second)) return second;
+            if (!in_mode(first) && in_mode(second)) return second + extension;
         }
-        return first;
+        return first + extension;
     }
     const int target = notes[(index + interval + 7) % 7];
-    return direction > 0 ? (target - note + 12) % 12 : -((note - target + 12) % 12);
+    const int simple = direction > 0 ? (target - note + 12) % 12 : -((note - target + 12) % 12);
+    return simple + extension;
 }
 
 // Streaming YIN: update the difference sums as the integration window slides,

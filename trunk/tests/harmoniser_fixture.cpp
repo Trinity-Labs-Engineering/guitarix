@@ -37,9 +37,10 @@ float signal(int i, int rate, double frequency, int kind) {
 int main(int argc, char** argv) {
     assert(argc >= 2);
     const std::string command = argv[1];
-    if (command == "intervals") {
+    if (command == "intervals" || command == "unknown-intervals") {
+        const bool unknown = command == "unknown-intervals";
         for (int root=0; root<12; ++root) for (int mode=0; mode<7; ++mode)
-            for (int note=0; note<12; ++note) for (int interval=-7; interval<=7; ++interval)
+            for (int note=unknown ? -1 : 0; note<(unknown ? 0 : 12); ++note) for (int interval=-7; interval<=7; ++interval)
                 std::cout << gx_engine::harmony::interval_shift(note,root,mode,interval) << '\n';
         return 0;
     }

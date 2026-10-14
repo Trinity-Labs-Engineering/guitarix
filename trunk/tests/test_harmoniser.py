@@ -44,7 +44,12 @@ class HarmoniserTests(unittest.TestCase):
         tail = audio[rate:]
         spectrum = np.abs(np.fft.rfft(tail * np.hanning(len(tail)), n=rate*4))
         frequencies = np.fft.rfftfreq(rate*4, 1/rate)
-        peak = frequencies[np.argmax(spectrum)]
+        index = np.argmax(spectrum)
+        # Interpolate the peak so sub-bass output from downward compound
+        # intervals is not limited by the 0.25 Hz FFT-bin spacing.
+        left, centre, right = np.log(np.maximum(spectrum[index-1:index+2], 1e-30))
+        offset = .5 * (left - right) / (left - 2 * centre + right)
+        peak = frequencies[index] + offset * .25
         self.assertLess(abs(1200 * np.log2(peak / expected)), 8, (peak, expected))
         self.assertGreater(np.sqrt(np.mean(tail**2)), .025)
 
@@ -64,7 +69,7 @@ class HarmoniserTests(unittest.TestCase):
 
     def test_actual_audio_all_intervals_at_three_sample_rates(self):
         # A in C Major: every ascending/descending interval, including unison.
-        shifts = [-12,-10,-9,-7,-5,-4,-2,0,2,3,5,7,8,10,12]
+        shifts = [-12,-10,-21,-7,-17,-4,-14,0,14,3,17,7,20,10,12]
         for rate in (44100,48000,96000):
             for interval, shift in zip(range(-7,8), shifts):
                 with self.subTest(rate=rate, interval=interval):
@@ -73,20 +78,45 @@ class HarmoniserTests(unittest.TestCase):
     def test_modes_tonics_and_chromatic_interval_fallback_are_audible(self):
         for tonic, mode, frequency, interval, shift in (
             (3,0,261.625565,2,4), (3,5,261.625565,2,3),
-            (0,0,220,-2,-3), (8,3,349.228231,3,6),
+            (0,0,220,-2,-3), (8,3,349.228231,3,18),
             (3,0,277.182631,2,3), (3,0,277.182631,-2,-4),
             (3,0,277.182631,0,0),
         ):
             with self.subTest(tonic=tonic, mode=mode, interval=interval):
                 self.assert_frequency(self.render(tonic=tonic, mode=mode, frequency=frequency, interval=interval),48000,frequency*2**(shift/12))
 
-    def test_no_note_or_key_can_turn_a_non_octave_interval_into_an_octave(self):
+    def test_every_note_and_key_stays_within_selected_interval_family(self):
         values = np.array(list(map(int, subprocess.check_output([self.executable, 'intervals'], text=True).split())))
         settings = values.reshape(12,7,12,15)
-        families = [(12,), (10,11), (8,9), (6,7), (5,6), (3,4), (1,2), (0,), (1,2), (3,4), (5,6), (6,7), (8,9), (10,11), (12,)]
+        families = [(12,), (10,11), (20,21), (6,7), (17,18), (3,4), (13,14), (0,), (13,14), (3,4), (17,18), (6,7), (20,21), (10,11), (12,)]
         for index, allowed in enumerate(families):
             self.assertTrue(np.isin(np.abs(settings[:,:,:,index]),allowed).all())
             self.assertTrue((settings[:,:,:,index] * (index-7) >= 0).all())
+
+    def test_compound_audio_on_bass_and_each_dual_voice(self):
+        # Drop D1 in C Major, in both directions; each shifter must really
+        # produce the extended interval rather than clamp to an octave.
+        for rate in (44100,48000,96000):
+            for dual, mix in ((0,50),(1,100),(1,0)):
+                for interval, shift in ((-5,-21),(-3,-17),(-1,-14),(1,14),(3,17),(5,21)):
+                    with self.subTest(rate=rate, dual=dual, mix=mix, interval=interval):
+                        self.assert_frequency(self.render(rate=rate, frequency=36.708096, dual=dual,
+                            mix=mix, interval=interval, interval2=interval, kind=1),rate,36.708096*2**(shift/12))
+
+    def test_chromatic_compound_intervals_and_dual_blend(self):
+        # C# in C Major uses the alternate where that alone reaches the mode.
+        for interval, shift in ((-5,-21),(-3,-18),(-1,-14),(1,13),(3,18),(5,20)):
+            with self.subTest(interval=interval):
+                self.assert_frequency(self.render(frequency=277.182631,interval=interval),48000,277.182631*2**(shift/12))
+        one = self.render(dual=1,interval=-5,interval2=5,mix=100)
+        two = self.render(dual=1,interval=-5,interval2=5,mix=0)
+        self.assert_frequency(one,48000,220*2**(-21/12))
+        self.assert_frequency(two,48000,220*2**(20/12))
+        np.testing.assert_allclose(self.render(dual=1,interval=-5,interval2=5,mix=35),one*.35+two*.65,atol=3e-7)
+
+    def test_unknown_note_uses_compound_family_at_cold_start(self):
+        actual = list(map(int, subprocess.check_output([self.executable, 'unknown-intervals'], text=True).split()))
+        self.assertEqual(actual, [-12,-10,-21,-7,-17,-3,-14,0,14,3,17,7,21,10,12] * (12*7))
 
     def test_audio_across_guitar_register(self):
         for frequency in (82.406889,110,164.813778,329.627557,659.255114,1318.510228):

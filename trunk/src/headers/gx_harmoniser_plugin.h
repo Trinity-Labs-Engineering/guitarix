@@ -100,7 +100,7 @@ template<bool Dual> class Harmoniser : public PluginDef {
             {"Lydian", "Lydian"}, {"Mixolydian", "Mixolydian"}, {"Minor", "Minor"}, {"Locrian", "Locrian"}, {nullptr, nullptr}};
         add("tonic", "Tonic", "Key tonic (A = 0)", &self.tonic, 3, 0, 11, tonics);
         add("mode", "Mode", "Musical mode", &self.mode, 0, 0, 6, modes);
-        const char* interval_help = "Diatonic steps: -7 = octave down, 0 = unison, +7 = octave up; chromatic notes retain the selected interval family";
+        const char* interval_help = "Interval slots 1..7: 9th, 3rd, 11th, 5th, 13th, 7th, octave; negative = down, positive = up, 0 = unison; chromatic notes retain the selected interval family";
         add(Dual ? "voice1" : "interval", Dual ? "Voice 1 Interval" : "Interval", interval_help, &self.interval1, 2, -7, 7);
         if (Dual) {
             add("voice2", "Voice 2 Interval", interval_help, &self.interval2, 4, -7, 7);
