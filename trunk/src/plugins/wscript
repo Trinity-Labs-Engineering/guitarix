@@ -19,6 +19,8 @@ lib_csource_defs = [ # put in static library linked with guitarix
     "jcm800pre.cpp",
     "reversedelay.cc",
     "dual_pitch.cc",
+    "harmoniser.cc",
+    "dual_harmoniser.cc",
     "vumeter.cc",
     "vumeter_st.cc",
     ]
@@ -87,6 +89,8 @@ lib_sources_shared = [
     'mbchor.dsp',
     'reversedelay.cc',
     'dual_pitch.cc',
+    'harmoniser.cc',
+    'dual_harmoniser.cc',
     'gcb_95.dsp',
     'hfb.dsp',
     'hogsfoot.dsp',
