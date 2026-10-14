@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
                 assert(allocations==before);
                 if (correct!=total || acquired > rate * (kind>=2 ? .2 : .08)) {
                     std::cerr << "tracking rate=" << rate << " midi=" << midi << " kind=" << kind
-                        << " correct=" << correct << '/' << total << " detected=" << tracker.frequency() << '\n';
+                        << " acquired_ms=" << 1000.0*acquired/rate << " correct=" << correct << '/' << total << " detected=" << tracker.frequency() << '\n';
                     return 1;
                 }
             }
@@ -84,10 +84,12 @@ int main(int argc, char** argv) {
             for (int i=0; i<rate; i+=512) tracker.push(silence,512);
             assert(tracker.note()==-1);
             tracker.reset(); assert(tracker.note()==-1);
-            // Note changes without reset must update the selected scale degree.
+            // Newly picked notes unlock without resetting the plugin. A legato
+            // pitch change without an attack deliberately retains the lock.
             for (int midi : {45,52,48,61,57}) {
                 for (int i=0; i<rate/4; ++i) {
-                    float value=signal(i,rate,440*std::pow(2.,(midi-69)/12.),1);
+                    float value=signal(i,rate,440*std::pow(2.,(midi-69)/12.),1)
+                        * std::exp(-i / (rate * .06));
                     tracker.push(&value,1);
                 }
                 assert(tracker.note()==(midi+3)%12);
