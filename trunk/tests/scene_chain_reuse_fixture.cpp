@@ -50,6 +50,7 @@ public:
     void wait_latch() { ++lifetime_waits; }
     bool check_release() { return !to_release.empty(); }
     void release() { to_release.clear(); }
+    void retain_transferred_plugins(const list<Plugin*>& destination);
 };
 
 // Generated directly from gx_modulesequencer.h and gx_engine_audio.cpp by
@@ -146,5 +147,18 @@ int main() {
     assert(!chain.published()[0].func && chain.publications == 6);
     assert(chain.commit(true, parameters));
     assert(chain.publications == 6);
+
+    // Promoting a lifecycle-managed stereo effect into the mono loop must not
+    // deactivate the same processor after its destination chain owns it.
+    TestChain transfer;
+    Plugin transferable{{"transfer"}};
+    transferable.definition.activate_plugin = accept_activation;
+    assert(transfer.set_plugin_list({&transferable}));
+    assert(transfer.commit(true, parameters));
+    assert(transfer.set_plugin_list({}));
+    assert(transfer.check_release());
+    transfer.retain_transferred_plugins({&transferable});
+    assert(!transfer.check_release());
+    assert(transfer.commit(true, parameters));
     std::cout << "scene-chain-reuse-ok\n";
 }

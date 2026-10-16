@@ -457,6 +457,7 @@ public:
 
 class ConvolverMonoAdapter: public ConvolverAdapter {
 private:
+    std::string instance_id;
     jconv_post_mono::Dsp jc_post_mono;
     // wrapper for the rack order function pointers
     static void convolver_init(unsigned int samplingFreq, PluginDef *pdef);
@@ -465,7 +466,8 @@ private:
     static int convolver_register(const ParamReg& reg);
     static int jconv_load_ui(const UiBuilder& builder, int format);
 public:
-    ConvolverMonoAdapter(EngineControl& engine, sigc::slot<void> sync);
+    ConvolverMonoAdapter(EngineControl& engine, sigc::slot<void> sync,
+                         const std::string& id = "jconv_mono");
     ~ConvolverMonoAdapter();
 };
 
@@ -1217,6 +1219,7 @@ public:
 
 class smbPitchShift : public PluginDef {
 private:
+    std::string instance_id;
     PolyphonicPitchShifter pitch_shifter;
     EngineControl&  engine;
     bool            mem_allocated;
@@ -1250,7 +1253,8 @@ private:
 
 public:
     Plugin plugin;
-    smbPitchShift(EngineControl& engine, sigc::slot<void> sync);
+    smbPitchShift(EngineControl& engine, sigc::slot<void> sync,
+                  const std::string& id = "smbPitchShift");
     ~smbPitchShift();
 };
 

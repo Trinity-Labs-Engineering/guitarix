@@ -26,13 +26,7 @@
 #include "gx_plugin.h"
 
 #include "gx_faust_support.h"
-#ifndef GUITARIX_AS_PLUGIN
-#include "../faust/vibe_lfo_sine.cc"
-#include "../faust/vibe_mono_lfo_sine.cc"
-#else
-#include "vibe_lfo_sine.cc"
-#include "vibe_mono_lfo_sine.cc"
-#endif
+#include "gx_vibe_lfo.h"
 
 namespace pluginlib {
 namespace vibe {
@@ -101,19 +95,11 @@ public:
     inline bool hasValue() { return idx < size; }
     inline bool need_next() { sample %= period; return sample++ == 0; }
     inline void fetch(float& left, float& right) { left = store_l[idx]; right = store_r[idx]; ++idx; }
-    inline void compute(void (*func)(int,float*));
-    inline void compute(void (*func)(int,float*,float*));
+    template <class F> inline void compute(F func) {
+        func(size, store_l, store_r);
+        idx = 0;
+    }
 };
-
-inline void NextValue::compute(void (*func)(int,float*)) {
-    func(size, store_l);
-    idx = 0;
-}
-
-inline void NextValue::compute(void (*func)(int,float*,float*)) {
-    func(size, store_l, store_r);
-    idx = 0;
-}
 
 /****************************************************************
  ** class Vibe
@@ -134,6 +120,8 @@ public:
     static void del_instance(PluginDef *plugin);
 
 private:
+    VibeMonoLfo mono_lfo;
+    VibeStereoLfo stereo_lfo;
     bool Pstereo;
     float Ppanning;
   
@@ -229,9 +217,9 @@ void Vibe::process_mono(int count, float *smps, float *efxout, PluginDef *plugin
 int Vibe::registerparam(const ParamReg& reg) {
 	Vibe& self = *static_cast<Vibe*>(reg.plugin);
     if (self.Pstereo) {
-	vibe_lfo_sine::register_params(reg);
+	self.stereo_lfo.register_params(reg);
     } else {
-	vibe_mono_lfo_sine::register_params(reg);
+	self.mono_lfo.register_params(reg);
     }
     const char *univibe_width, *univibe_depth, *univibe_wet_dry, *univibe_fb;
     if (self.Pstereo) {
@@ -383,9 +371,9 @@ void Vibe::out(int PERIOD, float *smpsl, float *smpsr, float * efxoutl, float * 
 	if (lfo.need_next()) {
 	    if (!lfo.hasValue()) {
 		if (Pstereo) {
-		    lfo.compute(vibe_lfo_sine::compute);
+		    lfo.compute([this](int n, float* a, float* b) { stereo_lfo.compute(n, a, b); });
 		} else {
-		    lfo.compute(vibe_mono_lfo_sine::compute);
+		    lfo.compute([this](int n, float* a, float*) { mono_lfo.compute(n, a); });
 		}
 	    }
 	    lfo.fetch(lfol, lfor);
@@ -576,9 +564,9 @@ void Vibe::out(int PERIOD, float *smpsl, float *smpsr, float * efxoutl, float * 
 
 void Vibe::init_vibes(unsigned int samplerate) {
     if (Pstereo) {
-	vibe_lfo_sine::init(samplerate);
+	stereo_lfo.init(samplerate);
     } else {
-	vibe_mono_lfo_sine::init(samplerate);
+	mono_lfo.init(samplerate);
     }
 
     cSAMPLE_RATE = 1.0 / samplerate;
@@ -694,9 +682,9 @@ void Vibe::init_vibes(unsigned int samplerate) {
 
 void Vibe::clear_audio_state() {
     if (Pstereo) {
-	vibe_lfo_sine::clear_state_f();
+	stereo_lfo.clear_state_f();
     } else {
-	vibe_mono_lfo_sine::clear_state_f();
+	mono_lfo.clear_state_f();
     }
     lfo.reset();
 

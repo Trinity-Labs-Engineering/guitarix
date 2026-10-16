@@ -544,6 +544,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         bool snap_output_gain = false;
         bool snap_nam_gain_rt = false;
         bool snap_snam_gain_rt = false;
+        bool snap_nam_second_gain_rt = false;
         bool snap_mnam_gain_rt = false;
         if (params.size() & 1) {
             throw RpcError(-32602, "Invalid param -- array length must be even");
@@ -622,11 +623,41 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                 snap_snam_gain_rt = snap_snam_gain_rt ||
                     attr == "snam.input" || attr == "snam.output" ||
                     attr == "snam.on_off";
+                snap_nam_second_gain_rt = snap_nam_second_gain_rt ||
+                    attr == "nam__2.input" || attr == "nam__2.output" ||
+                    attr == "nam__2.on_off";
                 snap_mnam_gain_rt = snap_mnam_gain_rt ||
                     attr == "mnam.input" || attr == "mnam.inputb" ||
                     attr == "mnam.output" || attr == "mnam.mix" ||
                     attr == "mnam.on_off";
             }
+        }
+
+        // Houston publishes source and boundary changes in the final scene
+        // batch, after any synchronous NAM file-selector preparation. Validate
+        // that candidate transaction before changing any engine parameter.
+        bool matrix_transaction = false;
+        std::map<std::string, int> matrix_values;
+        for (unsigned int i = 0; i < params.size(); i += 2) {
+            const std::string attr = params[i]->getString();
+            const auto suffix = attr.substr(attr.rfind('.') + 1);
+            if (suffix == "matrix_source" || attr == "matrix_splitter.on_off" ||
+                attr == "matrix_combiner.on_off") matrix_transaction = true;
+            if (suffix == "position" || suffix == "pp" || suffix == "on_off" ||
+                suffix == "scene_resident" || suffix == "matrix_lane" || suffix == "matrix_source") {
+                gx_engine::Parameter& parameter = param[attr];
+                if (parameter.isInt() && parameter.getControlType() == gx_engine::Parameter::Enum &&
+                    dynamic_cast<JsonString*>(params[i + 1])) {
+                    matrix_values[attr] = parameter.getInt().idx_from_id(params[i + 1]->getString());
+                } else {
+                    matrix_values[attr] = params[i + 1]->getInt();
+                }
+            }
+        }
+        if (matrix_transaction) {
+            std::string error;
+            if (!serv.jack.get_engine().pluginlist.validate_matrix(matrix_values, error))
+                throw RpcError(-32602, error);
         }
 
         const auto validation_finished_at = SceneClock::now();
@@ -638,25 +669,30 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         // model callback report whether that safe fast path actually ran.
         engine.neural_amp.begin_scene_parameter_batch(externally_muted);
         engine.sneural_amp.begin_scene_parameter_batch(externally_muted);
+        engine.neural_amp_second.begin_scene_parameter_batch(externally_muted);
         engine.mneural_amp.begin_scene_parameter_batch(externally_muted);
         bool output_gain_preset = false;
         bool nam_gain_preset = false;
         bool snam_gain_preset = false;
+        bool nam_second_gain_preset = false;
         bool mnam_gain_preset = false;
         bool output_gain_control_preset = false;
         bool nam_gain_control_preset = false;
         bool snam_gain_control_preset = false;
+        bool nam_second_gain_control_preset = false;
         bool mnam_gain_control_preset = false;
         try {
             apply_parameter_set(params);
             nam_gain_preset = engine.neural_amp.finish_scene_parameter_batch();
             snam_gain_preset = engine.sneural_amp.finish_scene_parameter_batch();
+            nam_second_gain_preset = engine.neural_amp_second.finish_scene_parameter_batch();
             mnam_gain_preset = engine.mneural_amp.finish_scene_parameter_batch();
         } catch (...) {
             // Never leak an external-mute context into a later interactive
             // parameter change if a plugin callback rejects this batch.
             engine.neural_amp.finish_scene_parameter_batch();
             engine.sneural_amp.finish_scene_parameter_batch();
+            engine.neural_amp_second.finish_scene_parameter_batch();
             engine.mneural_amp.finish_scene_parameter_batch();
             throw;
         }
@@ -669,12 +705,15 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             engine.neural_amp.plugin.get_on_off();
         snap_snam_gain_rt = snap_snam_gain_rt &&
             engine.sneural_amp.plugin.get_on_off();
+        snap_nam_second_gain_rt = snap_nam_second_gain_rt &&
+            engine.neural_amp_second.plugin.get_on_off();
         snap_mnam_gain_rt = snap_mnam_gain_rt &&
             engine.mneural_amp.plugin.get_on_off();
         const int requested_gain_snaps =
             static_cast<int>(snap_output_gain) +
             static_cast<int>(snap_nam_gain_rt) +
             static_cast<int>(snap_snam_gain_rt) +
+            static_cast<int>(snap_nam_second_gain_rt) +
             static_cast<int>(snap_mnam_gain_rt);
         bool commit_ok = false;
         bool processing_topology_changed = false;
@@ -701,15 +740,17 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             scene_control_barrier_finished =
                 engine.preset_muted_scene_smoothers(
                     snap_output_gain, snap_nam_gain_rt,
-                    snap_snam_gain_rt, snap_mnam_gain_rt);
+                    snap_snam_gain_rt, snap_mnam_gain_rt, snap_nam_second_gain_rt);
             if (scene_control_barrier_finished) {
                 output_gain_control_preset = snap_output_gain;
                 nam_gain_control_preset = snap_nam_gain_rt;
                 snam_gain_control_preset = snap_snam_gain_rt;
+                nam_second_gain_control_preset = snap_nam_second_gain_rt;
                 mnam_gain_control_preset = snap_mnam_gain_rt;
                 output_gain_preset = output_gain_control_preset;
                 nam_gain_preset = nam_gain_preset || nam_gain_control_preset;
                 snam_gain_preset = snam_gain_preset || snam_gain_control_preset;
+                nam_second_gain_preset = nam_second_gain_preset || nam_second_gain_control_preset;
                 mnam_gain_preset = mnam_gain_preset || mnam_gain_control_preset;
             }
         }
@@ -724,6 +765,8 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             snap_nam_gain_rt && !nam_gain_control_preset;
         const bool snam_gain_rt_requested =
             snap_snam_gain_rt && !snam_gain_control_preset;
+        const bool nam_second_gain_rt_requested =
+            snap_nam_second_gain_rt && !nam_second_gain_control_preset;
         const bool mnam_gain_rt_requested =
             snap_mnam_gain_rt && !mnam_gain_control_preset;
         if (output_gain_rt_requested) {
@@ -734,6 +777,9 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         }
         if (snam_gain_rt_requested) {
             engine.sneural_amp.request_scene_smoother_snap();
+        }
+        if (nam_second_gain_rt_requested) {
+            engine.neural_amp_second.request_scene_smoother_snap();
         }
         if (mnam_gain_rt_requested) {
             engine.mneural_amp.request_scene_smoother_snap();
@@ -749,10 +795,12 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             engine.neural_amp.is_scene_smoother_snap_pending();
         const bool snam_gain_pending = snam_gain_rt_requested &&
             engine.sneural_amp.is_scene_smoother_snap_pending();
+        const bool nam_second_gain_pending = nam_second_gain_rt_requested &&
+            engine.neural_amp_second.is_scene_smoother_snap_pending();
         const bool mnam_gain_pending = mnam_gain_rt_requested &&
             engine.mneural_amp.is_scene_smoother_snap_pending();
         const bool mono_gain_pending =
-            nam_gain_pending || snam_gain_pending || mnam_gain_pending;
+            nam_gain_pending || snam_gain_pending || mnam_gain_pending || nam_second_gain_pending;
         // Control callbacks and chain publication alone do not prove that the
         // new resident scene has reached audio. While Houston owns the hardware
         // mute, observe callback entry on both chains after publication. This
@@ -773,6 +821,8 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             !snap_nam_gain_rt || nam_gain_control_preset;
         bool snam_gain_settled =
             !snap_snam_gain_rt || snam_gain_control_preset;
+        bool nam_second_gain_settled =
+            !snap_nam_second_gain_rt || nam_second_gain_control_preset;
         bool mnam_gain_settled =
             !snap_mnam_gain_rt || mnam_gain_control_preset;
         if (output_gain_rt_requested) {
@@ -786,13 +836,17 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             snam_gain_settled =
                 engine.sneural_amp.finish_scene_smoother_snap();
         }
+        if (nam_second_gain_rt_requested) {
+            nam_second_gain_settled =
+                engine.neural_amp_second.finish_scene_smoother_snap();
+        }
         if (mnam_gain_rt_requested) {
             mnam_gain_settled =
                 engine.mneural_amp.finish_scene_smoother_snap();
         }
         const bool gain_smoothers_settled =
             output_gain_settled && nam_gain_settled &&
-            snam_gain_settled && mnam_gain_settled;
+            snam_gain_settled && mnam_gain_settled && nam_second_gain_settled;
 
         if (!commit_ok || !chain_settled || !gain_smoothers_settled ||
             !scene_audio_ready) {
@@ -874,11 +928,11 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_bool_kv(
             "gainSmoothersSnapped",
             requested_gain_snaps > 0 || output_gain_preset || nam_gain_preset ||
-                snam_gain_preset || mnam_gain_preset);
+                snam_gain_preset || mnam_gain_preset || nam_second_gain_preset);
         jw.write_bool_kv(
             "gainSmoothersPreset",
             output_gain_preset || nam_gain_preset ||
-                snam_gain_preset || mnam_gain_preset);
+                snam_gain_preset || mnam_gain_preset || nam_second_gain_preset);
         jw.write_bool_kv("gainSmoothersSettled", gain_smoothers_settled);
         jw.write_bool_kv("audioReady", scene_audio_ready);
         // No crossfade/mature-DSP observation exists yet. Null explicitly
@@ -922,9 +976,13 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_bool_kv("namGainSmootherRtRequested", nam_gain_rt_requested);
         jw.write_bool_kv("namGainSmootherSettled", nam_gain_settled);
         jw.write_bool_kv("snamGainSmootherRequested", snap_snam_gain_rt);
+        jw.write_bool_kv("namSecondGainSmootherRequested", snap_nam_second_gain_rt);
         jw.write_bool_kv("snamGainSmootherPreset", snam_gain_preset);
+        jw.write_bool_kv("namSecondGainSmootherPreset", nam_second_gain_preset);
         jw.write_bool_kv("snamGainSmootherRtRequested", snam_gain_rt_requested);
+        jw.write_bool_kv("namSecondGainSmootherRtRequested", nam_second_gain_rt_requested);
         jw.write_bool_kv("snamGainSmootherSettled", snam_gain_settled);
+        jw.write_bool_kv("namSecondGainSmootherSettled", nam_second_gain_settled);
         jw.write_bool_kv("mnamGainSmootherRequested", snap_mnam_gain_rt);
         jw.write_bool_kv("mnamGainSmootherPreset", mnam_gain_preset);
         jw.write_bool_kv("mnamGainSmootherRtRequested", mnam_gain_rt_requested);
@@ -1289,6 +1347,8 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         case nam::RuntimeDSPClass::Generic:
             break;
         }
+        const gx_engine::NeuralAmp::RuntimeStatus nam_second_runtime =
+            serv.jack.get_engine().neural_amp_second.get_runtime_status();
         const gx_engine::NeuralAmp::RuntimeStatus snam_runtime =
             serv.jack.get_engine().sneural_amp.get_runtime_status();
         const gx_engine::NeuralAmp::RuntimeStatus mnam_a_runtime =
@@ -1404,6 +1464,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_key("namRuntimes");
         jw.begin_array();
         write_nam_runtime("nam", nam_runtime);
+        write_nam_runtime("nam__2", nam_second_runtime);
         write_nam_runtime("snam", snam_runtime);
         write_nam_runtime("mnam.a", mnam_a_runtime);
         write_nam_runtime("mnam.b", mnam_b_runtime);

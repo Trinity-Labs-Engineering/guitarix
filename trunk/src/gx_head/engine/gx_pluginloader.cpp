@@ -217,6 +217,8 @@ Plugin::Plugin(PluginDef *pl)
       p_scene_resident(0),
       p_position(0),
       p_effect_post_pre(0),
+      p_matrix_lane(0),
+      p_matrix_source(0),
       rt_scene_state(0) {
     set_pdef(pl);
 }
@@ -244,6 +246,8 @@ Plugin::Plugin(gx_system::JsonParser& jp, ParamMap& pmap)
       p_scene_resident(0),
       p_position(0),
       p_effect_post_pre(0),
+      p_matrix_lane(0),
+      p_matrix_source(0),
       rt_scene_state(0) {
     PluginDef *p = new PluginDef();
     p->delete_instance = delete_plugindef_instance;
@@ -298,6 +302,8 @@ Plugin::Plugin(gx_system::JsonParser& jp, ParamMap& pmap)
     if (pmap.hasId(s+".scene_resident")) {
         p_scene_resident = &pmap[s+".scene_resident"].getBool();
     }
+    if (pmap.hasId(s+".matrix_lane")) p_matrix_lane = &pmap[s+".matrix_lane"].getInt();
+    if (pmap.hasId(s+".matrix_source")) p_matrix_source = &pmap[s+".matrix_source"].getBool();
     p_position = &pmap[s+".position"].getInt();
     p_effect_post_pre = &pmap[s+".pp"].getInt();
     set_pdef(p);
@@ -337,7 +343,8 @@ void Plugin::set_midi_on_off_blocked(bool v) {
 }
 
 int Plugin::desired_rt_scene_state() const {
-    return (get_on_off() ? 1 : 0) | (get_scene_resident() ? 2 : 0);
+    return (get_on_off() ? 1 : 0) | (get_scene_resident() ? 2 : 0) |
+        ((get_matrix_lane() & 3) << 2) | (get_matrix_source() ? 16 : 0);
 }
 
 bool Plugin::commit_rt_scene_state() {
@@ -348,7 +355,7 @@ bool Plugin::commit_rt_scene_state() {
     // Reinitialise it before making it audible so delay/reverb history cannot
     // leak from its previous scene. Lifecycle-managed modules are cycled here;
     // the mono convolver retains its exact prepared IR across that cycle.
-    if (old_state == 2 && (new_state & 1) &&
+    if ((old_state & 3) == 2 && (new_state & 1) &&
         !(pdef->flags & (PGNI_RESIDENT_PRESERVE_STATE |
                          PGNI_RESIDENT_TRACK_BYPASS))) {
         if (pdef->clear_state) {
@@ -383,6 +390,12 @@ void Plugin::register_vars(ParamMap& param, EngineControl& seq) {
     p_scene_resident->setSavable(false);
     p_scene_resident->signal_changed_bool().connect(
         sigc::hide(sigc::mem_fun(seq, &EngineControl::set_rack_changed)));
+    p_matrix_lane = param.reg_non_midi_par(s+".matrix_lane", (int*)0, true, 0, 0, 2);
+    p_matrix_source = param.reg_non_midi_par(s+".matrix_source", (bool*)0, true, false);
+    p_matrix_lane->signal_changed_int().connect(
+        sigc::hide(sigc::mem_fun(seq, &EngineControl::set_rack_changed)));
+    p_matrix_source->signal_changed_bool().connect(
+        sigc::hide(sigc::mem_fun(seq, &EngineControl::set_rack_changed)));
     commit_rt_scene_state();
     if ((pdef->load_ui || pdef->flags & PGN_GUI) &&
         (pdef->flags & PGNI_DYN_POSITION || !(pdef->flags & PGN_FIXED_GUI))) {
@@ -399,7 +412,7 @@ void Plugin::register_vars(ParamMap& param, EngineControl& seq) {
         // PLUGIN_POS_RACK .. PLUGIN_POS_POST_START-1
         p_position->signal_changed_int().connect(
             sigc::hide(sigc::mem_fun(seq, &EngineControl::set_rack_changed)));
-        if (pdef->mono_audio || (pdef->flags & PGN_POST_PRE)) {
+        if (pdef->mono_audio || pdef->stereo_audio || (pdef->flags & PGN_POST_PRE)) {
             if (pdef->flags & PGN_PRE) {
                 pp = 1;
             } else if (pdef->flags & PGN_POST) {
@@ -423,6 +436,8 @@ void Plugin::register_vars(ParamMap& param, EngineControl& seq) {
 void Plugin::copy_position(const Plugin& plugin) {
     set_position(plugin.get_position());
     set_effect_post_pre(plugin.get_effect_post_pre());
+    if (p_matrix_lane) p_matrix_lane->set(plugin.get_matrix_lane());
+    if (p_matrix_source) p_matrix_source->set(plugin.get_matrix_source());
 }
 
 
@@ -731,6 +746,8 @@ void PluginList::unregisterParameter(Plugin *pl, ParamMap& param) {
     PluginDef *pd = pl->get_pdef();
     param.unregister(pl->p_on_off);
     param.unregister(pl->p_scene_resident);
+    param.unregister(pl->p_matrix_lane);
+    param.unregister(pl->p_matrix_source);
     param.unregister(pl->p_position);
     param.unregister(pl->p_box_visible);
     param.unregister(pl->p_plug_visible);
@@ -780,6 +797,13 @@ void PluginListBase::append_rack(UiBuilderBase& ui) {
 }
 
 static bool plugin_order(Plugin* p1, Plugin* p2) {
+    if (p1->position_weight() == p2->position_weight()) {
+        const auto rank = [](Plugin* p) {
+            return (p->get_pdef()->flags & PGNI_MATRIX_SPLITTER) ? 0 :
+                ((p->get_pdef()->flags & PGNI_MATRIX_COMBINER) ? 2 : 1);
+        };
+        return rank(p1) < rank(p2);
+    }
     return p1->position_weight() < p2->position_weight();
 }
 
@@ -815,7 +839,8 @@ void PluginList::ordered_processing_mono_list(list<Plugin*>& mono, int mode) {
     mono.clear();
     for (pluginmap::iterator p = pmap.begin(); p != pmap.end(); p++) {
         Plugin *pl = p->second;
-        if (pl->get_processing_active() && pl->get_pdef()->mono_audio &&
+        if ((pl->get_processing_active() || pl->get_matrix_source()) &&
+            (pl->get_pdef()->mono_audio || (pl->get_matrix_source() && pl->get_pdef()->stereo_audio)) &&
             (pl->get_pdef()->flags & mode)) {
             mono.push_back(pl);
         }
@@ -823,11 +848,68 @@ void PluginList::ordered_processing_mono_list(list<Plugin*>& mono, int mode) {
     mono.sort(plugin_order);
 }
 
+bool PluginList::validate_matrix(const std::map<std::string, int>& values, std::string& error) const {
+    const auto value = [&values](Plugin* plugin, const char* suffix, int fallback) {
+        auto it = values.find(std::string(plugin->get_pdef()->id) + suffix);
+        return it == values.end() ? fallback : it->second;
+    };
+    const auto position = [&value](Plugin* plugin) {
+        return value(plugin, ".position", plugin->get_position()) +
+            (value(plugin, ".pp", plugin->get_effect_post_pre()) ? 0 : Plugin::POST_WEIGHT);
+    };
+    int sources = 0, combiners = 0, source_position = 0, combine_position = 0;
+    bool stereo_source = false;
+    for (auto item : pmap) {
+        Plugin* plugin = item.second;
+        const int flags = plugin->get_pdef()->flags;
+        if (flags & PGN_ALTERNATIVE) continue;
+        const bool on = value(plugin, ".on_off", plugin->get_on_off());
+        const bool source = value(plugin, ".matrix_source", plugin->get_matrix_source());
+        const int lane = value(plugin, ".matrix_lane", plugin->get_matrix_lane());
+        if (lane < 0 || lane > 2 || (source && (!plugin->get_pdef()->stereo_audio || lane))) {
+            error = "Invalid matrix lane or stereo source"; return false;
+        }
+        if (source || (on && (flags & PGNI_MATRIX_SPLITTER))) {
+            ++sources; source_position = position(plugin); stereo_source = source;
+        }
+        if (on && (flags & PGNI_MATRIX_COMBINER)) {
+            ++combiners; combine_position = position(plugin);
+        }
+    }
+    if (sources > 1 || combiners > 1 || sources != combiners ||
+        (sources && (source_position > combine_position ||
+                     (stereo_source && source_position == combine_position)))) {
+        error = "A virtual loop requires one split source and one following combiner";
+        return false;
+    }
+    for (auto item : pmap) {
+        Plugin* plugin = item.second;
+        const int flags = plugin->get_pdef()->flags;
+        if (flags & (PGN_ALTERNATIVE | PGNI_MATRIX_SPLITTER | PGNI_MATRIX_COMBINER)) continue;
+        if (!value(plugin, ".on_off", plugin->get_on_off()) &&
+            !value(plugin, ".scene_resident", plugin->get_scene_resident())) continue;
+        const int lane = value(plugin, ".matrix_lane", plugin->get_matrix_lane());
+        const int pos = position(plugin);
+        if (lane && (!sources || pos <= source_position || pos >= combine_position ||
+                     plugin->get_pdef()->stereo_audio)) {
+            error = "A branch pedal must be mono and lie between the source and combiner";
+            return false;
+        }
+        if (!lane && sources && pos > source_position && pos < combine_position &&
+            (plugin->get_pdef()->mono_audio || plugin->get_pdef()->stereo_audio) &&
+            !plugin->get_pdef()->stereo_audio) {
+            error = "A pedal inside a split requires an upper or lower lane";
+            return false;
+        }
+    }
+    return true;
+}
+
 void PluginList::ordered_processing_stereo_list(list<Plugin*>& stereo, int mode) {
     stereo.clear();
     for (pluginmap::iterator p = pmap.begin(); p != pmap.end(); p++) {
         Plugin *pl = p->second;
-        if (pl->get_processing_active() && pl->get_pdef()->stereo_audio &&
+        if (pl->get_processing_active() && pl->get_pdef()->stereo_audio && !pl->get_matrix_source() &&
             (pl->get_pdef()->flags & mode)) {
             stereo.push_back(pl);
         }
@@ -840,6 +922,13 @@ bool PluginList::rt_scene_state_changed() {
         if (p->second->rt_scene_state_changed()) {
             return true;
         }
+    }
+    return false;
+}
+
+bool PluginList::matrix_sources_changed() {
+    for (auto item : pmap) {
+        if (item.second->matrix_source_state_changed()) return true;
     }
     return false;
 }

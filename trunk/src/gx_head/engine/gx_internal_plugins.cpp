@@ -26,6 +26,7 @@
  */
 
 #include "engine.h"
+#include "gx_matrix.h"
 #include "gx_faust_support.h"
 
 namespace gx_engine {
@@ -928,15 +929,15 @@ int ConvolverStereoAdapter::jconv_load_ui(const UiBuilder& builder, int format) 
  */
 
 ConvolverMonoAdapter::ConvolverMonoAdapter(
-    EngineControl& engine_, sigc::slot<void> sync_)
-    : ConvolverAdapter(engine_, sync_) {
+    EngineControl& engine_, sigc::slot<void> sync_, const std::string& id_)
+    : ConvolverAdapter(engine_, sync_), instance_id(id_) {
     retain_configuration_while_bypassed = true;
-    id = "jconv_mono";
+    id = instance_id.c_str();
     name = N_("Convolver");
     register_params = convolver_register;
     set_samplerate = convolver_init;
     activate_plugin = activate;
-    load_ui = jconv_load_ui;
+    load_ui = instance_id == "jconv_mono" ? jconv_load_ui : nullptr;
     mono_audio = convolver;
 }
 
@@ -960,11 +961,12 @@ void ConvolverMonoAdapter::convolver(int count, float *input, float *output, Plu
 
 int ConvolverMonoAdapter::convolver_register(const ParamReg& reg) {
     ConvolverMonoAdapter& self = *static_cast<ConvolverMonoAdapter*>(reg.plugin);
-    self.jcp = JConvParameter::insert_param(self.get_parameter_map(), "jconv_mono.convolver", self, &self.jcset);
+    self.jcp = JConvParameter::insert_param(self.get_parameter_map(), std::string(self.id)+".convolver", self, &self.jcset);
     self.jcp->signal_changed().connect(
     sigc::hide(
         sigc::mem_fun(self, &ConvolverMonoAdapter::restart)));
-    return self.jc_post_mono.register_par(reg);;
+    ScopedParamNamespace names(reg, reg.plugin, self.id);
+    return self.jc_post_mono.register_par(names.reg);
 }
 
 void ConvolverMonoAdapter::convolver_init(unsigned int samplingFreq, PluginDef *p) {
@@ -2543,8 +2545,9 @@ bool smbPitchShift::setParameters(int sampleRate_)
     return true;
 }
 
-smbPitchShift::smbPitchShift(EngineControl& engine_, sigc::slot<void> sync_):
+smbPitchShift::smbPitchShift(EngineControl& engine_, sigc::slot<void> sync_, const std::string& id_):
   PluginDef(),
+  instance_id(id_),
   pitch_shifter(),
   engine(engine_),
   mem_allocated(false),
@@ -2559,7 +2562,7 @@ smbPitchShift::smbPitchShift(EngineControl& engine_, sigc::slot<void> sync_):
   latency(0),
   plugin() {
     version = PLUGINDEF_VERSION;
-    id = "smbPitchShift";
+    id = instance_id.c_str();
     name = N_("Pitch Shift");
     groups = 0;
     description = N_("low latency polyphonic pitch shift");
@@ -2570,7 +2573,7 @@ smbPitchShift::smbPitchShift(EngineControl& engine_, sigc::slot<void> sync_):
     activate_plugin = activate_static;
     register_params = registerparam;
     delete_instance = del_instance;
-    load_ui = load_ui_f_static;
+    load_ui = instance_id == "smbPitchShift" ? load_ui_f_static : nullptr;
     PluginDef::clear_state = clear_state_static;
     plugin = this;
     engine.signal_buffersize_change().connect(
@@ -2705,14 +2708,16 @@ int smbPitchShift::register_par(const ParamReg& reg)
     reg.registerFloatVar("smbPitchShift.b", N_("middle low"), "S", N_("Low"), &b, 1.0, 0.0, 2.0, 0.01, 0);
     reg.registerFloatVar("smbPitchShift.c", N_("middle treble"), "S", N_("Mid"), &c, 1.0, 0.0, 2.0, 0.01, 0);
     reg.registerFloatVar("smbPitchShift.d", N_("treble"), "S", N_("Hi"), &d, 1.0, 0.0, 2.0, 0.01, 0);
-    engine.get_param()["smbPitchShift.latency"].signal_changed_int().connect(
+    engine.get_param()[instance_id+".latency"].signal_changed_int().connect(
         sigc::hide(sigc::mem_fun(this, &smbPitchShift::change_latency)));
     return 0;
 }
 
 int smbPitchShift::registerparam(const ParamReg& reg) 
 {
-    return static_cast<smbPitchShift*>(reg.plugin)->register_par(reg);
+    auto& self = *static_cast<smbPitchShift*>(reg.plugin);
+    ScopedParamNamespace names(reg, reg.plugin, self.id);
+    return self.register_par(names.reg);
 }
 
 int smbPitchShift::load_ui_f(const UiBuilder& b, int form) 

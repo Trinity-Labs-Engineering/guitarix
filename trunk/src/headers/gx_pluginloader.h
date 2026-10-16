@@ -49,6 +49,8 @@ enum {			       // additional flags for PluginDef (used internally)
     // discarded copy of the signal at their rack position. This also implies
     // that re-entry must not clear the state which the background pass warmed.
     PGNI_RESIDENT_TRACK_BYPASS = 0x400000,
+    PGNI_MATRIX_SPLITTER = 0x800000,
+    PGNI_MATRIX_COMBINER = 0x1000000,
 };
 
 class Plugin {
@@ -63,6 +65,8 @@ private:
     BoolParameter *p_scene_resident;
     IntParameter  *p_position; ///< Position in Rack / Audio Processing Chain
     IntParameter  *p_effect_post_pre; ///< pre/post amp position (post = 0)
+    IntParameter  *p_matrix_lane; ///< 0 serial, 1 upper, 2 lower
+    BoolParameter *p_matrix_source; ///< stereo processor in the mono virtual loop
     // Lock-free snapshot of the on/off and scene-resident controls. Parameter
     // callbacks only schedule a chain transaction; the snapshot is published
     // while the old chain is ramped down (or externally muted).
@@ -89,6 +93,11 @@ public:
     bool get_rt_on_off() {
         return (gx_system::atomic_get(rt_scene_state) & 1) != 0;
     }
+    int get_matrix_lane() const { return p_matrix_lane ? p_matrix_lane->get_value() : 0; }
+    bool get_matrix_source() const { return p_matrix_source && p_matrix_source->get_value(); }
+    int get_rt_matrix_lane() { return (gx_system::atomic_get(rt_scene_state) >> 2) & 3; }
+    bool get_rt_matrix_source() { return (gx_system::atomic_get(rt_scene_state) & 16) != 0; }
+    bool matrix_source_state_changed() { return get_matrix_source() != get_rt_matrix_source(); }
     bool rt_scene_state_changed() {
         return gx_system::atomic_get(rt_scene_state) != desired_rt_scene_state();
     }
@@ -221,6 +230,8 @@ public:
     void ordered_processing_stereo_list(list<Plugin*>& stereo, int mode);
     bool rt_scene_state_changed();
     bool commit_rt_scene_states();
+    bool matrix_sources_changed();
+    bool validate_matrix(const std::map<std::string, int>& values, std::string& error) const;
     void ordered_list(list<Plugin*>& l, bool stereo, int flagmask, int flagvalue);
     sigc::signal<void,const char*,bool>& signal_insert_remove() { return insert_remove; }
 #ifndef NDEBUG

@@ -43,6 +43,7 @@ private:
     PluginDef **modules;
     unsigned int size;
     value_pair *values;
+    std::vector<std::string> selector_value_ids;
 
     static int static_register(const ParamReg& reg);
     int register_parameter(const ParamReg& reg);
@@ -51,7 +52,8 @@ public:
     ModuleSelectorFromList(
 	EngineControl& seq, const char* id, const char* name,
 	const char *category, plugindef_creator module_ids[], const char* select_id,
-	const char* select_name, uiloader loader, const char** groups = 0, int flags = 0);
+	const char* select_name, uiloader loader, const char** groups = 0, int flags = 0,
+        bool second_instance = false);
     ~ModuleSelectorFromList();
     void set_module();
 };
@@ -78,7 +80,9 @@ public:
     MidiControllerList controller_map;
     // ModuleSelector's
     ModuleSelectorFromList crybaby;
+    ModuleSelectorFromList crybaby_second;
     ModuleSelectorFromList wah;
+    ModuleSelectorFromList wah_second;
     ModuleSelectorFromList tonestack;
     ModuleSelectorFromList ampstack;
     ModuleSelectorFromList poweramps;
@@ -96,6 +100,8 @@ public:
     MaxLevel maxlevel;
     OscilloscopeAdapter oscilloscope;
     ConvolverMonoAdapter mono_convolver;
+    ConvolverMonoAdapter ir_convolver;
+    ConvolverMonoAdapter ir_convolver_second;
     ConvolverStereoAdapter stereo_convolver;
     CabinetConvolver cabinet;
     CabinetStereoConvolver cabinet_st;
@@ -109,7 +115,9 @@ public:
     DrumSequencer dseq;
 #endif
     smbPitchShift detune;
+    smbPitchShift detune_second;
     NeuralAmp neural_amp;
+    NeuralAmp neural_amp_second;
     NeuralAmp sneural_amp;
     NeuralAmpMulti mneural_amp;
     RtNeural rtneural;
@@ -124,7 +132,7 @@ public:
     // transaction. Returns false without touching accumulator state if a
     // genuinely stalled audio callback prevents safe ownership.
     bool preset_muted_scene_smoothers(bool output_gain, bool nam_gain,
-                                      bool snam_gain, bool mnam_gain);
+                                      bool snam_gain, bool mnam_gain, bool nam_second_gain = false);
     void ladspaloader_update_plugins();
     sigc::signal<void,Plugin*,PluginChange::pc>& signal_plugin_changed() { return plugin_changed; }
     std::vector<Glib::ustring>& get_file_list_by_id(const std::string& id);

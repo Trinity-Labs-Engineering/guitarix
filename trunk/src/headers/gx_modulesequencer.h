@@ -97,6 +97,7 @@ public:
     void sync() { set_latch(); wait_latch(); }
     inline bool check_release() { return !to_release.empty(); }
     void release();
+    void retain_transferred_plugins(const list<Plugin*>& destination);
 #ifdef GUITARIX_AS_PLUGIN
     void process_ramp(int count);
 #endif
@@ -196,11 +197,15 @@ struct stereochain_data {
     stereochain_data(): func(), plugin(), owner() {}
 };
 
+// A stereo split source occupies a node in the mono loop; the actual stereo
+// function is dispatched by MonoModuleChain. Keep a non-null mono sentinel.
+inline void matrix_stereo_placeholder(int, float*, float*, PluginDef*) {}
+
 template <>
 inline monochain_data ThreadSafeChainPointer<monochain_data>::get_audio(Plugin *p)
 {
     PluginDef *pd = p->get_pdef();
-    return monochain_data(pd->mono_audio, pd, p);
+    return monochain_data(pd->mono_audio ? pd->mono_audio : matrix_stereo_placeholder, pd, p);
 }
 
 template <>
@@ -387,6 +392,7 @@ protected:
     Glib::Dispatcher    overload_detected;
     const char         *overload_reason;   // name of unit which detected overload
     int                 ov_disabled;	   // bitmask of OverloadType
+    bool pending_matrix_transfer;
     static int         sporadic_interval; // seconds; overload if at least 2 events in the timespan
 #ifdef GUITARIX_AS_PLUGIN
     sigc::signal<bool ()> _signal_timeout;

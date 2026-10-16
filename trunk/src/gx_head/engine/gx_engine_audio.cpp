@@ -25,6 +25,7 @@
  */
 
 #include "engine.h"     // NOLINT
+#include "gx_matrix.h"
 
 namespace gx_engine {
 
@@ -332,6 +333,10 @@ void ProcessingChainBase::release() {
     to_release.clear();
 }
 
+void ProcessingChainBase::retain_transferred_plugins(const list<Plugin*>& destination) {
+    for (Plugin* plugin : destination) to_release.remove(plugin);
+}
+
 #ifndef NDEBUG
 void ProcessingChainBase::print_chain_state(const char *title) {
     printf("%s rt_generation = %u, stopped = %d, ramp_mode = %d\n",
@@ -356,18 +361,54 @@ void __rt_func MonoModuleChain::process(int count, float *input, float *output) 
     // output is bypassed. Reuse one stack buffer for every such processor;
     // nothing from the background pass is published to the chain.
     float resident_bypass_output[count];
+    float matrix_lower[count];
+    bool matrix_open = false;
     for (monochain_data *p = get_rt_chain(); p->func; ++p) {
+	const bool audible = !p->owner || p->owner->get_rt_on_off();
+	if (p->plugin->flags & PGNI_MATRIX_SPLITTER) {
+	    if (audible && !matrix_open) {
+	        static_cast<MatrixBoundary*>(p->plugin)->split_audio(output, matrix_lower, count);
+	        matrix_open = true;
+	    }
+	    continue;
+	}
+	if (p->plugin->flags & PGNI_MATRIX_COMBINER) {
+	    if (matrix_open) {
+	        static_cast<MatrixBoundary*>(p->plugin)->combine_audio(output, matrix_lower, count);
+	        matrix_open = false;
+	    }
+	    continue;
+	}
+	if (p->owner && p->owner->get_rt_matrix_source() && p->plugin->stereo_audio) {
+	    // Bypassing the source preserves the two routes and their destinations.
+	    if (matrix_open) matrix_combine(output, matrix_lower, count, 0.0f);
+	    std::copy(output, output + count, matrix_lower);
+	    if (audible) p->plugin->stereo_audio(count, output, matrix_lower,
+	        output, matrix_lower, p->plugin);
+	    matrix_open = true;
+	    continue;
+	}
+	const int lane = p->owner ? p->owner->get_rt_matrix_lane() : 0;
+	// Malformed legacy parameter sets must never route an uncombined branch
+	// through the fixed mono amp. Scene RPC validation rejects these earlier.
+	if (matrix_open && lane == 0) {
+	    matrix_combine(output, matrix_lower, count, 0.0f);
+	    matrix_open = false;
+	}
+	if (lane != 0 && !matrix_open) continue;
+	float* signal = matrix_open && lane == 2 ? matrix_lower : output;
 	if (p->owner && !p->owner->get_rt_on_off()) {
 	    if (p->plugin->flags & PGNI_RESIDENT_TRACK_BYPASS) {
-		memcpy(resident_bypass_output, output, count*sizeof(float));
+		memcpy(resident_bypass_output, signal, count*sizeof(float));
 		p->func(
 		    count, resident_bypass_output, resident_bypass_output,
 		    p->plugin);
 	    }
 	    continue;
 	}
-	p->func(count, output, output, p->plugin);
+	p->func(count, signal, signal, p->plugin);
     }
+    if (matrix_open) matrix_combine(output, matrix_lower, count, 0.0f);
     if (rm == ramp_mode_off) {
 	return;
     }
@@ -434,7 +475,7 @@ void __rt_func StereoModuleChain::process(int count, float *input1, float *input
     memcpy(output2, input2, count*sizeof(float));
 #ifdef GUITARIX_AS_PLUGIN
     for (stereochain_data *p = get_rt_chain(); p->func; ++p) {
-		if (p->owner && !p->owner->get_rt_on_off()) {
+		if (p->owner && (!p->owner->get_rt_on_off() || p->owner->get_rt_matrix_source())) {
 			continue;
 		}
 		if (!feed)
@@ -443,7 +484,7 @@ void __rt_func StereoModuleChain::process(int count, float *input1, float *input
     }
 #else
     for (stereochain_data *p = get_rt_chain(); p->func; ++p) {
-	if (p->owner && !p->owner->get_rt_on_off()) {
+	if (p->owner && (!p->owner->get_rt_on_off() || p->owner->get_rt_matrix_source())) {
 	    continue;
 	}
 	(p->func)(count, output1, output2, output1, output2, p->plugin);
@@ -511,7 +552,8 @@ void __rt_func StereoModuleChain::process(int count, float *input1, float *input
 ModuleSelectorFromList::ModuleSelectorFromList(
     EngineControl& seq_, const char* id_, const char* name_,
     const char* category_, plugindef_creator plugins[], const char* select_id_,
-    const char* select_name_, uiloader loader, const char** groups_, int flags_)
+    const char* select_name_, uiloader loader, const char** groups_, int flags_,
+    bool second_instance)
     : ModuleSelector(seq_),
       PluginDef(),
       selector(0),
@@ -527,8 +569,11 @@ ModuleSelectorFromList::ModuleSelectorFromList(
     plugindef_creator *p = plugins;
     for (size = 0; *p; ++p, ++size);
     modules = new PluginDef*[size];
+    selector_value_ids.reserve(size);
     for (unsigned int i = 0; i < size; ++i) {
 	modules[i] = plugins[i]();
+        selector_value_ids.push_back(modules[i]->id);
+        if (second_instance) modules[i] = new SecondPluginInstance(modules[i]);
     }
     id = id_;
     name = name_;
@@ -550,7 +595,7 @@ ModuleSelectorFromList::~ModuleSelectorFromList() {
 int ModuleSelectorFromList::register_parameter(const ParamReg &param) {
     values = new value_pair[size+1];
     for (unsigned int i = 0; i < size; ++i) {
-	values[i].value_id = modules[i]->id;
+	values[i].value_id = selector_value_ids[i].c_str();
 	values[i].value_label = modules[i]->name;
     }
     values[size].value_id = 0;
@@ -705,6 +750,7 @@ ModuleSequencer::ModuleSequencer()
       overload_detected(),
       overload_reason(),
       ov_disabled(0),
+      pending_matrix_transfer(false),
       mono_chain(),
       stereo_chain() {
     overload_detected.connect(
@@ -960,9 +1006,12 @@ bool ModuleSequencer::prepare_module_lists() {
     }
     list<Plugin*> modules;
     pluginlist.ordered_processing_mono_list(modules, audio_mode);
+    const list<Plugin*> mono_modules = modules;
     bool ret_mono = mono_chain.set_plugin_list(modules);
     pluginlist.ordered_processing_stereo_list(modules, audio_mode);
     bool ret_stereo = stereo_chain.set_plugin_list(modules);
+    mono_chain.retain_transferred_plugins(modules);
+    stereo_chain.retain_transferred_plugins(mono_modules);
     if (ret_mono || ret_stereo) {
         mono_chain.print();
         stereo_chain.print();
@@ -972,6 +1021,7 @@ bool ModuleSequencer::prepare_module_lists() {
 
 bool ModuleSequencer::commit_module_lists(bool externally_muted) {
     const bool rt_state_changed = pluginlist.rt_scene_state_changed();
+    pending_matrix_transfer = pending_matrix_transfer || pluginlist.matrix_sources_changed();
     bool already_down =
         mono_chain.get_ramp_mode() == ProcessingChainBase::ramp_mode_down_dead;
     bool monoramp = (mono_chain.next_commit_needs_ramp || rt_state_changed) &&
@@ -998,8 +1048,18 @@ bool ModuleSequencer::commit_module_lists(bool externally_muted) {
     }
 
     bool ok = pluginlist.commit_rt_scene_states();
-    ok = mono_chain.commit(mono_chain.next_commit_needs_ramp, get_param()) && ok;
-    ok = stereo_chain.commit(stereo_chain.next_commit_needs_ramp, get_param()) && ok;
+    if (pending_matrix_transfer) {
+        // Old nodes stop processing after the source snapshot changes. Drain
+        // callbacks already executing that processor before its new chain can
+        // initialise it, including commits under an external hardware mute.
+        const SceneAudioCycleStatus ownership = wait_scene_control_cycle(true, true);
+        pending_matrix_transfer = !ownership.finished();
+        ok = !pending_matrix_transfer && ok;
+    }
+    if (!pending_matrix_transfer) {
+        ok = mono_chain.commit(mono_chain.next_commit_needs_ramp, get_param()) && ok;
+        ok = stereo_chain.commit(stereo_chain.next_commit_needs_ramp, get_param()) && ok;
+    }
     if (!ok) {
 	gx_print_warning(
 	    "scene switch", "a plugin could not be activated; keeping it bypassed");

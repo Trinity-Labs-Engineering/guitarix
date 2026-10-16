@@ -166,7 +166,7 @@ class SceneSwitchingContractTests(unittest.TestCase):
         )
 
         self.assertIn("clear_state = clear_state_impl;", source)
-        self.assertIn("vibe_mono_lfo_sine::clear_state_f();", source)
+        self.assertIn("mono_lfo.clear_state_f();", source)
         self.assertIn("lfo.reset();", source)
         self.assertIn("vc[i].x1 = vc[i].y1 = 0.0f;", source)
         self.assertIn("fbl = 0.0f;", source)
@@ -607,27 +607,27 @@ class SceneSwitchingContractTests(unittest.TestCase):
         tracker = "PGNI_RESIDENT_TRACK_BYPASS"
         self.assertIn(
             tracker,
-            registration(engine, "gx_effects::compressor::plugin()"),
+            registration(engine, "gx_effects::compressor::plugin"),
         )
         self.assertIn(
             tracker,
-            registration(engine, "gx_effects::expander::plugin()"),
+            registration(engine, "gx_effects::expander::plugin"),
         )
         self.assertIn(
             tracker,
-            registration(ladspa, "gx_effects::compressor::plugin()"),
+            registration(ladspa, "gx_effects::compressor::plugin"),
         )
         self.assertIn("float resident_bypass_output[count];", audio)
-        self.assertIn("memcpy(resident_bypass_output, output", audio)
+        self.assertIn("memcpy(resident_bypass_output, signal", audio)
         self.assertIn("p->plugin->flags & PGNI_RESIDENT_TRACK_BYPASS", audio)
         self.assertIn("PGNI_RESIDENT_TRACK_BYPASS", loader)
 
         for source in (engine, ladspa):
             for plugin in (
-                "gx_effects::echo::plugin()",
-                "gx_effects::delay::plugin()",
-                "gx_effects::freeverb::plugin()",
-                "pluginlib::reversedelay::plugin()",
+                "gx_effects::echo::plugin",
+                "gx_effects::delay::plugin",
+                "gx_effects::freeverb::plugin",
+                "pluginlib::reversedelay::plugin",
             ):
                 self.assertNotIn(tracker, registration(source, plugin))
 

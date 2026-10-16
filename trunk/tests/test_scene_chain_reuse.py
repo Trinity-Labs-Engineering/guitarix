@@ -32,6 +32,9 @@ class SceneChainReuseTests(unittest.TestCase):
             + implementation
             + "bool lists_equal(" + staging
         )
+        transfer = engine.split("void ProcessingChainBase::retain_transferred_plugins(", 1)[1]
+        transfer = transfer.split("#ifndef NDEBUG", 1)[0]
+        production += "void ProcessingChainBase::retain_transferred_plugins(" + transfer
 
         with tempfile.TemporaryDirectory(prefix="gx-scene-chain-reuse-") as directory:
             path = Path(directory)

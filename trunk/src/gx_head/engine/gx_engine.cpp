@@ -26,6 +26,7 @@
 
 #include "engine.h"
 #include "valve.h"
+#include "gx_matrix.h"
 
 #include "gx_faust_plugins.h"
 #ifndef GUITARIX_AS_PLUGIN
@@ -269,9 +270,15 @@ GxEngine::GxEngine(const string& plugin_dir, ParameterGroups& groups, const gx_s
       crybaby(
 	  *this, "crybaby", N_("Crybaby"), N_("Guitar Effects"), builtin_crybaby_plugins,
 	  "crybaby.autowah", _("select"), load_crybaby_ui, 0, PGN_POST_PRE),
+      crybaby_second(
+          *this, "crybaby__2", "Crybaby II", N_("Guitar Effects"), builtin_crybaby_plugins,
+          "crybaby__2.autowah", _("select"), 0, 0, PGN_POST_PRE, true),
       wah(
 	  *this, "wah", N_("Wah"), N_("Guitar Effects"), builtin_wah_plugins,
 	  "wah.select", _("select"), load_wah_ui, 0, PGN_POST_PRE),
+      wah_second(
+          *this, "wah__2", "Wah II", N_("Guitar Effects"), builtin_wah_plugins,
+          "wah__2.select", _("select"), 0, 0, PGN_POST_PRE, true),
       tonestack(
 	  *this, "amp.tonestack", N_("Tonestack"), N_("Tone Control"),
 	  builtin_tonestack_plugins, "amp.tonestack.select",
@@ -296,6 +303,8 @@ GxEngine::GxEngine(const string& plugin_dir, ParameterGroups& groups, const gx_s
       maxlevel(),
       oscilloscope(*this),
       mono_convolver(*this, sigc::mem_fun(mono_chain, &MonoModuleChain::sync)),
+      ir_convolver(*this, sigc::mem_fun(mono_chain, &MonoModuleChain::sync), "ir"),
+      ir_convolver_second(*this, sigc::mem_fun(mono_chain, &MonoModuleChain::sync), "ir__2"),
       stereo_convolver(*this, sigc::mem_fun(stereo_chain, &StereoModuleChain::sync)),
       cabinet(*this, sigc::mem_fun(mono_chain, &MonoModuleChain::sync), resamp),
       cabinet_st(*this, sigc::mem_fun(stereo_chain, &StereoModuleChain::sync), resamp),
@@ -308,7 +317,9 @@ GxEngine::GxEngine(const string& plugin_dir, ParameterGroups& groups, const gx_s
       dseq(*this, sigc::mem_fun(mono_chain, &MonoModuleChain::sync)),
 #endif
       detune(*this, sigc::mem_fun(mono_chain, &MonoModuleChain::sync)),
+      detune_second(*this, sigc::mem_fun(mono_chain, &MonoModuleChain::sync), "smbPitchShift__2"),
       neural_amp(get_param(), "nam", sigc::mem_fun(mono_chain, &MonoModuleChain::sync)),
+      neural_amp_second(get_param(), "nam__2", sigc::mem_fun(mono_chain, &MonoModuleChain::sync)),
       sneural_amp(get_param(), "snam", sigc::mem_fun(mono_chain, &MonoModuleChain::sync)),
       mneural_amp(get_param(), "mnam", &pro, sigc::mem_fun(mono_chain, &MonoModuleChain::sync)),
       rtneural(get_param(), "rtneural", sigc::mem_fun(mono_chain, &MonoModuleChain::sync)),
@@ -347,7 +358,9 @@ GxEngine::GxEngine(const string& plugin_dir, ParameterGroups& groups, const gx_s
     // selector objects to switch "alternative" modules
     add_selector(ampstack);
     add_selector(crybaby);
+    add_selector(crybaby_second);
     add_selector(wah);
+    add_selector(wah_second);
     add_selector(tonestack);
     add_selector(tuner);
     add_selector(poweramps);
@@ -364,8 +377,8 @@ GxEngine::~GxEngine() {
 }
 
 bool GxEngine::preset_muted_scene_smoothers(
-    bool output_gain, bool nam_gain, bool snam_gain, bool mnam_gain) {
-    const bool mono_gain = nam_gain || snam_gain || mnam_gain;
+    bool output_gain, bool nam_gain, bool snam_gain, bool mnam_gain, bool nam_second_gain) {
+    const bool mono_gain = nam_gain || snam_gain || mnam_gain || nam_second_gain;
     if (!output_gain && !mono_gain) {
         return true;
     }
@@ -375,11 +388,15 @@ bool GxEngine::preset_muted_scene_smoothers(
     // control thread writes any accumulator; later callbacks see that
     // participant as transparent. This closes the phase-order race inherent
     // in waiting for one arbitrary callback after arming an RT snap.
+    bool restore_nam_second_ready = false;
     bool restore_nam_ready = false;
     bool restore_snam_ready = false;
     bool restore_mnam_ready = false;
     if (output_gain) {
         scene_outputlevel.suspend_scene_smoother_for_control();
+    }
+    if (nam_second_gain) {
+        restore_nam_second_ready = neural_amp_second.suspend_scene_smoother_for_control();
     }
     if (nam_gain) {
         restore_nam_ready = neural_amp.suspend_scene_smoother_for_control();
@@ -398,6 +415,9 @@ bool GxEngine::preset_muted_scene_smoothers(
     if (output_gain) {
         scene_outputlevel.finish_scene_smoother_control(acquired);
     }
+    if (nam_second_gain) {
+        neural_amp_second.finish_scene_smoother_control(restore_nam_second_ready, acquired);
+    }
     if (nam_gain) {
         neural_amp.finish_scene_smoother_control(
             restore_nam_ready, acquired);
@@ -415,6 +435,15 @@ bool GxEngine::preset_muted_scene_smoothers(
 
 void GxEngine::load_static_plugins() {
     PluginList& pl = pluginlist; // just a shortcut
+    auto add_pedal = [&pl](plugindef_creator factory, int flags = 0) {
+        pl.add(factory(), PLUGIN_POS_RACK, flags);
+        pl.add(new SecondPluginInstance(factory()), PLUGIN_POS_RACK, flags | PGN_GUI);
+    };
+    pl.add(new MatrixBoundary(true), PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(new MatrixBoundary(false), PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(new SecondPluginInstance(gx_effects::gain::plugin(), "loop_output_gain"),
+           PLUGIN_POS_RACK, PGN_GUI);
+
 
     // * mono amp input position *
 
@@ -458,16 +487,24 @@ void GxEngine::load_static_plugins() {
 
     // dynamic rack modules
     // builtin
+    for (auto factory : builtin_crybaby_plugins) {
+        if (factory) pl.add(new SecondPluginInstance(factory()), PLUGIN_POS_RACK, PGN_ALTERNATIVE);
+    }
+    for (auto factory : builtin_wah_plugins) {
+        if (factory) pl.add(new SecondPluginInstance(factory()), PLUGIN_POS_RACK, PGN_ALTERNATIVE);
+    }
     pl.add(builtin_crybaby_plugins,               PLUGIN_POS_RACK, PGN_ALTERNATIVE);
     pl.add(builtin_wah_plugins,                   PLUGIN_POS_RACK, PGN_ALTERNATIVE);
     pl.add(builtin_tonestack_plugins,             PLUGIN_POS_RACK, PGN_ALTERNATIVE);
     pl.add(builtin_poweramp_plugins,              PLUGIN_POS_RACK, PGN_ALTERNATIVE);
 
     // mono
-    pl.add(gx_effects::gain::plugin(),            PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::low_high_pass::plugin(),   PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::highbooster::plugin(),     PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::selecteq::plugin(),        PLUGIN_POS_RACK, PGN_GUI);
+    add_pedal(gx_effects::gain::plugin, PGN_GUI);
+    add_pedal(gx_effects::low_high_pass::plugin, PGN_GUI);
+    add_pedal(gx_effects::highbooster::plugin, PGN_GUI);
+    add_pedal(gx_effects::selecteq::plugin, PGN_GUI);
+    pl.add(&crybaby_second.plugin, PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(&wah_second.plugin, PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&crybaby.plugin,                       PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&poweramps.plugin,                     PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&wah.plugin,                           PLUGIN_POS_RACK, PGN_GUI);
@@ -475,130 +512,132 @@ void GxEngine::load_static_plugins() {
 #ifndef GUITARIX_AS_PLUGIN
     pl.add(&record.plugin,                        PLUGIN_POS_RACK, PGN_GUI);
 #endif
+    pl.add(&detune_second.plugin, PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&detune.plugin,                        PLUGIN_POS_RACK, PGN_GUI);
 #ifndef GUITARIX_AS_PLUGIN
     pl.add(&dseq.plugin,                          PLUGIN_POS_RACK, PGN_GUI);
 #endif
-    pl.add(gx_effects::gx_distortion::plugin(),   PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::bitdowner::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::thick_distortion::plugin(), PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(pluginlib::ts9sim::plugin(),           PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(pluginlib::aclipper::plugin(),         PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(pluginlib::mxrdist::plugin(),          PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(pluginlib::bossds1::plugin(),          PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(pluginlib::bmp::plugin(),              PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::impulseresponse::plugin(), PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::compressor::plugin(),      PLUGIN_POS_RACK,
-           PGN_GUI | PGNI_RESIDENT_TRACK_BYPASS);
-    pl.add(gx_effects::expander::plugin(),        PLUGIN_POS_RACK,
-           PGN_GUI | PGNI_RESIDENT_TRACK_BYPASS);
-    pl.add(gx_effects::overdrive::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::echo::plugin(),            PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::delay::plugin(),           PLUGIN_POS_RACK, PGN_GUI);
+    add_pedal(gx_effects::gx_distortion::plugin, PGN_GUI);
+    add_pedal(gx_effects::bitdowner::plugin, PGN_GUI);
+    add_pedal(gx_effects::thick_distortion::plugin, PGN_GUI);
+    add_pedal(pluginlib::ts9sim::plugin, PGN_GUI);
+    add_pedal(pluginlib::aclipper::plugin, PGN_GUI);
+    add_pedal(pluginlib::mxrdist::plugin, PGN_GUI);
+    add_pedal(pluginlib::bossds1::plugin, PGN_GUI);
+    add_pedal(pluginlib::bmp::plugin, PGN_GUI);
+    add_pedal(gx_effects::impulseresponse::plugin, PGN_GUI);
+    add_pedal(gx_effects::compressor::plugin, PGN_GUI | PGNI_RESIDENT_TRACK_BYPASS);
+    add_pedal(gx_effects::expander::plugin, PGN_GUI | PGNI_RESIDENT_TRACK_BYPASS);
+    add_pedal(gx_effects::overdrive::plugin, PGN_GUI);
+    add_pedal(gx_effects::echo::plugin, PGN_GUI);
+    add_pedal(gx_effects::delay::plugin, PGN_GUI);
+    pl.add(&ir_convolver.plugin, PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(&ir_convolver_second.plugin, PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&mono_convolver.plugin,                PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::freeverb::plugin(),        PLUGIN_POS_RACK, PGN_GUI);
+    add_pedal(gx_effects::freeverb::plugin, PGN_GUI);
 #ifndef GUITARIX_AS_PLUGIN
     pl.add(&oscilloscope.plugin,                  PLUGIN_POS_RACK, PGN_GUI);
 #endif
-    pl.add(gx_effects::biquad::plugin(),          PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::tremolo::plugin(),         PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::phaser_mono::plugin(),     PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::chorus_mono::plugin(),     PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::flanger_mono::plugin(),    PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(pluginlib::flanger_gx::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::gx_feedback::plugin(),     PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::peak_eq::plugin(),         PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::digital_delay::plugin(),   PLUGIN_POS_RACK, PGN_GUI);
+    add_pedal(gx_effects::biquad::plugin, PGN_GUI);
+    add_pedal(gx_effects::tremolo::plugin, PGN_GUI);
+    add_pedal(gx_effects::phaser_mono::plugin, PGN_GUI);
+    add_pedal(gx_effects::chorus_mono::plugin, PGN_GUI);
+    add_pedal(gx_effects::flanger_mono::plugin, PGN_GUI);
+    add_pedal(pluginlib::flanger_gx::plugin, PGN_GUI);
+    add_pedal(gx_effects::gx_feedback::plugin, PGN_GUI);
+    add_pedal(gx_effects::peak_eq::plugin, PGN_GUI);
+    add_pedal(gx_effects::digital_delay::plugin, PGN_GUI);
     pl.add(&tonestack.plugin,                     PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&cabinet.plugin,                       PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&preamp.plugin,                        PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(&neural_amp_second.plugin, PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&neural_amp.plugin,                    PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&sneural_amp.plugin,                   PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&mneural_amp.plugin,                   PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&rtneural.plugin,                      PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&srtneural.plugin,                     PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&rtneuralmulti.plugin,                 PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(pluginlib::abgate::plugin(),           PLUGIN_POS_RACK);
-    pl.add(gx_effects::ring_modulator::plugin(),  PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::graphiceq::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(pluginlib::vibe::plugin_mono(),        PLUGIN_POS_RACK);
-    pl.add(pluginlib::mbc::plugin(),              PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(pluginlib::mbd::plugin(),              PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(pluginlib::mbe::plugin(),              PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(pluginlib::mbdel::plugin(),            PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(pluginlib::mbclipper::plugin(),        PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(pluginlib::bassboom::plugin(),         PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(pluginlib::mbchor::plugin(),           PLUGIN_POS_RACK, PGN_GUI);
+    add_pedal(pluginlib::abgate::plugin);
+    add_pedal(gx_effects::ring_modulator::plugin, PGN_GUI);
+    add_pedal(gx_effects::graphiceq::plugin, PGN_GUI);
+    add_pedal(pluginlib::vibe::plugin_mono);
+    add_pedal(pluginlib::mbc::plugin, PGN_GUI);
+    add_pedal(pluginlib::mbd::plugin, PGN_GUI);
+    add_pedal(pluginlib::mbe::plugin, PGN_GUI);
+    add_pedal(pluginlib::mbdel::plugin, PGN_GUI);
+    add_pedal(pluginlib::mbclipper::plugin, PGN_GUI);
+    add_pedal(pluginlib::bassboom::plugin, PGN_GUI);
+    add_pedal(pluginlib::mbchor::plugin, PGN_GUI);
 #ifndef DEBUG
 #ifndef GUITARIX_AS_PLUGIN
-    pl.add(pluginlib::jcm800pre::plugin(),        PLUGIN_POS_RACK, PGN_GUI);
+    add_pedal(pluginlib::jcm800pre::plugin, PGN_GUI);
 #endif
 #endif
-    pl.add(pluginlib::gcb_95::plugin(),           PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(gx_effects::duck_delay::plugin(),      PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::reversedelay::plugin(),     PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::dual_pitch::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::harmoniser::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::dual_harmoniser::plugin(),  PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(gx_effects::baxandall::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(gx_effects::distortion2::plugin(),     PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(gx_effects::fuzzface::plugin(),        PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(gx_effects::trbuff::plugin(),          PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::fuzzfacefm::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::fuzzfacerm::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::hornet::plugin(),           PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::susta::plugin(),            PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::hfb::plugin(),              PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::muff::plugin(),             PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::scream::plugin(),           PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::lpbboost::plugin(),         PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::foxeylady::plugin(),        PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::hogsfoot::plugin(),         PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::cstb::plugin(),             PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::coverd::plugin(),           PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::rangem::plugin(),           PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::ruin::plugin(),             PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::ffreak::plugin(),           PLUGIN_POS_RACK, PGN_GUI);
+    add_pedal(pluginlib::gcb_95::plugin, PGN_GUI);
+	add_pedal(gx_effects::duck_delay::plugin, PGN_GUI);
+	add_pedal(pluginlib::reversedelay::plugin, PGN_GUI);
+	add_pedal(pluginlib::dual_pitch::plugin, PGN_GUI);
+	add_pedal(pluginlib::harmoniser::plugin, PGN_GUI);
+	add_pedal(pluginlib::dual_harmoniser::plugin, PGN_GUI);
+	add_pedal(gx_effects::baxandall::plugin, PGN_GUI);
+	add_pedal(gx_effects::distortion2::plugin, PGN_GUI);
+	add_pedal(gx_effects::fuzzface::plugin, PGN_GUI);
+	add_pedal(gx_effects::trbuff::plugin, PGN_GUI);
+	add_pedal(pluginlib::fuzzfacefm::plugin, PGN_GUI);
+	add_pedal(pluginlib::fuzzfacerm::plugin, PGN_GUI);
+	add_pedal(pluginlib::hornet::plugin, PGN_GUI);
+	add_pedal(pluginlib::susta::plugin, PGN_GUI);
+	add_pedal(pluginlib::hfb::plugin, PGN_GUI);
+	add_pedal(pluginlib::muff::plugin, PGN_GUI);
+	add_pedal(pluginlib::scream::plugin, PGN_GUI);
+	add_pedal(pluginlib::lpbboost::plugin, PGN_GUI);
+	add_pedal(pluginlib::foxeylady::plugin, PGN_GUI);
+	add_pedal(pluginlib::hogsfoot::plugin, PGN_GUI);
+	add_pedal(pluginlib::cstb::plugin, PGN_GUI);
+	add_pedal(pluginlib::coverd::plugin, PGN_GUI);
+	add_pedal(pluginlib::rangem::plugin, PGN_GUI);
+	add_pedal(pluginlib::ruin::plugin, PGN_GUI);
+	add_pedal(pluginlib::ffreak::plugin, PGN_GUI);
 #ifndef GUITARIX_AS_PLUGIN
-	pl.add(pluginlib::fumaster::plugin(),         PLUGIN_POS_RACK, PGN_GUI);
+	add_pedal(pluginlib::fumaster::plugin, PGN_GUI);
 #endif
-	pl.add(pluginlib::fuzzdrive::plugin(),        PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::rolandwah::plugin(),        PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::astrofuzz::plugin(),        PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::buffb::plugin(),            PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::eldist::plugin(),           PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::mole::plugin(),             PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::buzz::plugin(),             PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::bfuzz::plugin(),            PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::axface::plugin(),           PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::metronome::plugin(),        PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::vumeter::plugin(),          PLUGIN_POS_RACK, PGN_GUI);
+	add_pedal(pluginlib::fuzzdrive::plugin, PGN_GUI);
+	add_pedal(pluginlib::rolandwah::plugin, PGN_GUI);
+	add_pedal(pluginlib::astrofuzz::plugin, PGN_GUI);
+	add_pedal(pluginlib::buffb::plugin, PGN_GUI);
+	add_pedal(pluginlib::eldist::plugin, PGN_GUI);
+	add_pedal(pluginlib::mole::plugin, PGN_GUI);
+	add_pedal(pluginlib::buzz::plugin, PGN_GUI);
+	add_pedal(pluginlib::bfuzz::plugin, PGN_GUI);
+	add_pedal(pluginlib::axface::plugin, PGN_GUI);
+	add_pedal(pluginlib::metronome::plugin, PGN_GUI);
+	add_pedal(pluginlib::vumeter::plugin, PGN_GUI);
     // stereo
-    pl.add(gx_effects::chorus::plugin(),          PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::flanger::plugin(),         PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::phaser::plugin(),          PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::stereodelay::plugin(),     PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::stereoecho::plugin(),      PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::moog::plugin(),            PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_amps::gx_ampmodul::plugin(),        PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::tonecontroll::plugin(),    PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::digital_delay_st::plugin(),PLUGIN_POS_RACK, PGN_GUI);
+    add_pedal(gx_effects::chorus::plugin, PGN_GUI);
+    add_pedal(gx_effects::flanger::plugin, PGN_GUI);
+    add_pedal(gx_effects::phaser::plugin, PGN_GUI);
+    add_pedal(gx_effects::stereodelay::plugin, PGN_GUI);
+    add_pedal(gx_effects::stereoecho::plugin, PGN_GUI);
+    add_pedal(gx_effects::moog::plugin, PGN_GUI);
+    add_pedal(gx_amps::gx_ampmodul::plugin, PGN_GUI);
+    add_pedal(gx_effects::tonecontroll::plugin, PGN_GUI);
+    add_pedal(gx_effects::digital_delay_st::plugin, PGN_GUI);
     pl.add(&stereo_convolver.plugin,              PLUGIN_POS_RACK, PGN_GUI);
 #ifndef GUITARIX_AS_PLUGIN
     pl.add(&record_st.plugin,                     PLUGIN_POS_RACK, PGN_GUI);
 #endif
-    pl.add(gx_effects::stereoverb::plugin(),      PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(pluginlib::zita_rev1::plugin(),        PLUGIN_POS_RACK);
-    pl.add(pluginlib::vibe::plugin_stereo(),      PLUGIN_POS_RACK);
-    pl.add(pluginlib::mbcs::plugin(),             PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::dattorros_progenitor::plugin(),PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::panoram_enhancer::plugin(),PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::bass_enhancer::plugin(),   PLUGIN_POS_RACK, PGN_GUI);
-    pl.add(gx_effects::ring_modulator_st::plugin(),PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(gx_effects::duck_delay_st::plugin(),   PLUGIN_POS_RACK, PGN_GUI);
+    add_pedal(gx_effects::stereoverb::plugin, PGN_GUI);
+    add_pedal(pluginlib::zita_rev1::plugin);
+    add_pedal(pluginlib::vibe::plugin_stereo);
+    add_pedal(pluginlib::mbcs::plugin, PGN_GUI);
+    add_pedal(gx_effects::dattorros_progenitor::plugin, PGN_GUI);
+    add_pedal(gx_effects::panoram_enhancer::plugin, PGN_GUI);
+    add_pedal(gx_effects::bass_enhancer::plugin, PGN_GUI);
+    add_pedal(gx_effects::ring_modulator_st::plugin, PGN_GUI);
+	add_pedal(gx_effects::duck_delay_st::plugin, PGN_GUI);
     pl.add(&cabinet_st.plugin,                    PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&preamp_st.plugin,                     PLUGIN_POS_RACK, PGN_GUI);
-	pl.add(pluginlib::vumeter_st::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
+	add_pedal(pluginlib::vumeter_st::plugin, PGN_GUI);
 }
 
 static LadspaLoader::pluginarray::iterator find_plugin(LadspaLoader::pluginarray& ml, plugdesc *pl) {
@@ -687,6 +726,8 @@ std::vector<Glib::ustring>& GxEngine::get_file_list_by_id(const std::string& id)
     list.clear();
     if (id == "nam.flist") {
         list = neural_amp.nam_file_names;
+    } else if (id == "nam__2.flist") {
+        list = neural_amp_second.nam_file_names;
     } else if (id == "snam.flist") {
         list = sneural_amp.nam_file_names;
     } else if (id == "mnam.falist") {
