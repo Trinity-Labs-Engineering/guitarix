@@ -641,10 +641,11 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         for (unsigned int i = 0; i < params.size(); i += 2) {
             const std::string attr = params[i]->getString();
             const auto suffix = attr.substr(attr.rfind('.') + 1);
-            if (suffix == "matrix_source" || attr == "matrix_splitter.on_off" ||
+            if (suffix == "matrix_source" || suffix == "matrix_resident" || attr == "matrix_splitter.on_off" ||
                 attr == "matrix_combiner.on_off") matrix_transaction = true;
             if (suffix == "position" || suffix == "pp" || suffix == "on_off" ||
-                suffix == "scene_resident" || suffix == "matrix_lane" || suffix == "matrix_source") {
+                suffix == "scene_resident" || suffix == "matrix_lane" || suffix == "matrix_source" ||
+                suffix == "matrix_resident") {
                 gx_engine::Parameter& parameter = param[attr];
                 if (parameter.isInt() && parameter.getControlType() == gx_engine::Parameter::Enum &&
                     dynamic_cast<JsonString*>(params[i + 1])) {

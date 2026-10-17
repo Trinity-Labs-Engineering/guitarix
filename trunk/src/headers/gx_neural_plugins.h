@@ -265,6 +265,9 @@ private:
     bool scene_smoother_preset;
     Glib::ustring prepared_generation;
     std::vector<PreparedNamModelDescriptor> prepared_models;
+    bool scene_parameter_batch = false;
+    bool scene_model_a_pending = false;
+    bool scene_model_b_pending = false;
 
     void clear_state_f();
     void preset_scene_smoother_targets();

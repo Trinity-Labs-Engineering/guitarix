@@ -67,6 +67,7 @@ private:
     IntParameter  *p_effect_post_pre; ///< pre/post amp position (post = 0)
     IntParameter  *p_matrix_lane; ///< 0 serial, 1 upper, 2 lower
     BoolParameter *p_matrix_source; ///< stereo processor in the mono virtual loop
+    BoolParameter *p_matrix_resident; ///< keep a pooled stereo processor in the mono loop
     // Lock-free snapshot of the on/off and scene-resident controls. Parameter
     // callbacks only schedule a chain transaction; the snapshot is published
     // while the old chain is ramped down (or externally muted).
@@ -95,9 +96,14 @@ public:
     }
     int get_matrix_lane() const { return p_matrix_lane ? p_matrix_lane->get_value() : 0; }
     bool get_matrix_source() const { return p_matrix_source && p_matrix_source->get_value(); }
+    bool get_matrix_resident() const { return p_matrix_resident && p_matrix_resident->get_value(); }
+    bool get_matrix_mono() const { return get_matrix_source() || get_matrix_resident(); }
     int get_rt_matrix_lane() { return (gx_system::atomic_get(rt_scene_state) >> 2) & 3; }
     bool get_rt_matrix_source() { return (gx_system::atomic_get(rt_scene_state) & 16) != 0; }
-    bool matrix_source_state_changed() { return get_matrix_source() != get_rt_matrix_source(); }
+    bool get_rt_matrix_mono() { return (gx_system::atomic_get(rt_scene_state) & (16 | 32)) != 0; }
+    // Only changing callback ownership needs a drain; selecting a different
+    // source within the prepared mono pool does not transfer a processor.
+    bool matrix_source_state_changed() { return get_matrix_mono() != get_rt_matrix_mono(); }
     bool rt_scene_state_changed() {
         return gx_system::atomic_get(rt_scene_state) != desired_rt_scene_state();
     }
@@ -109,6 +115,11 @@ public:
     void set_box_visible(bool v) const { if (p_box_visible) p_box_visible->set(v); }
     void set_plug_visible(bool v) const { if (p_plug_visible) p_plug_visible->set(v); }
     void set_on_off(bool v) const { p_on_off->set(v); }
+    void clear_matrix_routing() const {
+        if (p_matrix_source) p_matrix_source->set(false);
+        if (p_matrix_resident) p_matrix_resident->set(false);
+        if (p_matrix_lane) p_matrix_lane->set(0);
+    }
     void set_scene_resident(bool v) const {
         if (p_scene_resident) p_scene_resident->set(v);
     }

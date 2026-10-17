@@ -219,6 +219,7 @@ Plugin::Plugin(PluginDef *pl)
       p_effect_post_pre(0),
       p_matrix_lane(0),
       p_matrix_source(0),
+      p_matrix_resident(0),
       rt_scene_state(0) {
     set_pdef(pl);
 }
@@ -248,6 +249,7 @@ Plugin::Plugin(gx_system::JsonParser& jp, ParamMap& pmap)
       p_effect_post_pre(0),
       p_matrix_lane(0),
       p_matrix_source(0),
+      p_matrix_resident(0),
       rt_scene_state(0) {
     PluginDef *p = new PluginDef();
     p->delete_instance = delete_plugindef_instance;
@@ -304,6 +306,7 @@ Plugin::Plugin(gx_system::JsonParser& jp, ParamMap& pmap)
     }
     if (pmap.hasId(s+".matrix_lane")) p_matrix_lane = &pmap[s+".matrix_lane"].getInt();
     if (pmap.hasId(s+".matrix_source")) p_matrix_source = &pmap[s+".matrix_source"].getBool();
+    if (pmap.hasId(s+".matrix_resident")) p_matrix_resident = &pmap[s+".matrix_resident"].getBool();
     p_position = &pmap[s+".position"].getInt();
     p_effect_post_pre = &pmap[s+".pp"].getInt();
     set_pdef(p);
@@ -344,7 +347,8 @@ void Plugin::set_midi_on_off_blocked(bool v) {
 
 int Plugin::desired_rt_scene_state() const {
     return (get_on_off() ? 1 : 0) | (get_scene_resident() ? 2 : 0) |
-        ((get_matrix_lane() & 3) << 2) | (get_matrix_source() ? 16 : 0);
+        ((get_matrix_lane() & 3) << 2) | (get_matrix_source() ? 16 : 0) |
+        (get_matrix_resident() ? 32 : 0);
 }
 
 bool Plugin::commit_rt_scene_state() {
@@ -392,9 +396,14 @@ void Plugin::register_vars(ParamMap& param, EngineControl& seq) {
         sigc::hide(sigc::mem_fun(seq, &EngineControl::set_rack_changed)));
     p_matrix_lane = param.reg_non_midi_par(s+".matrix_lane", (int*)0, true, 0, 0, 2);
     p_matrix_source = param.reg_non_midi_par(s+".matrix_source", (bool*)0, true, false);
+    // Residency is a host preparation hint, never a saved audible route.
+    p_matrix_resident = param.reg_non_midi_par(s+".matrix_resident", (bool*)0, false, false);
+    p_matrix_resident->setSavable(false);
     p_matrix_lane->signal_changed_int().connect(
         sigc::hide(sigc::mem_fun(seq, &EngineControl::set_rack_changed)));
     p_matrix_source->signal_changed_bool().connect(
+        sigc::hide(sigc::mem_fun(seq, &EngineControl::set_rack_changed)));
+    p_matrix_resident->signal_changed_bool().connect(
         sigc::hide(sigc::mem_fun(seq, &EngineControl::set_rack_changed)));
     commit_rt_scene_state();
     if ((pdef->load_ui || pdef->flags & PGN_GUI) &&
@@ -748,6 +757,7 @@ void PluginList::unregisterParameter(Plugin *pl, ParamMap& param) {
     param.unregister(pl->p_scene_resident);
     param.unregister(pl->p_matrix_lane);
     param.unregister(pl->p_matrix_source);
+    param.unregister(pl->p_matrix_resident);
     param.unregister(pl->p_position);
     param.unregister(pl->p_box_visible);
     param.unregister(pl->p_plug_visible);
@@ -839,8 +849,8 @@ void PluginList::ordered_processing_mono_list(list<Plugin*>& mono, int mode) {
     mono.clear();
     for (pluginmap::iterator p = pmap.begin(); p != pmap.end(); p++) {
         Plugin *pl = p->second;
-        if ((pl->get_processing_active() || pl->get_matrix_source()) &&
-            (pl->get_pdef()->mono_audio || (pl->get_matrix_source() && pl->get_pdef()->stereo_audio)) &&
+        if ((pl->get_processing_active() || pl->get_matrix_mono()) &&
+            (pl->get_pdef()->mono_audio || (pl->get_matrix_mono() && pl->get_pdef()->stereo_audio)) &&
             (pl->get_pdef()->flags & mode)) {
             mono.push_back(pl);
         }
@@ -865,8 +875,10 @@ bool PluginList::validate_matrix(const std::map<std::string, int>& values, std::
         if (flags & PGN_ALTERNATIVE) continue;
         const bool on = value(plugin, ".on_off", plugin->get_on_off());
         const bool source = value(plugin, ".matrix_source", plugin->get_matrix_source());
+        const bool resident = value(plugin, ".matrix_resident", plugin->get_matrix_resident());
         const int lane = value(plugin, ".matrix_lane", plugin->get_matrix_lane());
-        if (lane < 0 || lane > 2 || (source && (!plugin->get_pdef()->stereo_audio || lane))) {
+        if (lane < 0 || lane > 2 || ((source || resident) && (!plugin->get_pdef()->stereo_audio || lane)) ||
+            (resident && on && !source)) {
             error = "Invalid matrix lane or stereo source"; return false;
         }
         if (source || (on && (flags & PGNI_MATRIX_SPLITTER))) {
@@ -886,8 +898,9 @@ bool PluginList::validate_matrix(const std::map<std::string, int>& values, std::
         Plugin* plugin = item.second;
         const int flags = plugin->get_pdef()->flags;
         if (flags & (PGN_ALTERNATIVE | PGNI_MATRIX_SPLITTER | PGNI_MATRIX_COMBINER)) continue;
-        if (!value(plugin, ".on_off", plugin->get_on_off()) &&
-            !value(plugin, ".scene_resident", plugin->get_scene_resident())) continue;
+        // Only the audible scene occupies lanes. A bypassed resident can keep
+        // its place from a different split without constraining this one.
+        if (!value(plugin, ".on_off", plugin->get_on_off())) continue;
         const int lane = value(plugin, ".matrix_lane", plugin->get_matrix_lane());
         const int pos = position(plugin);
         if (lane && (!sources || pos <= source_position || pos >= combine_position ||
@@ -909,7 +922,7 @@ void PluginList::ordered_processing_stereo_list(list<Plugin*>& stereo, int mode)
     stereo.clear();
     for (pluginmap::iterator p = pmap.begin(); p != pmap.end(); p++) {
         Plugin *pl = p->second;
-        if (pl->get_processing_active() && pl->get_pdef()->stereo_audio && !pl->get_matrix_source() &&
+        if (pl->get_processing_active() && pl->get_pdef()->stereo_audio && !pl->get_matrix_mono() &&
             (pl->get_pdef()->flags & mode)) {
             stereo.push_back(pl);
         }

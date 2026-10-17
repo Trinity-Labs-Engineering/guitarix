@@ -373,7 +373,7 @@ void __rt_func MonoModuleChain::process(int count, float *input, float *output) 
 	    continue;
 	}
 	if (p->plugin->flags & PGNI_MATRIX_COMBINER) {
-	    if (matrix_open) {
+	    if (audible && matrix_open) {
 	        static_cast<MatrixBoundary*>(p->plugin)->combine_audio(output, matrix_lower, count);
 	        matrix_open = false;
 	    }
@@ -389,6 +389,16 @@ void __rt_func MonoModuleChain::process(int count, float *input, float *output) 
 	    continue;
 	}
 	const int lane = p->owner ? p->owner->get_rt_matrix_lane() : 0;
+	// An inactive pool member is not a routing boundary. In particular, an
+	// unused stereo source must not collapse the current pair of lanes.
+	if (!audible) {
+	    if ((p->plugin->flags & PGNI_RESIDENT_TRACK_BYPASS) && (!lane || matrix_open)) {
+	        float* signal = matrix_open && lane == 2 ? matrix_lower : output;
+	        memcpy(resident_bypass_output, signal, count*sizeof(float));
+	        p->func(count, resident_bypass_output, resident_bypass_output, p->plugin);
+	    }
+	    continue;
+	}
 	// Malformed legacy parameter sets must never route an uncombined branch
 	// through the fixed mono amp. Scene RPC validation rejects these earlier.
 	if (matrix_open && lane == 0) {
@@ -397,15 +407,6 @@ void __rt_func MonoModuleChain::process(int count, float *input, float *output) 
 	}
 	if (lane != 0 && !matrix_open) continue;
 	float* signal = matrix_open && lane == 2 ? matrix_lower : output;
-	if (p->owner && !p->owner->get_rt_on_off()) {
-	    if (p->plugin->flags & PGNI_RESIDENT_TRACK_BYPASS) {
-		memcpy(resident_bypass_output, signal, count*sizeof(float));
-		p->func(
-		    count, resident_bypass_output, resident_bypass_output,
-		    p->plugin);
-	    }
-	    continue;
-	}
 	p->func(count, signal, signal, p->plugin);
     }
     if (matrix_open) matrix_combine(output, matrix_lower, count, 0.0f);
@@ -475,7 +476,7 @@ void __rt_func StereoModuleChain::process(int count, float *input1, float *input
     memcpy(output2, input2, count*sizeof(float));
 #ifdef GUITARIX_AS_PLUGIN
     for (stereochain_data *p = get_rt_chain(); p->func; ++p) {
-		if (p->owner && (!p->owner->get_rt_on_off() || p->owner->get_rt_matrix_source())) {
+		if (p->owner && (!p->owner->get_rt_on_off() || p->owner->get_rt_matrix_mono())) {
 			continue;
 		}
 		if (!feed)
@@ -484,7 +485,7 @@ void __rt_func StereoModuleChain::process(int count, float *input1, float *input
     }
 #else
     for (stereochain_data *p = get_rt_chain(); p->func; ++p) {
-	if (p->owner && (!p->owner->get_rt_on_off() || p->owner->get_rt_matrix_source())) {
+	if (p->owner && (!p->owner->get_rt_on_off() || p->owner->get_rt_matrix_mono())) {
 	    continue;
 	}
 	(p->func)(count, output1, output2, output1, output2, p->plugin);

@@ -926,9 +926,26 @@ NeuralAmpMulti::~NeuralAmpMulti() {
 void NeuralAmpMulti::begin_scene_parameter_batch(bool externally_muted) {
     muted_scene_parameter_batch = externally_muted;
     scene_smoother_preset = false;
+    scene_parameter_batch = true;
+    scene_model_a_pending = scene_model_b_pending = false;
 }
 
 bool NeuralAmpMulti::finish_scene_parameter_batch() {
+    // Size, directory and selector callbacks describe one final model per
+    // slot. Applying them individually resizes/prewarms the outgoing model
+    // before loading the destination, even when both were prepared already.
+    const bool load_a = scene_model_a_pending;
+    const bool load_b = scene_model_b_pending;
+    scene_parameter_batch = false;
+    scene_model_a_pending = scene_model_b_pending = false;
+    try {
+        if (load_a) load_nam_afile_impl();
+        if (load_b) load_nam_bfile_impl();
+    } catch (...) {
+        muted_scene_parameter_batch = false;
+        scene_smoother_preset = false;
+        throw;
+    }
     const bool preset = scene_smoother_preset;
     muted_scene_parameter_batch = false;
     scene_smoother_preset = false;
@@ -1476,6 +1493,10 @@ void NeuralAmpMulti::compute_static(int count, float *input0, float *output0, Pl
 
 // non rt callback
 void NeuralAmpMulti::load_nam_afile_impl() {
+    if (scene_parameter_batch) {
+        scene_model_a_pending = true;
+        return;
+    }
     if (modela && gx_system::atomic_get(ready) && rampA.mode == rampA.OFF) {
         rampA.startRampDown();
     }
@@ -1489,7 +1510,8 @@ void NeuralAmpMulti::load_nam_afile() {
         const bool has_selection = get_selected_nam_file(afilelist, load_apath,
             nam_afile_names, &selected_file, "Neural Multi Amp Modeler");
 
-        if (has_selection && modela && (current_afile.compare(selected_file) == 0)) {
+        if (has_selection && modela && (current_afile.compare(selected_file) == 0) &&
+            std::fabs(current_model_sizea - fVslider3) < 0.0001f) {
             if (rampA.mode == rampA.DOWN) rampA.mode = rampA.UP;
             return;
         }
@@ -1552,6 +1574,10 @@ void NeuralAmpMulti::load_nam_afile() {
 
 // non rt callback
 void NeuralAmpMulti::load_nam_bfile_impl() {
+    if (scene_parameter_batch) {
+        scene_model_b_pending = true;
+        return;
+    }
     if (modelb && gx_system::atomic_get(ready) && rampB.mode == rampB.OFF) {
         rampB.startRampDown();
     }
@@ -1565,7 +1591,8 @@ void NeuralAmpMulti::load_nam_bfile() {
         const bool has_selection = get_selected_nam_file(bfilelist, load_bpath,
             nam_bfile_names, &selected_file, "Neural Multi Amp Modeler");
 
-        if (has_selection && modelb && (current_bfile.compare(selected_file) == 0)) {
+        if (has_selection && modelb && (current_bfile.compare(selected_file) == 0) &&
+            std::fabs(current_model_sizeb - fVslider4) < 0.0001f) {
             if (rampB.mode == rampB.DOWN) rampB.mode = rampB.UP;
             return;
         }
@@ -1627,6 +1654,10 @@ void NeuralAmpMulti::load_nam_bfile() {
 }
 
 void NeuralAmpMulti::set_nam_asize() {
+    if (scene_parameter_batch) {
+        scene_model_a_pending = true;
+        return;
+    }
     if (!modela || !nam_model_is_slimmable(modela)) {
         return;
     }
@@ -1655,6 +1686,10 @@ void NeuralAmpMulti::set_nam_asize() {
 }
 
 void NeuralAmpMulti::set_nam_bsize() {
+    if (scene_parameter_batch) {
+        scene_model_b_pending = true;
+        return;
+    }
     if (!modelb || !nam_model_is_slimmable(modelb)) {
         return;
     }

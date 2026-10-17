@@ -67,6 +67,7 @@ class SceneSwitchingContractTests(unittest.TestCase):
 
         self.assertIn('s+".scene_resident"', loader)
         self.assertIn("p_scene_resident->setSavable(false);", loader)
+        self.assertIn("p_matrix_resident->setSavable(false);", loader)
         self.assertGreaterEqual(audio.count("!p->owner->get_rt_on_off()"), 2)
         self.assertIn("commit_rt_scene_states()", audio)
         self.assertIn("pdef->clear_state(pdef);", loader)
@@ -92,6 +93,10 @@ class SceneSwitchingContractTests(unittest.TestCase):
         removal = engine.split("if (j == ml.end())", maxsplit=1)[1].split(
             "} else {", maxsplit=1
         )[0]
+        self.assertLess(
+            removal.index("pl->clear_matrix_routing()"),
+            removal.index("pl->set_on_off(false)"),
+        )
         self.assertLess(
             removal.index("pl->set_scene_resident(false)"),
             removal.index("pl->set_on_off(false)"),

@@ -4,6 +4,7 @@
 #include <cstring>
 #include <iostream>
 #include <list>
+#include <map>
 #include <set>
 
 using std::list;
@@ -21,18 +22,48 @@ struct PluginDef {
     int (*activate_plugin)(bool, PluginDef*) = nullptr;
     void (*clear_state)(PluginDef*) = nullptr;
     unsigned int initialization_count = 0;
+    bool mono_audio = true;
+    bool stereo_audio = false;
+};
+struct BoolParameter {
+    bool value = false;
+    bool get_value() const { return value; }
 };
 struct Plugin {
     PluginDef definition;
     bool on = true;
+    bool resident = false;
+    int position = 0;
+    BoolParameter source{}, matrix_resident{};
+    BoolParameter* p_matrix_source = &source;
+    BoolParameter* p_matrix_resident = &matrix_resident;
+    int rt_scene_state = 0;
+    bool get_on_off() const { return on; }
+    bool get_scene_resident() const { return resident; }
+    bool get_processing_active() const { return on || resident; }
+    int get_matrix_lane() const { return 0; }
+    int position_weight() const { return position; }
+    int desired_rt_scene_state() const;
+#include "matrix_membership_under_test.h"
     PluginDef* get_pdef() { return &definition; }
     void set_on_off(bool value) { on = value; }
-    void commit_rt_scene_state() {}
+    void commit_rt_scene_state() { rt_scene_state = desired_rt_scene_state(); }
 };
 struct stringcomp {
     bool operator()(const char* a, const char* b) const { return std::strcmp(a, b) < 0; }
 };
 const unsigned int PGN_SNOOP = 1;
+const unsigned int PGNI_MATRIX_SPLITTER = 2;
+const unsigned int PGNI_MATRIX_COMBINER = 4;
+const unsigned int PGN_MODE_NORMAL = 8;
+class PluginList {
+public:
+    using pluginmap = std::map<std::string, Plugin*>;
+    pluginmap pmap;
+    void ordered_processing_mono_list(list<Plugin*>& mono, int mode);
+    void ordered_processing_stereo_list(list<Plugin*>& stereo, int mode);
+};
+#include "matrix_lists_under_test.h"
 
 class ProcessingChainBase {
 protected:
@@ -160,5 +191,55 @@ int main() {
     transfer.retain_transferred_plugins({&transferable});
     assert(!transfer.check_release());
     assert(transfer.commit(true, parameters));
+
+    // Both possible stereo sources and both boundaries stay allocated when
+    // switching between explicit splits, stereo splits and a serial scene.
+    Plugin chorus{{"chorus"}}, flanger{{"flanger"}};
+    Plugin splitter{{"matrix_splitter"}}, combiner{{"matrix_combiner"}};
+    PluginList pool;
+    for (Plugin* p : {&chorus, &flanger, &splitter, &combiner}) {
+        p->on = false;
+        p->resident = true;
+        p->definition.flags = PGN_MODE_NORMAL;
+        p->definition.clear_state = initialize;
+        pool.pmap[p->definition.id] = p;
+    }
+    splitter.definition.flags |= PGNI_MATRIX_SPLITTER;
+    combiner.definition.flags |= PGNI_MATRIX_COMBINER;
+    for (Plugin* p : {&chorus, &flanger}) {
+        p->definition.mono_audio = false;
+        p->definition.stereo_audio = true;
+        p->matrix_resident.value = true;
+        assert(p->matrix_source_state_changed()); // One transfer at preparation.
+    }
+    TestChain mono_pool, stereo_pool;
+    list<Plugin*> mono_modules, stereo_modules;
+    pool.ordered_processing_mono_list(mono_modules, PGN_MODE_NORMAL);
+    pool.ordered_processing_stereo_list(stereo_modules, PGN_MODE_NORMAL);
+    assert(mono_modules.size() == 4 && stereo_modules.empty());
+    assert(mono_pool.set_plugin_list(mono_modules));
+    assert(mono_pool.commit(true, parameters));
+    for (auto entry : pool.pmap) entry.second->commit_rt_scene_state();
+    for (int i = 0; i < 100; ++i) {
+        for (int scene = 0; scene < 4; ++scene) {
+            chorus.source.value = chorus.on = scene == 0;
+            flanger.source.value = flanger.on = scene == 1;
+            splitter.on = scene == 2;
+            combiner.on = scene != 3;
+            assert(!chorus.matrix_source_state_changed());
+            assert(!flanger.matrix_source_state_changed());
+            for (auto entry : pool.pmap) entry.second->commit_rt_scene_state();
+            pool.ordered_processing_mono_list(mono_modules, PGN_MODE_NORMAL);
+            pool.ordered_processing_stereo_list(stereo_modules, PGN_MODE_NORMAL);
+            assert(!mono_pool.set_plugin_list(mono_modules));
+            assert(!stereo_pool.set_plugin_list(stereo_modules));
+            assert(mono_pool.commit(true, parameters));
+            assert(stereo_pool.commit(true, parameters));
+        }
+    }
+    for (auto entry : pool.pmap) assert(entry.second->definition.initialization_count == 1);
+    assert(mono_pool.publications == 1 && stereo_pool.publications == 0);
+    chorus.matrix_resident.value = false;
+    assert(chorus.matrix_source_state_changed()); // Real transfers still drain callbacks.
     std::cout << "scene-chain-reuse-ok\n";
 }

@@ -668,6 +668,7 @@ void GxEngine::ladspaloader_update_plugins() {
 	    // A hidden song-pool residency flag otherwise keeps this plugin in the
 	    // RT chain after on_off is cleared, leaving dangling owner/PluginDef
 	    // pointers when the dynamically loaded module is deleted below.
+	    pl->clear_matrix_routing();
 	    pl->set_scene_resident(false);
 	    pl->set_on_off(false);
 	    pv.push_back(PluginChange(pl, PluginChange::remove));

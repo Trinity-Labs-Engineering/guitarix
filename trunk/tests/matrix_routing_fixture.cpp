@@ -31,6 +31,7 @@ struct Plugin {
     PluginDef* definition = nullptr;
     int position = 0;
     bool resident = false;
+    bool matrix_resident = false;
     enum { POST_WEIGHT = 2000 };
     bool get_rt_on_off() { return audible; }
     int get_rt_matrix_lane() { return lane; }
@@ -40,6 +41,7 @@ struct Plugin {
     bool get_scene_resident() { return resident; }
     int get_matrix_lane() { return lane; }
     bool get_matrix_source() { return source; }
+    bool get_matrix_resident() { return matrix_resident; }
     int get_position() { return position; }
     int get_effect_post_pre() { return 1; }
 };
@@ -121,6 +123,24 @@ int main() {
                                         {"chorus.matrix_lane", 1}}, error));
     assert(plugin_list.validate_matrix({{"matrix_splitter.position", 11},
                                        {"gain.on_off", 0}}, error));
+    // Inactive pool members may retain placement from another arrangement.
+    branch.resident = true;
+    assert(plugin_list.validate_matrix({{"matrix_splitter.on_off", 0},
+                                       {"matrix_combiner.on_off", 0},
+                                       {"gain.on_off", 0}}, error));
+    assert(!plugin_list.validate_matrix({{"matrix_splitter.on_off", 0},
+                                        {"matrix_combiner.on_off", 0}}, error));
+    PluginDef other_stereo = stereo_effect;
+    other_stereo.id = "flanger";
+    Plugin other_source{false, 0, false, &other_stereo, 4, true, true};
+    source_node.resident = source_node.matrix_resident = true;
+    plugin_list.pmap["flanger"] = &other_source;
+    assert(plugin_list.validate_matrix({}, error)); // Several prepared sources, one audible split.
+    assert(!plugin_list.validate_matrix({{"chorus.on_off", 1}}, error));
+    assert(!plugin_list.validate_matrix({{"gain.matrix_resident", 1}}, error));
+    assert(plugin_list.validate_matrix({{"matrix_splitter.on_off", 0},
+                                       {"chorus.on_off", 1}, {"chorus.matrix_source", 1},
+                                       {"gain.position", 4}}, error));
     MonoModuleChain chain;
     float input[32], output[32];
     std::fill(input, input + 32, 1.0f);
@@ -163,6 +183,18 @@ int main() {
     source.audible = false;
     chain.process(32, input, output);
     expect(output, 5.0f);
+
+    // Bypassed pool nodes inside the split are transparent, including a
+    // combiner or a stereo candidate retained for a different scene.
+    Plugin inactive{false};
+    chain.nodes.insert(chain.nodes.begin() + 2,
+                       {combine.mono_audio, &combine, &inactive});
+    chain.nodes.insert(chain.nodes.begin() + 2,
+                       {MatrixBoundary::passthrough, &stereo_effect, &inactive});
+    chain.nodes.insert(chain.nodes.begin() + 2, {twice, &double_gain, &inactive});
+    chain.process(32, input, output);
+    expect(output, 5.0f);
+    chain.nodes.erase(chain.nodes.begin() + 2, chain.nodes.begin() + 5);
 
     // Legacy malformed graphs still combine before reaching a serial amp.
     chain.nodes.erase(chain.nodes.begin() + 3);
