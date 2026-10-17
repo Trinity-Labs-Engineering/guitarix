@@ -326,6 +326,7 @@ protected:
 public:
     bool set(int val) const;
     int get_value() const { return *value; }
+    void set_snapshot_value(int val) { *value = val; }
     virtual void stdJSON_value();
     virtual bool on_off_value();
     virtual void writeJSON(gx_system::JsonWriter& jw) const;

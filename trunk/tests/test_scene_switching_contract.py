@@ -353,7 +353,7 @@ class SceneSwitchingContractTests(unittest.TestCase):
         )[1].split("void NeuralAmp::connect", maxsplit=1)[0]
         self.assertLess(
             standalone_compute.index("if (!processing_ready && !snap_pending) return;"),
-            standalone_compute.index("const bool has_model = model != nullptr;"),
+            standalone_compute.index("const bool has_model = processing_model != nullptr;"),
         )
         self.assertLess(
             standalone_compute.index("if (!processing_ready && !snap_pending) return;"),

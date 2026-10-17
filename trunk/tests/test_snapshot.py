@@ -29,7 +29,7 @@ class SnapshotTests(unittest.TestCase):
             self.skipTest("C++ compiler unavailable")
         header = (TRUNK / "src/headers/gx_pluginloader.h").read_text()
         methods = "    bool supports_snapshot_bypass()" + header.split(
-            "    bool supports_snapshot_bypass()", 1)[1].split("    int get_position()", 1)[0]
+            "    bool supports_snapshot_bypass()", 1)[1].split("    // Resolved bank controls", 1)[0]
         gate_source = (TRUNK / "src/gx_head/engine/gx_internal_plugins.cpp").read_text()
         gate = "void OutPutGate::outputgate_process(" + gate_source.split(
             "void OutPutGate::outputgate_process(", 1)[1].split("void OutPutGate::outputgate_compute", 1)[0]

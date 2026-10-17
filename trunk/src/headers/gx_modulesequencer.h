@@ -22,6 +22,7 @@
 
 #include "gx_rt_cycle_latch.h"
 #include "gx_snapshot.h"
+#include <memory>
 
 namespace gx_engine {
 
@@ -158,11 +159,15 @@ private:
     int size[2];
     int current_index;
     F *current_pointer;
+    std::atomic<F*> bank_pointer{nullptr};
     void setsize(int n);
-    inline F get_audio(Plugin *p);
+    inline F get_audio(Plugin *p) { return get_audio_static(p); }
 protected:
     F *processing_pointer; // RT
-    inline F* get_rt_chain() { return gx_system::atomic_get(processing_pointer); } // RT
+    inline F* get_rt_chain() {
+        F* bank = bank_pointer.load(std::memory_order_acquire);
+        return bank ? bank : gx_system::atomic_get(processing_pointer);
+    } // RT
 public:
     ThreadSafeChainPointer();
     ~ThreadSafeChainPointer();
@@ -173,6 +178,23 @@ public:
 	}
     }
     bool commit(bool clear, ParamMap& pmap);
+    const list<Plugin*>& resident_modules() const { return modules; }
+    bool has_bank() const { return bank_pointer.load() != nullptr; }
+    bool owns_bank(const F* image) const { return bank_pointer.load() == image; }
+    void force_bank_reconcile() {
+        if (has_bank()) { pending_module_list = true; next_commit_needs_ramp = true; }
+    }
+    void select_bank(F* image) { bank_pointer.store(image, std::memory_order_release); }
+    static std::vector<F> compile_bank(const list<Plugin*>& ordered) {
+        std::vector<F> image;
+        image.reserve(ordered.size() + 1);
+        for (auto* plugin : ordered) image.push_back(get_audio_static(plugin));
+        image.emplace_back();
+        return image;
+    }
+private:
+    static F get_audio_static(Plugin* plugin);
+public:
 };
 
 typedef void (*monochainorder)(int count, float *output, float *output1,
@@ -203,14 +225,14 @@ struct stereochain_data {
 inline void matrix_stereo_placeholder(int, float*, float*, PluginDef*) {}
 
 template <>
-inline monochain_data ThreadSafeChainPointer<monochain_data>::get_audio(Plugin *p)
+inline monochain_data ThreadSafeChainPointer<monochain_data>::get_audio_static(Plugin *p)
 {
     PluginDef *pd = p->get_pdef();
     return monochain_data(pd->mono_audio ? pd->mono_audio : matrix_stereo_placeholder, pd, p);
 }
 
 template <>
-inline stereochain_data ThreadSafeChainPointer<stereochain_data>::get_audio(Plugin *p)
+inline stereochain_data ThreadSafeChainPointer<stereochain_data>::get_audio_static(Plugin *p)
 {
     PluginDef *pd = p->get_pdef();
     return stereochain_data(pd->stereo_audio, pd, p);
@@ -286,6 +308,7 @@ bool ThreadSafeChainPointer<F>::commit(bool clear, ParamMap& pmap) {
     to_initialize.swap(failed_initializations);
     current_pointer[active_counter].func = 0;
     gx_system::atomic_set(&processing_pointer, current_pointer);
+    bank_pointer.store(nullptr, std::memory_order_release);
     pending_module_list = !ok;
     set_latch();
     current_index = (current_index+1) % 2;
@@ -339,6 +362,9 @@ public:
     enum DirtyClass { DIRTY_CONTROL = 1, DIRTY_RT_BYPASS = 2, DIRTY_TOPOLOGY = 4, DIRTY_ASSET = 8 };
     unsigned int dirty_classes = 0;
     SnapshotScheduler snapshots;
+    // Outlive RPC service teardown and the derived processing chains. Replaced
+    // only after both full audio callbacks have retired an outgoing image.
+    std::vector<std::shared_ptr<void>> matrix_bank_owners;
     void mark_asset_changed() { dirty_classes |= DIRTY_ASSET; snapshots.invalidate(); }
     virtual void set_bypass_changed(Plugin* plugin) { (void)plugin; set_rack_changed(); }
     ParallelThread pro;

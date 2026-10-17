@@ -125,6 +125,20 @@ public:
         const int old = gx_system::atomic_get(plugin->rt_scene_state);
         gx_system::atomic_set(&plugin->rt_scene_state, (old & ~1) | (value != 0 ? 1 : 0));
     }
+    // Resolved bank controls only: no observers or lifecycle calls on JACK.
+    static double read_matrix_state(void* target) {
+        return gx_system::atomic_get(static_cast<Plugin*>(target)->rt_scene_state);
+    }
+    static void apply_matrix_state(void* target, double value) {
+        Plugin* p = static_cast<Plugin*>(target);
+        const int state = static_cast<int>(value);
+        p->p_on_off->set_snapshot_value(state & 1);
+        if (p->p_scene_resident) p->p_scene_resident->set_snapshot_value(state & 2);
+        if (p->p_matrix_lane) p->p_matrix_lane->set_snapshot_value((state >> 2) & 3);
+        if (p->p_matrix_source) p->p_matrix_source->set_snapshot_value(state & 16);
+        if (p->p_matrix_resident) p->p_matrix_resident->set_snapshot_value(state & 32);
+        gx_system::atomic_set(&p->rt_scene_state, state);
+    }
     int get_position() const { return p_position->get_value(); }
     int get_effect_post_pre() const { return p_effect_post_pre->get_value(); }
     void set_box_visible(bool v) const { if (p_box_visible) p_box_visible->set(v); }

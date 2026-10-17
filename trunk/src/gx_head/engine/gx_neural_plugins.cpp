@@ -578,6 +578,65 @@ bool NeuralAmp::prepare_matrix_model(const Glib::ustring& filename, float size) 
     return true;
 }
 
+bool NeuralAmp::compile_matrix_model(const Glib::ustring& filename, float size, MatrixModel& result) {
+    // Borrow only prewarmed cache entries with the existing resampler geometry.
+    // No second wrapper, resampler, worker, or audio buffer is constructed.
+    if (filename.empty() && !model) {
+        result = {this, nullptr, filename, size, 0, 0, 0};
+        return true;
+    }
+    nam::DSP* selected = model;
+    int rate = mSampleRate;
+    if (filename != current_file || std::fabs(size - current_model_size) > 0.0001f) {
+        auto entry = std::find_if(model_cache.begin(), model_cache.end(), [&](const CachedNamModel& entry) {
+            return entry.filename == filename && std::fabs(entry.size - size) < 0.0001f && entry.host_sample_rate == fSampleRate;
+        });
+        if (entry == model_cache.end()) return false;
+        selected = entry->model.get(); rate = entry->sample_rate;
+    }
+    if (selected && (!gx_system::atomic_get(ready) || rate != mSampleRate)) return false;
+    result = {this, selected, filename, size, 0, 0, 0};
+    if (selected) update_nam_level_calibration(selected, &result.input_trim, &result.output_trim, &result.loudness,
+                                              "Neural Amp Modeler", filename, "prepared bank");
+    return true;
+}
+
+void NeuralAmp::apply_matrix_model(void* target, double) {
+    const auto* selection = static_cast<const MatrixModel*>(target);
+    selection->owner->matrix_model.store(selection, std::memory_order_release);
+    selection->owner->preset_scene_smoother_targets();
+}
+
+void NeuralAmp::materialize_matrix_model() {
+    const auto* selection = matrix_model.load(std::memory_order_acquire);
+    if (!selection) return;
+    // Allocate metadata before changing ownership. A failed string allocation
+    // must leave both the audible model and its cache owner intact.
+    Glib::ustring selected_file(selection->filename), selected_load_file(selection->filename);
+    Glib::ustring outgoing_file(current_file);
+    if (selection->model != model) {
+        auto entry = std::find_if(model_cache.begin(), model_cache.end(), [&](const CachedNamModel& entry) {
+            return entry.model.get() == selection->model;
+        });
+        if (entry == model_cache.end()) throw std::logic_error("Active matrix NAM lost its cache owner");
+        // Only ownership/metadata move. The audible model and resampler keep
+        // processing, and the outgoing DSP remains available for the next bank.
+        nam::DSP* next = entry->model.release();
+        entry->model.reset(model);
+        entry->filename.swap(outgoing_file);
+        entry->size = current_model_size;
+        model = next;
+    }
+    current_file.swap(selected_file);
+    load_file.swap(selected_load_file);
+    current_model_size = fVslider2 = selection->size;
+    nam_input_trim_db = selection->input_trim;
+    nam_output_trim_db = selection->output_trim;
+    loudness = selection->loudness;
+    matrix_model.store(nullptr, std::memory_order_release);
+    publish_runtime_status(model, current_file);
+}
+
 void NeuralAmp::select_matrix_model(const Glib::ustring& filename, float size) {
     if (!matrix_model_ready(filename, size)) throw std::runtime_error("Prepared NAM asset was evicted");
     if (filename.empty() && !model) return;
@@ -628,10 +687,11 @@ inline void NeuralAmp::clear_state_f()
 }
 
 void NeuralAmp::preset_scene_smoother_targets() {
+    const auto* selection = matrix_model.load(std::memory_order_acquire);
     const double input_slow = 0.0010000000000000009 *
-        std::pow(1e+01, 0.05 * double(fVslider0 + nam_input_trim_db));
+        std::pow(1e+01, 0.05 * double(fVslider0 + (selection ? selection->input_trim : nam_input_trim_db)));
     const double output_slow = 0.0010000000000000009 *
-        std::pow(1e+01, 0.05 * double(fVslider1 + nam_output_trim_db));
+        std::pow(1e+01, 0.05 * double(fVslider1 + (selection ? selection->output_trim : nam_output_trim_db)));
     fRec0[0] = fRec0[1] = 1000.0 * input_slow;
     fRec1[0] = fRec1[1] = 1000.0 * output_slow;
 }
@@ -667,12 +727,14 @@ void always_inline NeuralAmp::compute(int count, float *input0, float *output0)
     // callback has completed, later callbacks must not read the model pointer
     // or smoother state until the control thread publishes the replacement.
     if (!processing_ready && !snap_pending) return;
-    const bool has_model = model != nullptr;
+    const auto* selection = matrix_model.load(std::memory_order_acquire);
+    nam::DSP* processing_model = selection ? selection->model : model;
+    const bool has_model = processing_model != nullptr;
     if (!has_model && !snap_pending) return;
     double fSlow0 = 0.0010000000000000009 *
-        std::pow(1e+01, 0.05 * double(fVslider0 + nam_input_trim_db));
+        std::pow(1e+01, 0.05 * double(fVslider0 + (selection ? selection->input_trim : nam_input_trim_db)));
     double fSlow1 = 0.0010000000000000009 *
-        std::pow(1e+01, 0.05 * double(fVslider1 + nam_output_trim_db));
+        std::pow(1e+01, 0.05 * double(fVslider1 + (selection ? selection->output_trim : nam_output_trim_db)));
     if (snap_pending) {
         preset_scene_smoother_targets();
         gx_system::atomic_set(&scene_smoother_snap_pending, 0);
@@ -687,7 +749,7 @@ void always_inline NeuralAmp::compute(int count, float *input0, float *output0)
         output0[i0] = float(double(output0[i0]) * fRec0[0]);
         fRec0[1] = fRec0[0];
     }
-    if (model && gx_system::atomic_get(ready)) {
+    if (processing_model && gx_system::atomic_get(ready)) {
         if (need_resample) {
             int ReCount = count;
             if (need_resample == 1) {
@@ -708,7 +770,7 @@ void always_inline NeuralAmp::compute(int count, float *input0, float *output0)
                     memcpy(buf, output0, ReCount * sizeof(float));
                 }
 
-                process_nam_mono(model, buf, buf, ReCount);
+                process_nam_mono(processing_model, buf, buf, ReCount);
 
                 if (need_resample == 1) {
                     smp.down(buf, output0);
@@ -717,7 +779,7 @@ void always_inline NeuralAmp::compute(int count, float *input0, float *output0)
                 }
             }
         } else {
-            process_nam_mono(model, output0, output0, count);
+            process_nam_mono(processing_model, output0, output0, count);
         }
     }
     for (int i0 = 0; i0 < count; i0 = i0 + 1) {
@@ -744,6 +806,7 @@ void NeuralAmp::load_nam_file_impl() {
 
 // non rt callback
 void NeuralAmp::load_nam_file() {
+    materialize_matrix_model();
     if (is_inited) {
         Glib::ustring selected_file;
         const bool has_selection = matrix_selection ?
@@ -814,6 +877,7 @@ void NeuralAmp::load_nam_file() {
 }
 
 void NeuralAmp::set_nam_size() {
+    materialize_matrix_model();
     if (!model || !nam_model_is_slimmable(model)) {
         return;
     }

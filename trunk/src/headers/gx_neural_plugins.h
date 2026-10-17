@@ -32,6 +32,8 @@
 #include "RTNeural.h"
 #pragma GCC diagnostic pop
 
+#include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <mutex>
 #include <memory>
@@ -87,7 +89,15 @@ public:
  */
 
 class NeuralAmp: public PluginDef {
+public:
+    struct MatrixModel {
+        NeuralAmp* owner;
+        nam::DSP* model;
+        Glib::ustring filename;
+        float size, input_trim, output_trim, loudness;
+    };
 private:
+    std::atomic<const MatrixModel*> matrix_model{nullptr};
     struct CachedNamModel {
         Glib::ustring filename;
         float size;
@@ -169,7 +179,10 @@ public:
     bool prepare_matrix_model(const Glib::ustring& filename, float size);
     bool matrix_model_ready(const Glib::ustring& filename, float size) const;
     void select_matrix_model(const Glib::ustring& filename, float size);
-    void release_matrix_models() { model_cache.clear(); }
+    void release_matrix_models() { materialize_matrix_model(); model_cache.clear(); }
+    bool compile_matrix_model(const Glib::ustring& filename, float size, MatrixModel& result);
+    static void apply_matrix_model(void* target, double);
+    void materialize_matrix_model();
     void begin_scene_parameter_batch(bool externally_muted);
     bool finish_scene_parameter_batch();
     // Temporarily make the wrapper transparent, then (after the caller has
@@ -316,6 +329,11 @@ public:
     ~NeuralAmpMulti();
     std::vector<PreparedNamModelDescriptor> matrix_model_inventory() const;
     bool matrix_model_ready(char slot, const Glib::ustring& filename, float size) const;
+    bool matrix_model_active(char slot, const Glib::ustring& filename, float size) const {
+        const auto* model = slot == 'A' ? modela : modelb;
+        return model ? (slot == 'A' ? current_afile : current_bfile) == filename &&
+            std::fabs((slot == 'A' ? current_model_sizea : current_model_sizeb) - size) < 0.0001f : filename.empty();
+    }
     void select_matrix_model(char slot, const Glib::ustring& filename, float size);
     void release_matrix_models() { model_cache.clear(); prepared_models.clear(); }
     void begin_scene_parameter_batch(bool externally_muted);

@@ -74,6 +74,21 @@ struct PreparedMatrixScene {
     unsigned int nam_count = 0, ir_count = 0, smoother_targets = 0;
 };
 
+// Exactly two executable images; recipe/asset caches are not running engines.
+// Both images borrow the resident processors. Incompatible lifecycles and
+// callback ownership changes retain the guarded scene path.
+struct PreparedMatrixBank {
+    std::shared_ptr<PreparedMatrixScene> recipe;
+    std::vector<gx_engine::monochain_data> mono;
+    std::vector<gx_engine::stereochain_data> stereo;
+    gx_engine::PreparedSnapshot cutover;
+    std::vector<gx_engine::NeuralAmp::MatrixModel> nam;
+    gx_engine::MonoModuleChain* mono_chain;
+    gx_engine::StereoModuleChain* stereo_chain;
+    bool acknowledged = false;
+    uint32_t frame = 0;
+};
+
 class CmdConnection: public sigc::trackable {
 public:
     struct methodnames {
@@ -115,6 +130,7 @@ private:
     void notify(gx_system::JsonStringWriter& jw, const methodnames *mn, JsonArray& params);
     void apply_parameter_set(JsonArray& params);
     void compile_matrix(PreparedMatrixScene& matrix);
+    std::shared_ptr<PreparedMatrixBank> compile_matrix_bank(std::shared_ptr<PreparedMatrixScene> matrix);
     bool matrix_assets_ready(const PreparedMatrixScene& matrix);
     bool request(gx_system::JsonStringParser& jp, gx_system::JsonStringWriter& jw, bool batch_start);
     void write_error(gx_system::JsonWriter& jw, int code, const char *message);
@@ -167,6 +183,11 @@ private:
     unsigned int matrix_generation = 1, matrix_serial = 0;
     bool applying_matrix = false;
     std::string active_matrix;
+    std::shared_ptr<PreparedMatrixBank> current_bank, next_bank;
+    bool matrix_cutover_pending() const {
+        return next_bank && (next_bank->mono_chain->owns_bank(next_bank->mono.data()) ||
+                             next_bank->stereo_chain->owns_bank(next_bank->stereo.data()));
+    }
     std::map<std::string, std::shared_ptr<PreparedMatrixScene>> matrices;
     void invalidate_matrices() {
         if (!applying_matrix) { ++matrix_generation; active_matrix.clear(); }

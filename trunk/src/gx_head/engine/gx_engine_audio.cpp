@@ -1038,7 +1038,11 @@ bool ModuleSequencer::prepare_module_lists() {
         mono_chain.print();
         stereo_chain.print();
     }
-    return ret_mono || ret_stereo;
+    // A bank has its own order even when the legacy module membership did
+    // not change. Reconcile it before an ordinary topology transaction.
+    mono_chain.force_bank_reconcile();
+    stereo_chain.force_bank_reconcile();
+    return ret_mono || ret_stereo || mono_chain.has_bank() || stereo_chain.has_bank();
 }
 
 bool ModuleSequencer::commit_module_lists(bool externally_muted) {

@@ -58,7 +58,7 @@ class SceneChainReuseTests(unittest.TestCase):
             executable = path / "scene-chain-reuse"
             compiled = subprocess.run(
                 [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                 f"-I{path}", str(FIXTURE), "-o", str(executable)],
+                 f"-I{path}", f"-I{TRUNK / 'src/headers'}", str(FIXTURE), "-o", str(executable)],
                 capture_output=True, text=True,
             )
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
