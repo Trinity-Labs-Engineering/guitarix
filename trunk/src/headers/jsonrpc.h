@@ -77,15 +77,21 @@ struct PreparedMatrixScene {
 // Exactly two executable images; recipe/asset caches are not running engines.
 // Both images borrow the resident processors. Incompatible lifecycles and
 // callback ownership changes retain the guarded scene path.
+struct PreparedMatrixCutover {
+    std::shared_ptr<PreparedMatrixScene> recipe;
+    gx_engine::PreparedSnapshot snapshot;
+    std::vector<gx_engine::NeuralAmp::MatrixModel> nam;
+};
+
 struct PreparedMatrixBank {
     std::shared_ptr<PreparedMatrixScene> recipe;
     std::vector<gx_engine::monochain_data> mono;
     std::vector<gx_engine::stereochain_data> stereo;
-    gx_engine::PreparedSnapshot cutover;
-    std::vector<gx_engine::NeuralAmp::MatrixModel> nam;
+    std::map<std::string, std::shared_ptr<PreparedMatrixCutover>> cutovers;
     gx_engine::MonoModuleChain* mono_chain;
     gx_engine::StereoModuleChain* stereo_chain;
     bool acknowledged = false;
+    std::string acknowledged_handle;
     uint32_t frame = 0;
 };
 
@@ -130,7 +136,8 @@ private:
     void notify(gx_system::JsonStringWriter& jw, const methodnames *mn, JsonArray& params);
     void apply_parameter_set(JsonArray& params);
     void compile_matrix(PreparedMatrixScene& matrix);
-    std::shared_ptr<PreparedMatrixBank> compile_matrix_bank(std::shared_ptr<PreparedMatrixScene> matrix);
+    std::shared_ptr<PreparedMatrixBank> compile_matrix_bank(std::shared_ptr<PreparedMatrixScene> matrix,
+        std::shared_ptr<PreparedMatrixBank> bank = nullptr);
     bool matrix_assets_ready(const PreparedMatrixScene& matrix);
     bool request(gx_system::JsonStringParser& jp, gx_system::JsonStringWriter& jw, bool batch_start);
     void write_error(gx_system::JsonWriter& jw, int code, const char *message);

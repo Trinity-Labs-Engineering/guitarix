@@ -27,14 +27,15 @@ using gx_engine::GxConvolver;
 namespace boost { struct mutex { struct scoped_lock { explicit scoped_lock(mutex&) {} }; }; }
 struct GxJConvSettings {
     string file;
-    bool operator==(const GxJConvSettings& other) const { return file == other.file; }
+    Gainline envelope = [] { Gainline g; g.push_back({0, 0}); g.push_back({-1, 0}); return g; }();
+    bool operator==(const GxJConvSettings& other) const { return file == other.file && envelope == other.envelope; }
     bool getGainCor() const { return false; }
     float getGain() const { return 1; }
     string getFullIRPath() const { return file; }
     unsigned getDelay() const { return 0; }
     unsigned getOffset() const { return 0; }
     unsigned getLength() const { return 0; }
-    Gainline getGainline() const { return {}; }
+    Gainline getGainline() const { return envelope; }
 };
 struct Engine {
     unsigned rate = 48000, block = 32;
@@ -60,6 +61,11 @@ static size_t thread_count() {
 }
 int main(int argc, char** argv) {
     assert(argc == 2);
+    for (float gain : {0.f, -12.f, 6.f}) {
+        gain_points a{0, gain}, b{0, gain}, different{0, gain + 1};
+        assert(a == b);
+        assert(a != different);
+    }
     const string path = string(argv[1]) + "/impulse.wav";
     const auto baseline_threads = thread_count();
     for (unsigned block : {32u, 64u, 128u}) for (int rate : {44100, 48000}) for (int channels : {1, 2}) {
@@ -78,6 +84,7 @@ int main(int argc, char** argv) {
         const auto* untouched = adapter.conv.get();
         for (int i = 0; i < 10; ++i) {
             assert(adapter.prepare_matrix_ir({path}));
+            assert(adapter.matrix_ir_ready({path}));
             assert(adapter.conv.get() == untouched);
             assert(adapter.prepared_irs.size() == 1);
             assert(adapter.prepared_irs[0].processor->state() == Convproc::ST_STOP);

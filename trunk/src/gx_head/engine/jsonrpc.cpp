@@ -634,9 +634,53 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         // recovery. Entry observation is not a sufficient retirement barrier.
         if (!engine.matrix_bank_owners.empty() && !engine.wait_scene_control_cycle(true, true).finished())
             throw RpcError(-32000, "Outgoing bank callback has not drained");
-        std::shared_ptr<PreparedMatrixBank> next;
-        try { next = compile_matrix_bank(found->second); }
-        catch (const RpcError& error) {
+        auto active = serv.matrices.find(serv.active_matrix);
+        if (active == serv.matrices.end()) throw RpcError(-32003, "Current recipe is stale");
+        if (active->second->matrix_id == found->second->matrix_id) {
+            jw.begin_object();
+            jw.write_kv("handle", found->second->handle);
+            jw.write_bool_kv("pointerSwitchReady", false);
+            jw.write_bool_kv("requiresGuard", false);
+            jw.write_bool_kv("sameMatrix", true);
+            jw.end_object();
+            break;
+        }
+        const auto reusable = [&](const std::shared_ptr<PreparedMatrixBank>& bank,
+                                  const std::shared_ptr<PreparedMatrixScene>& recipe) {
+            return bank && bank->recipe->generation == serv.matrix_generation &&
+                bank->recipe->runtime_epoch == engine.snapshots.runtime_epoch() &&
+                bank->recipe->matrix_id == recipe->matrix_id &&
+                bank->recipe->structure == recipe->structure &&
+                !bank->cutovers.empty() &&
+                bank->cutovers.begin()->second->snapshot.generation == engine.snapshots.generation();
+        };
+        const bool reused = reusable(serv.next_bank, found->second);
+        try {
+            // An editor change can invalidate controls while the old arrays
+            // are still audible. A callback barrier alone does not retire a
+            // selected image: future callbacks will continue to use it.
+            if (serv.current_bank && !reusable(serv.current_bank, active->second) &&
+                (engine.mono_chain.owns_bank(serv.current_bank->mono.data()) ||
+                 engine.stereo_chain.owns_bank(serv.current_bank->stereo.data())))
+                throw RpcError(-32004, "Current bank changed; guarded reconciliation required");
+            // Adopt the initial guarded Current as an executable image too.
+            // Otherwise the first return from B to A has nothing to reuse.
+            auto current = reusable(serv.current_bank, active->second) ? serv.current_bank : compile_matrix_bank(active->second);
+            auto next = reused ? serv.next_bank : compile_matrix_bank(found->second);
+            // Compile every song snapshot for these two graphs off-path. Each
+            // snapshot borrows the SAME two arrays; no extra DSP is created.
+            for (const auto& item : serv.matrices) {
+                auto recipe = item.second;
+                auto bank = recipe->matrix_id == current->recipe->matrix_id ? current :
+                    recipe->matrix_id == next->recipe->matrix_id ? next : nullptr;
+                if (!bank || recipe->generation != serv.matrix_generation || bank->cutovers.count(item.first)) continue;
+                try { compile_matrix_bank(recipe, bank); }
+                catch (const RpcError& error) { if (error.code != -32004) throw; }
+            }
+            if (!next->cutovers.count(found->first)) compile_matrix_bank(found->second, next);
+            serv.current_bank = std::move(current);
+            serv.next_bank = std::move(next);
+        } catch (const RpcError& error) {
             if (error.code != -32004) throw;
             jw.begin_object();
             jw.write_kv("handle", found->second->handle);
@@ -646,7 +690,6 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             jw.end_object();
             break;
         }
-        serv.next_bank = std::move(next);
         engine.matrix_bank_owners = {serv.current_bank, serv.next_bank};
         jw.begin_object();
         jw.write_kv("handle", found->second->handle);
@@ -654,6 +697,13 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_kv("poolGeneration", serv.matrix_generation);
         jw.write_bool_kv("pointerSwitchReady", true);
         jw.write_bool_kv("requiresGuard", false);
+        jw.write_bool_kv("bankReused", reused);
+        jw.write_kv("currentMatrixId", serv.current_bank->recipe->matrix_id);
+        jw.write_kv("nextMatrixId", serv.next_bank->recipe->matrix_id);
+        jw.write_key("readyHandles"); jw.begin_array();
+        for (const auto& bank : {serv.current_bank, serv.next_bank})
+            for (const auto& item : bank->cutovers) jw.write(item.first);
+        jw.end_array();
         jw.end_object();
     }
 
@@ -664,19 +714,21 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         const double frame = params[1]->getFloat();
         if (!std::isfinite(frame) || frame < 0 || frame > 4294967295.0 || frame != std::floor(frame))
             throw RpcError(-32602, "Invalid matrix cutover frame");
-        if (!next || !next->acknowledged || next->recipe->handle != params[0]->getString() ||
+        if (!next || !next->acknowledged || next->acknowledged_handle != params[0]->getString() ||
             next->frame != static_cast<uint32_t>(frame) ||
             next->recipe->generation != serv.matrix_generation ||
-            next->cutover.generation != engine.snapshots.generation())
+            next->cutovers.at(next->acknowledged_handle)->snapshot.generation != engine.snapshots.generation())
             throw RpcError(-32003, "Matrix cutover has not been acknowledged");
         // Houston sends this only after BOTH processes acknowledge the same
         // JACK frame. No asset loading, module commit or DSP reset occurs here.
         engine.neural_amp.materialize_matrix_model();
         engine.neural_amp_second.materialize_matrix_model();
         engine.sneural_amp.materialize_matrix_model();
-        serv.active_matrix = next->recipe->handle;
+        serv.active_matrix = next->acknowledged_handle;
         serv.current_bank.swap(serv.next_bank);
-        engine.snapshots.invalidate();
+        if (serv.next_bank) serv.next_bank->acknowledged = false;
+        // Promotion changes the selected matrix, not the runtime epoch. Keep
+        // both banks and their snapshots reusable for A/B song transitions.
         jw.begin_object();
         jw.write_bool_kv("promoted", true);
         jw.write_kv("handle", serv.active_matrix);
@@ -855,13 +907,21 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         if (!bank_activation && serv.matrix_cutover_pending())
             throw RpcError(-32000, "Matrix cutover awaits coordinated promotion");
         auto bank = bank_activation ? serv.next_bank : nullptr;
-        auto* snapshot = bank ? &bank->cutover : (bank_activation ? nullptr : snapshots.find(params[0]->getString()));
-        if (bank && (bank->recipe->handle != params[0]->getString() || bank->acknowledged ||
+        auto cutover = bank && bank->cutovers.count(params[0]->getString()) ? bank->cutovers.at(params[0]->getString()) : nullptr;
+        auto* snapshot = cutover ? &cutover->snapshot : (bank_activation ? nullptr : snapshots.find(params[0]->getString()));
+        if (bank && (!cutover || bank->acknowledged ||
             bank->recipe->runtime_epoch != snapshots.runtime_epoch()))
             throw RpcError(-32003, "Next matrix is stale or already awaiting promotion");
         if (snapshot && !snapshot->matrix_handle.empty() &&
             (snapshot->pool_generation != serv.matrix_generation || !serv.matrices.count(snapshot->matrix_handle)))
             throw RpcError(-32000, "Snapshot pool generation is stale");
+        if (!bank_activation && snapshot && !snapshot->matrix_handle.empty()) {
+            auto active = serv.matrices.find(serv.active_matrix);
+            auto owner = serv.matrices.find(snapshot->matrix_handle);
+            if (active == serv.matrices.end() || owner == serv.matrices.end() ||
+                active->second->matrix_id != owner->second->matrix_id)
+                throw RpcError(-32003, "Snapshot does not belong to Current matrix");
+        }
         const double frame = params[1]->getFloat();
         const double transition_ms = params.size() == 3 ? params[2]->getFloat() : 4.0;
         if (!std::isfinite(frame) || frame < 0 || frame > 4294967295.0 || frame != std::floor(frame) ||
@@ -891,7 +951,10 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         while (!snapshots.quiescent() && std::chrono::steady_clock::now() < drain_deadline)
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         if (!finished) throw RpcError(-32000, "Scheduled snapshot did not complete on both audio callbacks");
-        if (bank) { bank->acknowledged = true; bank->frame = static_cast<uint32_t>(frame); }
+        if (bank) {
+            bank->acknowledged = true; bank->acknowledged_handle = params[0]->getString();
+            bank->frame = static_cast<uint32_t>(frame);
+        }
         jw.begin_object();
         jw.write_kv("generation", snapshot->generation);
         jw.write_kv("scheduledFrame", static_cast<unsigned int>(frame));
@@ -914,6 +977,11 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_bool_kv("structureChanged", bank_activation);
         jw.write_bool_kv("processingTopologyChanged", bank_activation);
         jw.write_bool_kv("matrixBankActivated", bank_activation);
+        if (bank) {
+            jw.write_kv("matrixHandle", snapshot->matrix_handle);
+            jw.write_kv("matrixId", bank->recipe->matrix_id);
+            jw.write_kv("bankImageHandle", bank->recipe->handle);
+        }
         jw.write_bool_kv("rtStateChanged", snapshots.rt_state_changed());
         jw.write_kv("appliedControlCount", snapshots.applied_control_count());
         jw.end_object();
@@ -2115,11 +2183,15 @@ bool CmdConnection::matrix_assets_ready(const PreparedMatrixScene& matrix) {
     return true;
 }
 
-std::shared_ptr<PreparedMatrixBank> CmdConnection::compile_matrix_bank(std::shared_ptr<PreparedMatrixScene> matrix) {
+std::shared_ptr<PreparedMatrixBank> CmdConnection::compile_matrix_bank(std::shared_ptr<PreparedMatrixScene> matrix,
+        std::shared_ptr<PreparedMatrixBank> bank) {
     auto& engine = serv.jack.get_engine();
     auto& parameters = serv.settings.get_param();
-    auto bank = std::make_shared<PreparedMatrixBank>();
-    bank->recipe = matrix;
+    const bool compile_image = !bank;
+    if (!bank) bank = std::make_shared<PreparedMatrixBank>();
+    if (compile_image) bank->recipe = matrix;
+    auto cutover = std::make_shared<PreparedMatrixCutover>();
+    cutover->recipe = matrix;
     bank->mono_chain = &engine.mono_chain;
     bank->stereo_chain = &engine.stereo_chain;
     std::map<std::string, double> values;
@@ -2196,7 +2268,7 @@ std::shared_ptr<PreparedMatrixBank> CmdConnection::compile_matrix_bank(std::shar
             guards.push_back(guard);
         }
     }
-    bank->nam.reserve(3);
+    cutover->nam.reserve(3);
     for (const auto& asset : matrix->nam) {
         if (asset.slot == "A" || asset.slot == "B") {
             // The singular amp remains shared; recipe/profile replacement is
@@ -2208,10 +2280,10 @@ std::shared_ptr<PreparedMatrixBank> CmdConnection::compile_matrix_bank(std::shar
             gx_engine::NeuralAmp::MatrixModel selection;
             if (!nam.compile_matrix_model(asset.path, asset.size, selection))
                 throw RpcError(-32004, "NAM cache/resampler change requires guarded activation: " + asset.slot);
-            bank->nam.push_back(std::move(selection));
+            cutover->nam.push_back(std::move(selection));
         }
     }
-    for (auto& selection : bank->nam)
+    for (auto& selection : cutover->nam)
         controls.push_back({&selection, &gx_engine::NeuralAmp::apply_matrix_model, 0, 0});
     const auto order = [&get](gx_engine::Plugin* a, gx_engine::Plugin* b) {
         const auto weight = [&get](gx_engine::Plugin* p) { return get(p, ".position", p->get_position()) + (get(p, ".pp", p->get_effect_post_pre()) ? 0 : gx_engine::Plugin::POST_WEIGHT); };
@@ -2220,11 +2292,14 @@ std::shared_ptr<PreparedMatrixBank> CmdConnection::compile_matrix_bank(std::shar
         return rank(a) < rank(b);
     };
     mono.sort(order); stereo.sort(order);
-    bank->mono = gx_engine::MonoModuleChain::compile_bank(mono);
-    bank->stereo = gx_engine::StereoModuleChain::compile_bank(stereo);
+    if (compile_image) {
+        bank->mono = gx_engine::MonoModuleChain::compile_bank(mono);
+        bank->stereo = gx_engine::StereoModuleChain::compile_bank(stereo);
+    }
     controls.push_back({bank.get(), [](void* p, double) { auto* bank = static_cast<PreparedMatrixBank*>(p); bank->mono_chain->select_bank(bank->mono.data()); }, 0, 0});
     controls.push_back({bank.get(), [](void* p, double) { auto* bank = static_cast<PreparedMatrixBank*>(p); bank->stereo_chain->select_bank(bank->stereo.data()); }, 0, 1});
-    bank->cutover = {matrix->handle, engine.snapshots.generation(), std::move(controls), true, std::move(guards), matrix->handle, serv.matrix_generation};
+    cutover->snapshot = {matrix->handle, engine.snapshots.generation(), std::move(controls), true, std::move(guards), matrix->handle, serv.matrix_generation};
+    bank->cutovers[matrix->handle] = std::move(cutover);
     return bank;
 }
 
@@ -2366,8 +2441,10 @@ void CmdConnection::compile_matrix(PreparedMatrixScene& matrix) {
         if (!engine.mneural_amp.prepare_song_models(std::to_string(serv.matrix_generation), dual).rapid_switch_ready)
             throw RpcError(-32000, "Dual NAM matrix preparation failed");
         for (const auto& ir : matrix.ir) if (!ir.first->prepare_matrix_ir(ir.second)) throw RpcError(-32000, "IR matrix preparation failed");
-        if (preparation_epoch != engine.snapshots.runtime_epoch() || !matrix_assets_ready(matrix))
+        if (preparation_epoch != engine.snapshots.runtime_epoch())
             throw RpcError(-32000, "Audio runtime changed during matrix preparation");
+        if (!matrix_assets_ready(matrix))
+            throw RpcError(-32000, "Prepared NAM/IR asset failed cache readiness validation");
     } catch (...) {
         serv.invalidate_matrices();
         serv.release_matrix_assets();
