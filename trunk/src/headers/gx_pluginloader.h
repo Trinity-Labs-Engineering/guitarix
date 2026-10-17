@@ -51,6 +51,9 @@ enum {			       // additional flags for PluginDef (used internally)
     PGNI_RESIDENT_TRACK_BYPASS = 0x400000,
     PGNI_MATRIX_SPLITTER = 0x800000,
     PGNI_MATRIX_COMBINER = 0x1000000,
+    // Snapshot bypass normally preserves resident DSP. Plugins which require
+    // lifecycle/reset work must explicitly opt out and use set_scene instead.
+    PGNI_SNAPSHOT_RESET_REQUIRED = 0x2000000,
 };
 
 class Plugin {
@@ -71,7 +74,7 @@ private:
     // Lock-free snapshot of the on/off and scene-resident controls. Parameter
     // callbacks only schedule a chain transaction; the snapshot is published
     // while the old chain is ramped down (or externally muted).
-    int rt_scene_state;
+    mutable int rt_scene_state;
     int pos_tmp;
     void set_midi_on_off_blocked(bool v);
     int desired_rt_scene_state() const;
@@ -91,7 +94,7 @@ public:
     bool get_processing_active() const {
         return get_on_off() || get_scene_resident();
     }
-    bool get_rt_on_off() {
+    bool get_rt_on_off() const {
         return (gx_system::atomic_get(rt_scene_state) & 1) != 0;
     }
     int get_matrix_lane() const { return p_matrix_lane ? p_matrix_lane->get_value() : 0; }
@@ -110,6 +113,18 @@ public:
     // Returns false if a resident plugin could not be reactivated. In that
     // case its normal on/off parameter and RT snapshot remain bypassed.
     bool commit_rt_scene_state();
+    bool supports_snapshot_bypass() const {
+        return get_scene_resident() && !get_matrix_source() &&
+            !(pdef->flags & (PGNI_MATRIX_SPLITTER | PGNI_MATRIX_COMBINER |
+                            PGNI_SNAPSHOT_RESET_REQUIRED)) &&
+            (pdef->mono_audio || pdef->stereo_audio);
+    }
+    static void apply_snapshot_bypass(void* target, double value) {
+        Plugin* plugin = static_cast<Plugin*>(target);
+        plugin->p_on_off->set_snapshot_value(value != 0);
+        const int old = gx_system::atomic_get(plugin->rt_scene_state);
+        gx_system::atomic_set(&plugin->rt_scene_state, (old & ~1) | (value != 0 ? 1 : 0));
+    }
     int get_position() const { return p_position->get_value(); }
     int get_effect_post_pre() const { return p_effect_post_pre->get_value(); }
     void set_box_visible(bool v) const { if (p_box_visible) p_box_visible->set(v); }

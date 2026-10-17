@@ -65,3 +65,53 @@ Guitarix can also load up LADSPA and LV2 plugins to comply the effect chain.
 
 Guitarix can be easily built with hardware optimizations and deployed in a containerized environment using GuitarixContainer, a Docker-based solution. This approach ensures the code is automatically built for your hardware, enabling low-latency performance, especially when running Neural Amp Modeler (NAM) module. Perfect for devices like Raspberry Pi or laptop/workstation setups. Learn more at the [GuitarixContainer](https://github.com/fjammes/GuitarixContainer) GitHub repository.
 
+
+
+## Prepared resident snapshots (Trinity Phase 1)
+
+The acknowledged `set_scene` / `set_scene_muted` API remains the compatibility
+path for structural and asset changes. Resident bypass signals have their own
+RT dirty class, so ordinary bypass does not rerun module selectors or rebuild
+processing lists. Topology and asset changes invalidate prepared snapshot handles.
+
+For an already committed matrix, the compact JSON-RPC API is:
+
+- `snapshot_prepare(matrixSignature, snapshotId, parameter, value, ...)` resolves
+  control pointers and returns `handle`, `generation` and `controlCount`.
+- `snapshot_clock()` returns the unsigned 32-bit JACK `currentFrame`,
+  `sampleRate`, `bufferSize`, `generation` and `snapshotSupported`.
+- `snapshot_activate(handle, targetJackFrame, transitionMs)` schedules the
+  resident controls. `transitionMs` is 2–5 ms (default 4 ms, total down and up).
+
+The host prepares both Guitarix processes first, reads fresh clocks, then sends
+both handles with the same future, buffer-aligned frame. The requested frame
+must leave at least half the envelope plus one audio buffer of preparation
+margin and be no more than 200 ms ahead. Arithmetic handles JACK frame wrap.
+Both mono and stereo callbacks apply their own controls at that exact frame,
+including in the production multi-client mode. The final stereo output carries
+one sample-linear envelope. The reply follows completion of the envelope and
+reports `scheduledFrame`, `appliedFrame`, `completedFrame`, `structureChanged`
+and `rtStateChanged`; missed frames fail instead of applying late.
+
+Snapshot controls include resident effect bypass and directly bound continuous
+DSP controls without internal parameter-change callbacks. DSP state is retained;
+activation does not clear, allocate, prewarm, activate or deactivate plugins.
+A plugin requiring a reset must declare `PGNI_SNAPSHOT_RESET_REQUIRED`, which
+excludes its changed bypass from this path. Split boundaries, stereo-source
+selection, position, pre/post placement, file selectors and NAM size/profile
+changes are rejected. Unchanged unsupported numeric controls can be retained as
+guards; changing a guard requires the general scene path. This conservative
+contract also covers third-party plugins whose control callbacks do more than
+write a DSP scalar. No second matrix bank is introduced in this phase.
+
+Run the native fixtures without building the application:
+
+```sh
+python3 -m unittest discover -s trunk/tests -p 'test_*.py'
+```
+
+The snapshot fixture covers 1,000 directed transitions, opposite callback order
+in two instances, allocation-free activation, the 4 ms DC transition envelope,
+frame wrap, stale handles, late frames, constant guards and callback ownership
+after cancellation. Device recordings and end-to-end latency/XRUN measurement
+are still required to establish the performance acceptance targets.

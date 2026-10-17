@@ -133,6 +133,7 @@ protected:
     void range_warning(float value, float lower, float upper);
     static gx_system::JsonParser& jp_next(gx_system::JsonParser& jp, const char *key);
 public:
+    bool snapshot_safe = false; // certified before observer signals are attached
     inline std::string group_id() const { return _id.substr(0, _id.find_last_of(".")); }
     Parameter(const string& id, const string& name, value_type vtp, ctrl_type ctp, bool preset,
               bool ctrl):
@@ -257,6 +258,7 @@ public:
     bool set(float val) const;
     bool ramp_value(float val);
     float get_value() const { return *value; }
+    float* snapshot_pointer() { return value != &value_storage ? value : nullptr; }
     void convert_from_range(float low, float up);
     void set_zero() { *value = 0; }
     virtual void stdJSON_value();
@@ -381,6 +383,7 @@ public:
     bool set(bool val) const;
     virtual void stdJSON_value();
     bool get_value() const { return *value; }
+    void set_snapshot_value(bool val) { *value = val; }
     virtual bool on_off_value();
     virtual void writeJSON(gx_system::JsonWriter& jw) const;
     virtual bool compareJSON_value();

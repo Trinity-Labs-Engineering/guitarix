@@ -83,6 +83,7 @@ private:
     Glib::RefPtr<Gio::SocketConnection> connection;
     std::list<std::string> outgoing;
     unsigned int current_offset;
+    double last_parse_dispatch_ms = 0;
     gx_system::JsonStringParser jp;
     bool midi_config_mode;
     std::bitset<END_OF_FLAGS> flags;

@@ -22,6 +22,9 @@
 #include <netinet/tcp.h>
 #include <ctime>
 #include <chrono>
+#include <limits>
+#include <thread>
+#include <set>
 #include <sys/types.h>
 #include <sys/socket.h>
 #if HAVE_BLUEZ
@@ -86,6 +89,19 @@ static void trim_line_end(std::string& s) {
     }
 }
 
+static bool snapshot_structural_parameter_id(const std::string& id) {
+    const std::string suffix = id.substr(id.rfind('.') + 1);
+    return suffix == "position" || suffix == "pp" ||
+        suffix == "scene_resident" || suffix == "matrix_lane" ||
+        suffix == "matrix_source" || suffix == "matrix_resident" ||
+        suffix == "flist" || suffix == "falist" || suffix == "fblist" ||
+        suffix == "size" || suffix == "sizea" || suffix == "sizeb" ||
+        suffix == "latency" || suffix == "oversampling" || suffix == "mode" ||
+        suffix == "select" || suffix == "convolver" ||
+        suffix.compare(0, 4, "load") == 0 || suffix.compare(0, 4, "file") == 0 ||
+        id.compare(0, 3, "ui.") == 0;
+}
+
 class JsonString: public JsonValue {
 private:
     Glib::ustring string;
@@ -145,12 +161,13 @@ void JsonArray::append(gx_system::JsonParser& jp) {
         jp.next();
         std::string str = jp.current_value();
         char *endptr;
-        int n = strtol(str.c_str(), &endptr, 10);
-        if (*endptr == '\0') {
-            push_back(new JsonInt(n));
+        const long long n = strtoll(str.c_str(), &endptr, 10);
+        if (*endptr == '\0' && n >= std::numeric_limits<int>::min() &&
+            n <= std::numeric_limits<int>::max()) {
+            push_back(new JsonInt(static_cast<int>(n)));
         } else {
             istringstream b(str.c_str());
-            float f;
+            double f;
             b >> f;
             push_back(new JsonFloat(f));
         }
@@ -529,6 +546,163 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_kv("capacity", result.capacity);
         jw.write_kv("hostSampleRate", result.host_sample_rate);
         jw.write_bool_kv("rapidSwitchReady", result.rapid_switch_ready);
+        jw.end_object();
+    }
+
+    FUNCTION(snapshot_clock) {
+        if (!params.empty()) throw RpcError(-32602, "snapshot_clock takes no arguments");
+        auto& engine = serv.jack.get_engine();
+        const auto status = serv.jack.get_jack_client_activity_status();
+        if (!status.ok || !status.active || !engine.scene_commit_ready())
+            throw RpcError(-32000, "Audio engine is not ready");
+        jw.begin_object();
+        jw.write_kv("currentFrame", static_cast<unsigned int>(serv.jack.get_time_is()));
+        jw.write_kv("sampleRate", engine.get_samplerate());
+        jw.write_kv("bufferSize", engine.get_buffersize());
+        jw.write_kv("generation", engine.snapshots.generation());
+        jw.write_bool_kv("singleClient", status.single_client);
+        jw.write_bool_kv("snapshotSupported", true);
+        jw.end_object();
+    }
+
+    FUNCTION(snapshot_prepare) {
+        const auto preparation_started = std::chrono::steady_clock::now();
+        if (params.size() < 2 || (params.size() & 1) || params.size() > 2050)
+            throw RpcError(-32602, "snapshot_prepare expects matrix, snapshot, then control/value pairs");
+        if (params[0]->getString().empty() || params[1]->getString().empty())
+            throw RpcError(-32602, "Matrix and snapshot identities must not be empty");
+        auto& engine = serv.jack.get_engine();
+        auto& snapshots = engine.snapshots;
+        if (!engine.scene_commit_ready() || engine.get_rack_changed() || snapshots.busy())
+            throw RpcError(-32000, "Resident matrix is not settled");
+        auto& parameters = serv.settings.get_param();
+        std::vector<gx_engine::SnapshotControl> controls;
+        std::vector<gx_engine::SnapshotGuard> guards;
+        bool has_bypass = false;
+        std::set<std::string> seen;
+        for (unsigned int i = 2; i < params.size(); i += 2) {
+            const std::string id = params[i]->getString();
+            if (!seen.insert(id).second || !parameters.hasId(id))
+                throw RpcError(-32602, "Unknown or duplicate snapshot control: " + id);
+            auto& parameter = parameters[id];
+            const std::string suffix = id.substr(id.rfind('.') + 1);
+            const bool structural = snapshot_structural_parameter_id(id);
+            if (structural || (!parameter.isFloat() && !parameter.isInt() && !parameter.isBool()))
+                throw RpcError(-32602, "Structural or asset setting is not a snapshot control: " + id);
+            double value;
+            if (parameter.getControlType() == gx_engine::Parameter::Enum &&
+                dynamic_cast<JsonString*>(params[i + 1])) {
+                value = parameter.isFloat() ? parameter.getFloat().idx_from_id(params[i + 1]->getString()) :
+                    parameter.getInt().idx_from_id(params[i + 1]->getString());
+            } else value = params[i + 1]->getFloat();
+            if (!std::isfinite(value) ||
+                (parameter.hasRange() && (value < parameter.getLowerAsFloat() || value > parameter.getUpperAsFloat())) ||
+                (parameter.isBool() && value != 0 && value != 1) ||
+                (parameter.isInt() && value != std::floor(value)))
+                throw RpcError(-32602, "Invalid snapshot control value: " + id);
+            gx_engine::Plugin* plugin = engine.pluginlist.find_plugin(parameter.group_id());
+            const unsigned int stream = plugin && (plugin->get_pdef()->flags & PGN_STEREO) &&
+                !plugin->get_matrix_mono() ? 1 : (id == "amp.out_master" ? 1 : 0);
+            if (suffix == "on_off" && parameter.isBool() && plugin &&
+                plugin->supports_snapshot_bypass()) {
+                controls.push_back({plugin, &gx_engine::Plugin::apply_snapshot_bypass, value, stream,
+                    [](void* target) { return static_cast<gx_engine::Plugin*>(target)->get_on_off() ? 1.0 : 0.0; }, true});
+                has_bypass = true;
+            } else if (parameter.snapshot_safe && parameter.getFloat().signal_changed().size() == 1 &&
+                       (plugin || parameter.group_id() == "amp")) {
+                controls.push_back({parameter.getFloat().snapshot_pointer(),
+                    [](void* target, double v) { *static_cast<float*>(target) = static_cast<float>(v); },
+                    static_cast<float>(value), stream,
+                    [](void* target) { return static_cast<double>(*static_cast<float*>(target)); }, false});
+            } else {
+                // Legacy aliases/selectors may accompany a full saved scene.
+                // Unchanged values are guards, never assignments on the RT path.
+                gx_engine::SnapshotGuard guard{&parameter,
+                    [](void* target, double v) {
+                        auto& p = *static_cast<gx_engine::Parameter*>(target);
+                        return p.isFloat() ? p.getFloat().get_value() == static_cast<float>(v) :
+                            (p.isInt() ? p.getInt().get_value() == v : p.getBool().get_value() == v);
+                    }, value};
+                if (!guard.matches(guard.target, guard.value))
+                    throw RpcError(-32602, "Control requires a general scene transaction: " + id);
+                guards.push_back(guard);
+            }
+        }
+        auto& snapshot = snapshots.prepare(std::move(controls), has_bypass, std::move(guards));
+        jw.begin_object();
+        jw.write_kv("handle", snapshot.handle);
+        jw.write_kv("generation", snapshot.generation);
+        jw.write_kv("controlCount", static_cast<unsigned int>(snapshot.controls.size()));
+        const double preparation_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - preparation_started).count();
+        jw.write_kv("preparationMs", preparation_ms);
+        jw.write_key("phaseTimingsMs");
+        jw.begin_object();
+        jw.write_kv("parseDispatch", last_parse_dispatch_ms);
+        jw.write_kv("validationAndCompilation", preparation_ms);
+        jw.end_object();
+        jw.end_object();
+    }
+
+    FUNCTION(snapshot_activate) {
+        const auto activation_started = std::chrono::steady_clock::now();
+        if (params.size() < 2 || params.size() > 3)
+            throw RpcError(-32602, "snapshot_activate expects handle, JACK frame, optional transition milliseconds");
+        auto& engine = serv.jack.get_engine();
+        auto& snapshots = engine.snapshots;
+        auto* snapshot = snapshots.find(params[0]->getString());
+        const double frame = params[1]->getFloat();
+        const double transition_ms = params.size() == 3 ? params[2]->getFloat() : 4.0;
+        if (!std::isfinite(frame) || frame < 0 || frame > 4294967295.0 || frame != std::floor(frame) ||
+            !std::isfinite(transition_ms) || transition_ms < 2 || transition_ms > 5)
+            throw RpcError(-32602, "Invalid frame or transition; use 2 to 5 milliseconds");
+        const uint32_t now_frame = serv.jack.get_time_is();
+        if (gx_engine::SnapshotScheduler::distance(static_cast<uint32_t>(frame), now_frame) >
+            static_cast<int32_t>(engine.get_samplerate() / 5))
+            throw RpcError(-32602, "Snapshot frame is more than 200 milliseconds ahead");
+        const auto status = serv.jack.get_jack_client_activity_status();
+        if (!snapshot || !status.ok || !status.active || !engine.scene_commit_ready() ||
+            engine.get_rack_changed() || !snapshots.schedule(*snapshot, static_cast<uint32_t>(frame),
+                serv.jack.get_time_is(), engine.get_buffersize(),
+                static_cast<unsigned int>(engine.get_samplerate() * transition_ms / 1000.0)))
+            throw RpcError(-32000, "Snapshot stale, matrix not ready, or scheduled frame too late");
+        const auto published_at = std::chrono::steady_clock::now();
+        const auto deadline = published_at + std::chrono::milliseconds(250);
+        while (!snapshots.finished() && !snapshots.failed() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        const auto audio_finished_at = std::chrono::steady_clock::now();
+        const bool finished = snapshots.finished();
+        const uint32_t completed = snapshots.completion_frame();
+        snapshots.release();
+        // Reclaim prepared objects only once callbacks that saw the old pointer
+        // have left their bounded read sections (also after timeout/failure).
+        const auto drain_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
+        while (!snapshots.quiescent() && std::chrono::steady_clock::now() < drain_deadline)
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        if (!finished) throw RpcError(-32000, "Scheduled snapshot did not complete on both audio callbacks");
+        jw.begin_object();
+        jw.write_kv("generation", snapshot->generation);
+        jw.write_kv("scheduledFrame", static_cast<unsigned int>(frame));
+        jw.write_kv("appliedFrame", static_cast<unsigned int>(frame));
+        jw.write_kv("cutoverFrame", static_cast<unsigned int>(frame));
+        jw.write_kv("completedFrame", static_cast<unsigned int>(completed));
+        jw.write_kv("outputBufferFrame", static_cast<unsigned int>(snapshots.first_completed_output_frame()));
+        jw.write_kv("dispatchFrame", static_cast<unsigned int>(now_frame));
+        jw.write_kv("activationMs", std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - activation_started).count());
+        jw.write_kv("transitionMs", transition_ms);
+        jw.write_key("phaseTimingsMs");
+        jw.begin_object();
+        jw.write_kv("parseDispatch", last_parse_dispatch_ms);
+        jw.write_kv("validationAndPublication", std::chrono::duration<double, std::milli>(published_at - activation_started).count());
+        jw.write_kv("scheduledAudioWait", std::chrono::duration<double, std::milli>(audio_finished_at - published_at).count());
+        jw.write_kv("callbackDrain", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - audio_finished_at).count());
+        jw.end_object();
+        jw.write_bool_kv("ok", true);
+        jw.write_bool_kv("structureChanged", false);
+        jw.write_bool_kv("processingTopologyChanged", false);
+        jw.write_bool_kv("rtStateChanged", snapshots.rt_state_changed());
+        jw.write_kv("appliedControlCount", snapshots.applied_control_count());
         jw.end_object();
     }
 
@@ -920,6 +1094,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         // real processing-graph churn.
         jw.write_bool_kv("topologyChanged", topology_changed);
         jw.write_bool_kv("processingTopologyChanged", processing_topology_changed);
+        jw.write_bool_kv("structureChanged", processing_topology_changed);
         jw.write_bool_kv("rtStateChanged", rt_state_changed);
         jw.write_bool_kv("commitOk", commit_ok);
         jw.write_bool_kv("chainCommitted", topology_changed);
@@ -1639,6 +1814,21 @@ static void save_preset(gx_preset::GxSettings& settings, const Glib::ustring& ba
     settings.save(*pf, preset);
 }
 
+static void note_snapshot_parameter_change(gx_engine::GxEngine& engine, gx_engine::Parameter& p) {
+    const std::string suffix = p.id().substr(p.id().rfind('.') + 1);
+    if (p.snapshot_safe) {
+        engine.dirty_classes |= gx_engine::EngineControl::DIRTY_CONTROL;
+    } else if (suffix == "on_off") {
+        // The plugin's signal classifies resident bypass versus topology.
+    } else if (p.isFile() || p.isString() || suffix == "flist" || suffix == "falist" ||
+               suffix == "fblist" || suffix == "size" || suffix == "sizea" || suffix == "sizeb") {
+        engine.mark_asset_changed();
+    } else {
+        engine.dirty_classes |= gx_engine::EngineControl::DIRTY_TOPOLOGY;
+        engine.snapshots.invalidate();
+    }
+}
+
 void CmdConnection::apply_parameter_set(JsonArray& params) {
     if (params.size() & 1) {
         throw RpcError(-32602, "Invalid param -- array length must be even");
@@ -1661,6 +1851,7 @@ void CmdConnection::apply_parameter_set(JsonArray& params) {
                 } else {
                     f = v->getFloat();
                 }
+                if (pf.get_value() != f) note_snapshot_parameter_change(serv.jack.get_engine(), p);
                 pf.set(f);
             } else if (p.isInt()) {
                 gx_engine::IntParameter& pi = p.getInt();
@@ -1670,12 +1861,18 @@ void CmdConnection::apply_parameter_set(JsonArray& params) {
                 } else {
                     value = v->getInt();
                 }
+                if (pi.get_value() != value) note_snapshot_parameter_change(serv.jack.get_engine(), p);
                 pi.set(value);
             } else if (p.isBool()) {
+                if (p.getBool().get_value() != (v->getInt() != 0))
+                    note_snapshot_parameter_change(serv.jack.get_engine(), p);
                 p.getBool().set(v->getInt());
             } else if (p.isFile()) {
+                note_snapshot_parameter_change(serv.jack.get_engine(), p);
                 p.getFile().set(Gio::File::create_for_path(v->getString()));
             } else if (p.isString()) {
+                if (p.getString().get_value() != v->getString())
+                    note_snapshot_parameter_change(serv.jack.get_engine(), p);
                 p.getString().set(v->getString());
             } else if (dynamic_cast<gx_engine::JConvParameter*>(&p) != 0) {
                 gx_engine::GxJConvSettings s;
@@ -2032,6 +2229,7 @@ void CmdConnection::write_error(gx_system::JsonWriter& jw, int code, const char 
 }
 
 bool CmdConnection::request(gx_system::JsonStringParser& jp, gx_system::JsonStringWriter& jw, bool batch_start) {
+    const auto parse_started = std::chrono::steady_clock::now();
     Glib::ustring method;
     JsonArray params;
     Glib::ustring id;
@@ -2079,6 +2277,9 @@ bool CmdConnection::request(gx_system::JsonStringParser& jp, gx_system::JsonStri
     // host does not carry the gperf build dependency.
     static const methodnames fallback_methods[] = {
         { "set_scene", RPCM_set_scene },
+        { "snapshot_clock", RPCM_snapshot_clock },
+        { "snapshot_prepare", RPCM_snapshot_prepare },
+        { "snapshot_activate", RPCM_snapshot_activate },
         { "prepare_mnam_models", RPCM_prepare_mnam_models },
         { "jack_performance_status", RPCM_jack_performance_status },
         { "jack_deactivate", RPCM_jack_deactivate },
@@ -2119,6 +2320,8 @@ bool CmdConnection::request(gx_system::JsonStringParser& jp, gx_system::JsonStri
                 jw.write(id.raw(), true);
             }
             jw.write_key("result");
+            last_parse_dispatch_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - parse_started).count();
             call(jw, p, params);
             jw.end_object();
             return true;
@@ -2790,10 +2993,18 @@ void GxService::connect_value_changed_signal(gx_engine::Parameter *p) {
                 sigc::bind(
                     sigc::mem_fun(this, &GxService::on_param_value_changed), p)));
     } else if (p->isFloat()) {
+        // A raw DSP scalar with no engine callback can be written by its
+        // owning audio callback. Observers added below do not execute in RT.
+        p->snapshot_safe = !snapshot_structural_parameter_id(p->id()) &&
+            p->getControlType() == gx_engine::Parameter::Continuous &&
+            p->getFloat().snapshot_pointer() && p->getFloat().signal_changed().empty();
         p->getFloat().signal_changed().connect(
             sigc::hide(
                 sigc::bind(
                     sigc::mem_fun(this, &GxService::on_param_value_changed), p)));
+    } else if (p->isFile()) {
+        p->getFile().signal_changed().connect(
+            sigc::bind(sigc::mem_fun(this, &GxService::on_param_value_changed), p));
     } else if (p->isString()) {
         p->getString().signal_changed().connect(
             sigc::hide(
@@ -2813,6 +3024,7 @@ void GxService::connect_value_changed_signal(gx_engine::Parameter *p) {
 }
 
 void GxService::on_param_insert_remove(gx_engine::Parameter *p, bool inserted) {
+    jack.get_engine().snapshots.invalidate();
     if (preg_map) {
         (*preg_map)[p->id()] = inserted;
     }
@@ -2822,10 +3034,9 @@ void GxService::on_param_insert_remove(gx_engine::Parameter *p, bool inserted) {
 }
 
 void GxService::on_param_value_changed(gx_engine::Parameter *p) {
+    if (p->get_blocked()) return;
+    note_snapshot_parameter_change(jack.get_engine(), *p);
     gx_system::JsonStringWriter *jw = new gx_system::JsonStringWriter;
-    if (p->get_blocked()) {
-        return;
-    }
     jw->send_notify_begin("set");
     jw->write(p->id());
     if (p->isInt()) {
@@ -2834,6 +3045,8 @@ void GxService::on_param_value_changed(gx_engine::Parameter *p) {
         jw->write(p->getBool().get_value());
     } else if (p->isFloat()) {
         jw->write(p->getFloat().get_value());
+    } else if (p->isFile()) {
+        jw->write(p->getFile().get_path());
     } else if (p->isString()) {
         jw->write(p->getString().get_value());
     } else if (dynamic_cast<gx_engine::JConvParameter*>(p) != 0) {
@@ -2924,6 +3137,7 @@ void GxService::on_engine_state_change(gx_engine::GxEngineState state) {
 }
 
 void GxService::preset_changed() {
+    jack.get_engine().snapshots.invalidate();
     if (!broadcast_listeners(CmdConnection::f_preset_changed)) {
         return;
     }

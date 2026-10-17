@@ -1069,6 +1069,7 @@ JackClientActivityStatus GxJack::set_client_activity(bool active) {
         : !amp_client_active && (single_client || !fx_client_active);
     if (reached_target && changed && client_activity_last_error.empty()) {
         ++client_activity_generation;
+        engine.snapshots.invalidate();
     }
     return client_activity_status_unlocked(
         reached_target && client_activity_last_error.empty(), changed);
@@ -1145,7 +1146,9 @@ int __rt_func GxJack::gx_jack_process(jack_nframes_t nframes, void *arg) {
     const jack_time_t callback_started_at = jack_get_time();
     gx_system::measure_start();
     GxJack& self = *static_cast<GxJack*>(arg);
+    const jack_nframes_t snapshot_frame = jack_last_frame_time(self.client);
     if (!self.is_jack_exit()) {
+        self.engine.snapshots.begin(0, snapshot_frame);
 	self.engine.mono_chain.post_rt_started();
 	if (!self.engine.mono_chain.is_stopped()) {
 	    self.check_overload();
@@ -1181,6 +1184,7 @@ int __rt_func GxJack::gx_jack_process(jack_nframes_t nframes, void *arg) {
     self.process_midi_cc(buf, nframes);
 
     gx_system::measure_pause();
+    self.engine.snapshots.finish(0, snapshot_frame, nframes);
     self.engine.mono_chain.post_rt_finished();
     if (self.single_client) {
         self.gx_jack_insert_process(nframes, arg);
@@ -1196,8 +1200,11 @@ int __rt_func GxJack::gx_jack_process(jack_nframes_t nframes, void *arg) {
 int __rt_func GxJack::gx_jack_insert_process(jack_nframes_t nframes, void *arg) {
     GxJack& self = *static_cast<GxJack*>(arg);
     const jack_time_t callback_started_at = self.single_client ? 0 : jack_get_time();
+    const jack_nframes_t snapshot_frame = jack_last_frame_time(
+        self.single_client ? self.client : self.client_insert);
     gx_system::measure_cont();
     if (!self.is_jack_exit()) {
+        self.engine.snapshots.begin(1, snapshot_frame);
 	self.engine.stereo_chain.post_rt_started();
 	if (!self.engine.stereo_chain.is_stopped()) {
 	    self.check_overload();
@@ -1213,6 +1220,9 @@ int __rt_func GxJack::gx_jack_insert_process(jack_nframes_t nframes, void *arg) 
 	    nframes, ibuf, ibuf,
 	    get_float_buf(self.ports.output1.port, nframes),
 	    get_float_buf(self.ports.output2.port, nframes));
+        self.engine.snapshots.finish(1, snapshot_frame, nframes,
+            get_float_buf(self.ports.output1.port, nframes),
+            get_float_buf(self.ports.output2.port, nframes));
     }
     gx_system::measure_stop();
     self.engine.stereo_chain.post_rt_finished();

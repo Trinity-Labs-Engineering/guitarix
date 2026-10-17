@@ -1193,6 +1193,9 @@ int Lv2Dsp::registerparam(const ParamReg& reg) {
             reg.registerFloatVar(self.make_id(*d).c_str(), snm.c_str(), "S", nm, &self.ports[d->index],
                      d->dflt, d->low, d->up, d->step, d->values);
         } else if (d->tp == tp_enabled) {
+            // Bypass also changes an LV2 enable port through a parameter
+            // callback; the plain resident RT bit cannot replace that work.
+            self.flags |= PGNI_SNAPSHOT_RESET_REQUIRED;
             reg.registerFloatVar(self.make_id(*d).c_str(), snm.c_str(),"BA" , nm, &self.ports[d->index],
                      d->dflt, d->low, d->up, d->step, 0);
             ParamMap& pmap = self.loader.get_parameter_map();

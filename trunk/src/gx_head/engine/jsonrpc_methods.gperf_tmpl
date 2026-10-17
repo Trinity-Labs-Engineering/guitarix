@@ -65,6 +65,9 @@ struct CmdConnection::methodnames;
 
 "get", true
 "set", false
+"snapshot_clock", true
+"snapshot_prepare", true
+"snapshot_activate", true
 "set_scene", true
 "set_scene_muted", true
 "prepare_mnam_models", true

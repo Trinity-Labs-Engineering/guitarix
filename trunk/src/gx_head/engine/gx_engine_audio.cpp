@@ -696,6 +696,7 @@ void EngineControl::set_samplerate(unsigned int samplerate_) {
     if (samplerate == samplerate_) {
 	return;
     }
+    snapshots.invalidate();
     samplerate = samplerate_;
     pluginlist.set_samplerate(samplerate);
     samplerate_change(samplerate);
@@ -705,6 +706,7 @@ void EngineControl::set_buffersize(unsigned int buffersize_) {
     if (buffersize == buffersize_) {
 	return;
     }
+    snapshots.invalidate();
     buffersize = buffersize_;
     buffersize_change(buffersize);
 }
@@ -731,6 +733,7 @@ void EngineControl::init(unsigned int samplerate_, unsigned int buffersize_,
 
 void EngineControl::clear_rack_changed() {
     rack_changed.disconnect();
+    dirty_classes = 0;
 }
 
 bool EngineControl::get_rack_changed() {
@@ -789,7 +792,8 @@ bool ModuleSequencer::update_module_lists() {
     if (!get_buffersize() || !get_samplerate()) {
 	return false;
     }
-    bool changed = prepare_module_lists();
+    bool changed = (dirty_classes & (DIRTY_TOPOLOGY | DIRTY_ASSET)) ||
+        !(dirty_classes & DIRTY_RT_BYPASS) ? prepare_module_lists() : false;
     changed = pluginlist.rt_scene_state_changed() || changed;
     changed = mono_chain.has_pending_module_list() ||
         stereo_chain.has_pending_module_list() || changed;
@@ -944,7 +948,8 @@ bool ModuleSequencer::commit_pending_module_lists(bool externally_muted,
     // Keep the idle connection visible while selectors are evaluated. Their
     // on/off signals then coalesce into this transaction instead of queuing a
     // redundant second idle callback.
-    const bool lists_changed = prepare_module_lists();
+    const bool lists_changed = (dirty_classes & (DIRTY_TOPOLOGY | DIRTY_ASSET))
+        ? prepare_module_lists() : false;
     const bool bypass_changed = pluginlist.rt_scene_state_changed();
     const bool publication_pending = mono_chain.has_pending_module_list() ||
         stereo_chain.has_pending_module_list();
@@ -988,7 +993,23 @@ bool ModuleSequencer::commit_pending_module_lists(bool externally_muted,
     return changed;
 }
 
+void ModuleSequencer::set_bypass_changed(Plugin* plugin) {
+    if (plugin->get_scene_resident() && !plugin->get_matrix_source() &&
+        !(plugin->get_pdef()->flags & (PGNI_MATRIX_SPLITTER | PGNI_MATRIX_COMBINER))) {
+        dirty_classes |= DIRTY_RT_BYPASS;
+        schedule_rack_change();
+    } else {
+        set_rack_changed();
+    }
+}
+
 void ModuleSequencer::set_rack_changed() {
+    dirty_classes |= DIRTY_TOPOLOGY;
+    snapshots.invalidate();
+    schedule_rack_change();
+}
+
+void ModuleSequencer::schedule_rack_change() {
     #ifdef GUITARIX_AS_PLUGIN
     if (stateflags & SF_INITIALIZING) {
         return;
@@ -1122,6 +1143,7 @@ void __rt_func ModuleSequencer::set_stateflag(StateFlag flag) {
 	return;
     }
     boost::mutex::scoped_lock lock(stateflags_mutex);
+    snapshots.invalidate();
     mono_chain.set_stopped(true);
     stereo_chain.set_stopped(true);
     if (!stateflags) {

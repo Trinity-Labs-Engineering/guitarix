@@ -388,7 +388,7 @@ void Plugin::register_vars(ParamMap& param, EngineControl& seq) {
         p_on_off->setSavable(false);
     }
     p_on_off->signal_changed_bool().connect(
-        sigc::hide(sigc::mem_fun(seq, &EngineControl::set_rack_changed)));
+        sigc::hide(sigc::bind(sigc::mem_fun(seq, &EngineControl::set_bypass_changed), this)));
     p_scene_resident = param.reg_non_midi_par(
         s+".scene_resident", (bool*)0, false, false);
     p_scene_resident->setSavable(false);
@@ -739,7 +739,7 @@ void PluginList::rescueParameter(Plugin *pl, ParamMap& param) {
         pl->p_on_off->setSavable(false);
     }
     pl->p_on_off->signal_changed_bool().connect(
-        sigc::hide(sigc::mem_fun(seq, &EngineControl::set_rack_changed)));
+        sigc::hide(sigc::bind(sigc::mem_fun(seq, &EngineControl::set_bypass_changed), pl)));
 }
 
 void PluginList::registerParameter(Plugin *pl, ParamMap& param, ParamRegImpl& preg) {

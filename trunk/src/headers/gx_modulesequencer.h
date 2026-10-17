@@ -21,6 +21,7 @@
 #pragma once
 
 #include "gx_rt_cycle_latch.h"
+#include "gx_snapshot.h"
 
 namespace gx_engine {
 
@@ -335,6 +336,11 @@ protected:
     unsigned int buffersize;
     unsigned int samplerate;
 public:
+    enum DirtyClass { DIRTY_CONTROL = 1, DIRTY_RT_BYPASS = 2, DIRTY_TOPOLOGY = 4, DIRTY_ASSET = 8 };
+    unsigned int dirty_classes = 0;
+    SnapshotScheduler snapshots;
+    void mark_asset_changed() { dirty_classes |= DIRTY_ASSET; snapshots.invalidate(); }
+    virtual void set_bypass_changed(Plugin* plugin) { (void)plugin; set_rack_changed(); }
     ParallelThread pro;
     enum OverloadType {		// type of overload condition
 	ov_User      = 0x1,	// idle thread probe starved
@@ -454,6 +460,8 @@ public:
                                                    bool wait_stereo_finish);
     bool scene_commit_ready();
     virtual void set_rack_changed();
+    virtual void set_bypass_changed(Plugin* plugin);
+    void schedule_rack_change();
     virtual bool update_module_lists();
     bool check_module_lists();
     virtual void overload(OverloadType tp, const char *reason); // RT

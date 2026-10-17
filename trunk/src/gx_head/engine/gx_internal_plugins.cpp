@@ -124,7 +124,9 @@ OutPutGate::OutPutGate(const NoiseGate *noisegate_) :  outputdef(), outputlevel(
 }
 
 void OutPutGate::outputgate_process(int count, float *input, float *output) {
-    if (noisegate->off) {
+    // Resident snapshot bypass is published by the owning mono callback.
+    // The legacy lifecycle `off` cache is not updated when no activation runs.
+    if (!noisegate->inputlevel.get_rt_on_off()) {
         return;
     }
     while (count--) {
