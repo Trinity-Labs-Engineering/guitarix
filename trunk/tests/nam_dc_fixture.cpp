@@ -1,6 +1,14 @@
-#include "gx_nam_dc.h"
+#include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <limits>
+#ifdef GX_TEST_FAUST_MACROS
+#include "gx_faust_support.h"
+#endif
+#include "gx_nam_dc.h"
+#ifdef GX_TEST_FAUST_MACROS
+static_assert(min(2, 3) == 2 && max(2, 3) == 3);
+#endif
 
 struct Model {
     float bias = -.001426122f;
@@ -37,8 +45,8 @@ int main() {
         fixed_state = fixed - old_fixed + .999 * fixed_state;
         old_raw = raw; old_fixed = fixed;
         if (i % 4800 >= 192) {
-            raw_peak = std::max(raw_peak, std::fabs(raw_state));
-            fixed_peak = std::max(fixed_peak, std::fabs(fixed_state));
+            raw_peak = (std::max)(raw_peak, std::fabs(raw_state));
+            fixed_peak = (std::max)(fixed_peak, std::fabs(fixed_state));
         }
     }
     assert(raw_peak > .001 && fixed_peak == 0);

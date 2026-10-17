@@ -19,8 +19,9 @@ float measure_nam_dc(Model* model) {
     float low = output[0], high = output[0];
     for (float sample : output) {
         if (!std::isfinite(sample)) return 0;
-        low = std::min(low, sample);
-        high = std::max(high, sample);
+        // gx_faust_support.h defines function-like min/max macros.
+        low = (std::min)(low, sample);
+        high = (std::max)(high, sample);
         sum += sample;
     }
     return high - low <= 1e-6f ? static_cast<float>(sum / count) : 0;

@@ -1,7 +1,13 @@
-#include "gx_scene_value.h"
 #include <cassert>
 #include <initializer_list>
 #include <limits>
+#ifdef GX_TEST_FAUST_MACROS
+#include "gx_faust_support.h"
+#endif
+#include "gx_scene_value.h"
+#ifdef GX_TEST_FAUST_MACROS
+static_assert(min(2, 3) == 2 && max(2, 3) == 3);
+#endif
 
 struct Parameter {
     char type;

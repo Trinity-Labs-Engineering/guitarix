@@ -11,7 +11,7 @@ bool valid_scene_scalar(const Parameter& parameter, double value) {
     // Compare the value that the setter will actually store: e.g. JSON 0.1
     // must be accepted at a 0.1f lower bound, for both matrices and snapshots.
     if (!std::isfinite(value) ||
-        (parameter.isFloat() && std::fabs(value) > std::numeric_limits<float>::max())) return false;
+        (parameter.isFloat() && std::fabs(value) > (std::numeric_limits<float>::max)())) return false;
     const double stored = parameter.isFloat() ? static_cast<float>(value) : value;
     return std::isfinite(stored) &&
         (!parameter.isBool() || value == 0 || value == 1) &&
