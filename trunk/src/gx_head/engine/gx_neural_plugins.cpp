@@ -550,6 +550,43 @@ std::unique_ptr<nam::DSP> NeuralAmp::take_cached_model(
     return result;
 }
 
+std::vector<PreparedNamModelDescriptor> NeuralAmp::matrix_model_inventory() const {
+    std::vector<PreparedNamModelDescriptor> result;
+    if (model) result.push_back({' ', current_file, current_model_size});
+    for (const auto& entry : model_cache) result.push_back({' ', entry.filename, entry.size});
+    return result;
+}
+
+bool NeuralAmp::matrix_model_ready(const Glib::ustring& filename, float size) const {
+    if (filename.empty()) return true;
+    if (model && current_file == filename && std::fabs(current_model_size - size) < 0.0001f)
+        return true;
+    return std::any_of(model_cache.begin(), model_cache.end(), [&](const CachedNamModel& entry) {
+        return entry.filename == filename && std::fabs(entry.size - size) < 0.0001f &&
+            entry.host_sample_rate == fSampleRate;
+    });
+}
+
+bool NeuralAmp::prepare_matrix_model(const Glib::ustring& filename, float size) {
+    if (!is_inited || fSampleRate <= 0) return false;
+    if (matrix_model_ready(filename, size)) return true;
+    if (model_cache.size() >= kNamModelCacheEntries) return false;
+    int rate = 0;
+    auto prepared = load_nam_model(filename, fSampleRate, &rate, "Neural Amp Modeler", size, "prepared matrix");
+    if (!prepared) return false;
+    model_cache.push_back(CachedNamModel{filename, size, rate, fSampleRate, std::move(prepared)});
+    return true;
+}
+
+void NeuralAmp::select_matrix_model(const Glib::ustring& filename, float size) {
+    if (!matrix_model_ready(filename, size)) throw std::runtime_error("Prepared NAM asset was evicted");
+    if (filename.empty() && !model) return;
+    fVslider2 = size;
+    matrix_selection = &filename;
+    try { load_nam_file(); } catch (...) { matrix_selection = nullptr; throw; }
+    matrix_selection = nullptr;
+}
+
 void NeuralAmp::cache_current_model() {
     if (!model || current_file.empty() || current_file == kNamNone) {
         delete model;
@@ -709,10 +746,12 @@ void NeuralAmp::load_nam_file_impl() {
 void NeuralAmp::load_nam_file() {
     if (is_inited) {
         Glib::ustring selected_file;
-        const bool has_selection = get_selected_nam_file(filelist, load_path,
+        const bool has_selection = matrix_selection ?
+            !(selected_file = *matrix_selection).empty() : get_selected_nam_file(filelist, load_path,
             nam_file_names, &selected_file, "Neural Amp Modeler");
 
-        if (has_selection && model && (current_file.compare(selected_file) == 0)) {
+        if (has_selection && model && (current_file.compare(selected_file) == 0) &&
+            std::fabs(current_model_size - fVslider2) < 0.0001f) {
             if (ramp.mode == ramp.DOWN) ramp.mode = ramp.UP;
             return;
         }
@@ -1088,6 +1127,35 @@ void NeuralAmpMulti::cache_model(
             ? prepared_generation : Glib::ustring(),
         std::move(model_to_cache),
     });
+}
+
+std::vector<PreparedNamModelDescriptor> NeuralAmpMulti::matrix_model_inventory() const {
+    std::vector<PreparedNamModelDescriptor> result;
+    if (modela) result.push_back({'A', current_afile, current_model_sizea});
+    if (modelb) result.push_back({'B', current_bfile, current_model_sizeb});
+    for (const auto& entry : model_cache) result.push_back({entry.slot, entry.filename, entry.size});
+    return result;
+}
+
+bool NeuralAmpMulti::matrix_model_ready(char slot, const Glib::ustring& filename, float size) const {
+    if (filename.empty()) return true;
+    if ((slot == 'A' && modela && current_afile == filename && std::fabs(current_model_sizea - size) < 0.0001f) ||
+        (slot == 'B' && modelb && current_bfile == filename && std::fabs(current_model_sizeb - size) < 0.0001f)) return true;
+    return std::any_of(model_cache.begin(), model_cache.end(), [&](const CachedNamModel& entry) {
+        return entry.slot == slot && entry.filename == filename && std::fabs(entry.size - size) < 0.0001f &&
+            entry.host_sample_rate == fSampleRate;
+    });
+}
+
+void NeuralAmpMulti::select_matrix_model(char slot, const Glib::ustring& filename, float size) {
+    if (!matrix_model_ready(slot, filename, size)) throw std::runtime_error("Prepared dual NAM asset was evicted");
+    if (filename.empty() && !(slot == 'A' ? modela : modelb)) return;
+    matrix_selection = &filename;
+    try {
+        if (slot == 'A') { fVslider3 = size; load_nam_afile(); }
+        else { fVslider4 = size; load_nam_bfile(); }
+    } catch (...) { matrix_selection = nullptr; throw; }
+    matrix_selection = nullptr;
 }
 
 PreparedNamModelResult NeuralAmpMulti::prepare_song_models(
@@ -1507,7 +1575,8 @@ void NeuralAmpMulti::load_nam_afile_impl() {
 void NeuralAmpMulti::load_nam_afile() {
     if (is_inited) {
         Glib::ustring selected_file;
-        const bool has_selection = get_selected_nam_file(afilelist, load_apath,
+        const bool has_selection = matrix_selection ?
+            !(selected_file = *matrix_selection).empty() : get_selected_nam_file(afilelist, load_apath,
             nam_afile_names, &selected_file, "Neural Multi Amp Modeler");
 
         if (has_selection && modela && (current_afile.compare(selected_file) == 0) &&
@@ -1588,7 +1657,8 @@ void NeuralAmpMulti::load_nam_bfile_impl() {
 void NeuralAmpMulti::load_nam_bfile() {
     if (is_inited) {
         Glib::ustring selected_file;
-        const bool has_selection = get_selected_nam_file(bfilelist, load_bpath,
+        const bool has_selection = matrix_selection ?
+            !(selected_file = *matrix_selection).empty() : get_selected_nam_file(bfilelist, load_bpath,
             nam_bfile_names, &selected_file, "Neural Multi Amp Modeler");
 
         if (has_selection && modelb && (current_bfile.compare(selected_file) == 0) &&

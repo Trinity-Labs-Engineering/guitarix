@@ -127,6 +127,7 @@ private:
         nam::RuntimeDSPClass::None, -1, false};
     Glib::ustring runtime_model_path;
     std::vector<CachedNamModel> model_cache;
+    const Glib::ustring* matrix_selection = nullptr;
     volatile int scene_smoother_snap_pending;
     bool muted_scene_parameter_batch;
     bool scene_smoother_preset;
@@ -164,6 +165,11 @@ public:
     Plugin plugin;
     NeuralAmp(ParamMap& param_, std::string id, sigc::slot<void> sync);
     ~NeuralAmp();
+    std::vector<PreparedNamModelDescriptor> matrix_model_inventory() const;
+    bool prepare_matrix_model(const Glib::ustring& filename, float size);
+    bool matrix_model_ready(const Glib::ustring& filename, float size) const;
+    void select_matrix_model(const Glib::ustring& filename, float size);
+    void release_matrix_models() { model_cache.clear(); }
     void begin_scene_parameter_batch(bool externally_muted);
     bool finish_scene_parameter_batch();
     // Temporarily make the wrapper transparent, then (after the caller has
@@ -251,6 +257,7 @@ private:
     Glib::ustring load_bpath;
     std::string idstring;
     std::vector<CachedNamModel> model_cache;
+    const Glib::ustring* matrix_selection = nullptr;
     mutable std::mutex runtime_status_mutex;
     std::uint64_t runtime_status_generation_a = 0;
     std::uint64_t runtime_status_generation_b = 0;
@@ -307,6 +314,10 @@ public:
     Plugin plugin;
     NeuralAmpMulti(ParamMap& param_, std::string id, ParallelThread *pro_, sigc::slot<void> sync);
     ~NeuralAmpMulti();
+    std::vector<PreparedNamModelDescriptor> matrix_model_inventory() const;
+    bool matrix_model_ready(char slot, const Glib::ustring& filename, float size) const;
+    void select_matrix_model(char slot, const Glib::ustring& filename, float size);
+    void release_matrix_models() { model_cache.clear(); prepared_models.clear(); }
     void begin_scene_parameter_batch(bool externally_muted);
     bool finish_scene_parameter_batch();
     bool suspend_scene_smoother_for_control();

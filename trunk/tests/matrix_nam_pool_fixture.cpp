@@ -82,6 +82,10 @@ public:
     std::string prepared_generation;
     std::vector<PreparedNamModelDescriptor> prepared_models;
     std::vector<CachedNamModel> model_cache;
+    const Glib::ustring* matrix_selection = nullptr;
+    std::vector<PreparedNamModelDescriptor> matrix_model_inventory() const;
+    bool matrix_model_ready(char, const Glib::ustring&, float) const;
+    void select_matrix_model(char, const Glib::ustring&, float);
     ~NeuralAmpMulti() { delete modela; delete modelb; }
     void sync() { ++barriers; }
     void clear_state_f() {}
@@ -147,7 +151,26 @@ int main() {
     assert(amp.barriers == before); // An unchanged selection has no ownership wait.
     auto reused = amp.prepare_song_models("same-pool", plan);
     assert(reused.rapid_switch_ready && reused.loaded == 0 && constructions == 6);
+    // Prepared matrices select absolute identities, independent of the UI's
+    // directory/selector table. Displacing a model parks it without warming.
+    for (int repeat = 0; repeat < 1000; ++repeat) {
+        const float size = repeat % 2 ? 1.0f : 0.49f;
+        amp.begin_scene_parameter_batch(true);
+        amp.select_matrix_model('A', "/models/shared.nam", size);
+        amp.select_matrix_model('B', "/models/other.nam", 0.49f);
+        amp.finish_scene_parameter_batch();
+        assert(amp.current_afile == "/models/shared.nam" && amp.modela->size == size);
+        assert(amp.current_bfile == "/models/other.nam");
+        assert(amp.matrix_model_inventory().size() == 6);
+        assert(constructions == 6 && resizes == 0);
+    }
+    auto* active = amp.modela;
+    bool rejected = false;
+    try { amp.select_matrix_model('A', "/models/missing.nam", 0.49f); }
+    catch (const std::runtime_error&) { rejected = true; }
+    assert(rejected && amp.modela == active && constructions == 6);
     // Interactive size controls retain their existing behavior.
+    amp.select_matrix_model('A', "/models/shared.nam", 0.49f);
     amp.fVslider3 = 1.0f;
     amp.set_nam_asize();
     assert(resizes == 1 && amp.modela->size == 1.0f);

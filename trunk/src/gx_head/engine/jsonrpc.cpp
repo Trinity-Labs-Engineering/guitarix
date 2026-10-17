@@ -17,6 +17,7 @@
  */
 
 #include "jsonrpc.h"
+#include <sys/stat.h>
 #include "gx_harmoniser_plugin.h"
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -177,6 +178,11 @@ void JsonArray::append(gx_system::JsonParser& jp) {
     } else {
         throw gx_system::JsonException("unexpected token");
     }
+}
+
+void JsonArray::add_int(const std::string& name, int value) {
+    push_back(new JsonString(name));
+    push_back(new JsonInt(value));
 }
 
 double JsonValue::getFloat() const {
@@ -496,7 +502,88 @@ static inline bool unit_match(const Glib::ustring& id, const Glib::ustring& pref
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-enum-enum-conversion"
 
-void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonArray& params) {
+void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonArray& incoming) {
+    std::shared_ptr<PreparedMatrixScene> matrix;
+    const bool preparing_matrix = mn->m_id == RPCM_matrix_prepare;
+    const bool activating_matrix = mn->m_id == RPCM_matrix_activate;
+    bool matrix_muted = false;
+    if (preparing_matrix) {
+        if (incoming.size() != 5 || incoming[0]->getInt() != static_cast<int>(serv.matrix_generation))
+            throw RpcError(-32602, "matrix_prepare expects generation, matrix id, snapshot id, scene JSON, NAM triples JSON");
+        if (serv.matrices.size() >= 128) throw RpcError(-32000, "Matrix scene capacity exceeded");
+        matrix = std::make_shared<PreparedMatrixScene>();
+        matrix->matrix_id = incoming[1]->getString();
+        matrix->snapshot_id = incoming[2]->getString();
+        if (matrix->matrix_id.empty() || matrix->snapshot_id.empty()) throw RpcError(-32602, "Empty matrix identity");
+        const auto& json = incoming[3]->getString();
+        if (json.size() > 1024 * 1024) throw RpcError(-32602, "Matrix scene exceeds 1 MiB");
+        matrix->parser.get_ostream() << json;
+        matrix->parser.start_parser();
+        matrix->parser.next(gx_system::JsonParser::begin_array);
+        while (matrix->parser.peek() != gx_system::JsonParser::end_array) matrix->parameters.append(matrix->parser);
+        matrix->parser.next(gx_system::JsonParser::end_array);
+        if (matrix->parameters.size() & 1) throw RpcError(-32602, "Odd matrix assignment array");
+        // Guitarix owns the complete rack. A recipe must not inherit an
+        // omitted branch, resident plugin or pre/post placement from whichever
+        // matrix happened to be audible while this song was prepared.
+        std::set<std::string> supplied;
+        for (unsigned i = 0; i < matrix->parameters.size(); i += 2) supplied.insert(matrix->parameters[i]->getString());
+        auto& engine = serv.jack.get_engine();
+        for (const auto& item : engine.pluginlist) {
+            auto* definition = item.second->get_pdef();
+            if (!(definition->flags & gx_engine::PGNI_DYN_POSITION) || definition->flags & PGN_ALTERNATIVE) continue;
+            const std::string prefix = definition->id;
+            for (const std::string suffix : {"on_off", "scene_resident", "matrix_source", "matrix_resident", "matrix_lane", "pp", "position"}) {
+                const std::string id = prefix + "." + suffix;
+                if (serv.settings.get_param().hasId(id) && !supplied.count(id)) {
+                    const int value = suffix == "pp" ? (definition->flags & PGN_POST ? 0 : 1) : 0;
+                    matrix->parameters.add_int(id, value);
+                }
+            }
+        }
+        gx_system::JsonStringParser assets_parser;
+        assets_parser.get_ostream() << incoming[4]->getString();
+        assets_parser.start_parser();
+        assets_parser.next(gx_system::JsonParser::begin_array);
+        JsonArray assets;
+        while (assets_parser.peek() != gx_system::JsonParser::end_array) assets.append(assets_parser);
+        assets_parser.next(gx_system::JsonParser::end_array);
+        if (assets.size() % 3 || assets.size() > 15) throw RpcError(-32602, "Invalid matrix NAM descriptors");
+        std::set<std::string> slots;
+        for (unsigned i = 0; i < assets.size(); i += 3) {
+            const std::string slot = assets[i]->getString();
+            const float size = assets[i + 2]->getFloat();
+            if (!slots.insert(slot).second || (slot != "nam" && slot != "nam__2" && slot != "snam" && slot != "A" && slot != "B") ||
+                !std::isfinite(size) || size < 0 || size > 1) throw RpcError(-32602, "Invalid matrix NAM slot/profile");
+            matrix->nam.push_back({slot, assets[i + 1]->getString(), size});
+        }
+        for (const std::string slot : {"A", "B", "nam", "nam__2", "snam"})
+            if (!slots.count(slot)) matrix->nam.push_back({slot, "", 0.49f});
+        std::sort(matrix->nam.begin(), matrix->nam.end(), [](const PreparedMatrixScene::NamAsset& a, const PreparedMatrixScene::NamAsset& b) { return a.slot < b.slot; });
+    } else if (activating_matrix) {
+        if (incoming.size() != 2) throw RpcError(-32602, "matrix_activate expects handle, externally muted");
+        if (incoming[1]->getInt() != 1)
+            throw RpcError(-32602, "Prepared matrix activation requires an external transition guard");
+        if (serv.jack.get_engine().snapshots.busy())
+            throw RpcError(-32000, "Snapshot callback still owns the matrix controls");
+        const auto found = serv.matrices.find(incoming[0]->getString());
+        if (found == serv.matrices.end()) throw RpcError(-32003, "Unknown matrix handle");
+        matrix = found->second;
+        const auto status = serv.jack.get_jack_client_activity_status();
+        if (matrix->generation != serv.matrix_generation || matrix->samplerate != serv.jack.get_engine().get_samplerate() ||
+            matrix->buffersize != serv.jack.get_engine().get_buffersize() || matrix->jack_generation != status.generation ||
+            matrix->runtime_epoch != serv.jack.get_engine().snapshots.runtime_epoch() ||
+            !matrix_assets_ready(*matrix)) throw RpcError(-32003, "Matrix generation or prepared assets are stale");
+        matrix_muted = incoming[1]->getInt() != 0;
+    }
+    JsonArray& params = matrix ? matrix->parameters : incoming;
+    // Never preserve a pool across an ordinary structural edit or recovery.
+    // Prepared activation owns its immutable recipe and may change live topology.
+    struct MatrixScope {
+        bool& flag;
+        MatrixScope(bool& flag_, bool active): flag(flag_) { flag = active; }
+        ~MatrixScope() { flag = false; }
+    } scope(serv.applying_matrix, activating_matrix);
     START_FUNCTION_SWITCH(mn->m_id);
 
     // `set` predates request/response use and remains classified as a
@@ -507,6 +594,33 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         apply_parameter_set(params);
         jw.write_lit("true");
         break;
+    }
+
+    FUNCTION(matrix_begin) {
+        if (!params.empty()) throw RpcError(-32602, "matrix_begin takes no arguments");
+        if (serv.jack.get_engine().snapshots.busy()) throw RpcError(-32000, "Snapshot activation is pending");
+        serv.invalidate_matrices();
+        serv.matrices.clear();
+        serv.release_matrix_assets();
+        serv.jack.get_engine().snapshots.invalidate();
+        jw.begin_object();
+        jw.write_kv("generation", serv.matrix_generation);
+        jw.write_kv("protocolVersion", 2);
+        jw.write_kv("matrixCapacity", 128);
+        jw.write_kv("namCapacity", 8);
+        jw.write_kv("irCapacity", 8);
+        jw.write_kv("assetBudgetBytes", 268435456);
+        jw.end_object();
+    }
+
+    FUNCTION(matrix_release) {
+        if (params.size() != 1) throw RpcError(-32602, "matrix_release expects handle");
+        const std::string handle = params[0]->getString();
+        if (serv.active_matrix == handle) serv.active_matrix.clear();
+        serv.matrices.erase(handle);
+        // Other recipes may share these assets. Reclaim them at matrix_begin.
+        serv.jack.get_engine().snapshots.invalidate();
+        jw.write_lit("true");
     }
 
     FUNCTION(prepare_mnam_models) {
@@ -535,6 +649,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                 static_cast<char>(slot_name[0]), filename, size,
             });
         }
+        serv.invalidate_matrices();
         const gx_engine::PreparedNamModelResult result =
             serv.jack.get_engine().mneural_amp.prepare_song_models(
                 generation, descriptors);
@@ -575,6 +690,15 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         auto& snapshots = engine.snapshots;
         if (!engine.scene_commit_ready() || engine.get_rack_changed() || snapshots.busy())
             throw RpcError(-32000, "Resident matrix is not settled");
+        const std::string matrix_handle = params[0]->getString();
+        if (matrix_handle.compare(0, 7, "matrix:") == 0) {
+            auto found = serv.matrices.find(matrix_handle);
+            auto active = serv.matrices.find(serv.active_matrix);
+            if (found == serv.matrices.end() || active == serv.matrices.end() ||
+                found->second->generation != serv.matrix_generation ||
+                found->second->matrix_id != active->second->matrix_id)
+                throw RpcError(-32000, "Snapshot requires the active prepared matrix generation");
+        }
         auto& parameters = serv.settings.get_param();
         std::vector<gx_engine::SnapshotControl> controls;
         std::vector<gx_engine::SnapshotGuard> guards;
@@ -629,6 +753,10 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             }
         }
         auto& snapshot = snapshots.prepare(std::move(controls), has_bypass, std::move(guards));
+        if (matrix_handle.compare(0, 7, "matrix:") == 0) {
+            snapshot.matrix_handle = matrix_handle;
+            snapshot.pool_generation = serv.matrix_generation;
+        }
         jw.begin_object();
         jw.write_kv("handle", snapshot.handle);
         jw.write_kv("generation", snapshot.generation);
@@ -651,6 +779,9 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         auto& engine = serv.jack.get_engine();
         auto& snapshots = engine.snapshots;
         auto* snapshot = snapshots.find(params[0]->getString());
+        if (snapshot && !snapshot->matrix_handle.empty() &&
+            (snapshot->pool_generation != serv.matrix_generation || !serv.matrices.count(snapshot->matrix_handle)))
+            throw RpcError(-32000, "Snapshot pool generation is stale");
         const double frame = params[1]->getFloat();
         const double transition_ms = params.size() == 3 ? params[2]->getFloat() : 4.0;
         if (!std::isfinite(frame) || frame < 0 || frame > 4294967295.0 || frame != std::floor(frame) ||
@@ -707,6 +838,8 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
     }
 
     FUNCTION(set_scene)
+    case RPCM_matrix_prepare:
+    case RPCM_matrix_activate:
     case RPCM_set_scene_muted: {
         typedef std::chrono::steady_clock SceneClock;
         const auto scene_started_at = SceneClock::now();
@@ -714,7 +847,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                                    SceneClock::time_point end) {
             return std::chrono::duration<double, std::milli>(end - start).count();
         };
-        const bool externally_muted = mn->m_id == RPCM_set_scene_muted;
+        const bool externally_muted = matrix_muted || mn->m_id == RPCM_set_scene_muted;
         bool snap_output_gain = false;
         bool snap_nam_gain_rt = false;
         bool snap_snam_gain_rt = false;
@@ -738,7 +871,14 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         // catches malformed scene payloads without leaving a partially applied
         // rack merely because a later pair had the wrong type.
         gx_engine::ParamMap& param = serv.settings.get_param();
-        for (unsigned int i = 0; i < params.size(); i += 2) {
+        if (activating_matrix && externally_muted) {
+            snap_output_gain = matrix->smoother_targets & 1;
+            snap_nam_gain_rt = matrix->smoother_targets & 2;
+            snap_snam_gain_rt = matrix->smoother_targets & 4;
+            snap_nam_second_gain_rt = matrix->smoother_targets & 8;
+            snap_mnam_gain_rt = matrix->smoother_targets & 16;
+        }
+        if (!activating_matrix) for (unsigned int i = 0; i < params.size(); i += 2) {
             const Glib::ustring& attr = params[i]->getString();
             if (!param.hasId(attr)) {
                 throw RpcError(
@@ -812,7 +952,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         // that candidate transaction before changing any engine parameter.
         bool matrix_transaction = false;
         std::map<std::string, int> matrix_values;
-        for (unsigned int i = 0; i < params.size(); i += 2) {
+        if (!activating_matrix) for (unsigned int i = 0; i < params.size(); i += 2) {
             const std::string attr = params[i]->getString();
             const auto suffix = attr.substr(attr.rfind('.') + 1);
             if (suffix == "matrix_source" || suffix == "matrix_resident" || attr == "matrix_splitter.on_off" ||
@@ -829,12 +969,34 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                 }
             }
         }
-        if (matrix_transaction) {
+        if (matrix_transaction && !activating_matrix) {
             std::string error;
             if (!serv.jack.get_engine().pluginlist.validate_matrix(matrix_values, error))
                 throw RpcError(-32602, error);
         }
 
+        if (preparing_matrix) {
+            compile_matrix(*matrix);
+            serv.matrices.emplace(matrix->handle, matrix);
+            jw.begin_object();
+            jw.write_kv("handle", matrix->handle);
+            jw.write_kv("matrixId", matrix->matrix_id);
+            jw.write_kv("generation", matrix->generation);
+            jw.write_bool_kv("ready", true);
+            jw.write_bool_kv("assetsReady", true);
+            jw.write_bool_kv("requiresGuard", true);
+            jw.write_bool_kv("pointerSwitchReady", false);
+            jw.write_kv("estimatedAssetBytes", static_cast<double>(matrix->estimated_bytes));
+            jw.write_kv("assetBudgetBytes", 268435456);
+            jw.write_kv("namCapacity", 8);
+            jw.write_kv("irCapacity", 8);
+            jw.write_kv("namCount", matrix->nam_count);
+            jw.write_kv("irCount", matrix->ir_count);
+            jw.write_kv("memoryAccounting", "estimated-assets");
+            jw.write_kv("preparationMs", elapsed_ms(scene_started_at, SceneClock::now()));
+            jw.end_object();
+            break;
+        }
         const auto validation_finished_at = SceneClock::now();
         gx_engine::GxEngine& engine = serv.jack.get_engine();
         // A model replacement already obtains exclusive ownership of its DSP
@@ -857,7 +1019,15 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         bool nam_second_gain_control_preset = false;
         bool mnam_gain_control_preset = false;
         try {
-            apply_parameter_set(params);
+            if (activating_matrix) {
+                engine.snapshots.invalidate();
+                for (const auto& asset : matrix->nam) {
+                    if (asset.slot == "A" || asset.slot == "B") engine.mneural_amp.select_matrix_model(asset.slot[0], asset.path, asset.size);
+                    else (asset.slot == "nam" ? engine.neural_amp : asset.slot == "nam__2" ? engine.neural_amp_second : engine.sneural_amp).select_matrix_model(asset.path, asset.size);
+                }
+                for (const auto& assignment : matrix->assignments) assignment();
+                serv.save_state();
+            } else apply_parameter_set(params);
             nam_gain_preset = engine.neural_amp.finish_scene_parameter_batch();
             snam_gain_preset = engine.sneural_amp.finish_scene_parameter_batch();
             nam_second_gain_preset = engine.neural_amp_second.finish_scene_parameter_batch();
@@ -1023,6 +1193,9 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             output_gain_settled && nam_gain_settled &&
             snam_gain_settled && mnam_gain_settled && nam_second_gain_settled;
 
+        if (activating_matrix && matrix->runtime_epoch != engine.snapshots.runtime_epoch())
+            throw RpcError(-32001, "Audio runtime reconfigured during matrix activation");
+
         if (!commit_ok || !chain_settled || !gain_smoothers_settled ||
             !scene_audio_ready) {
             // Callback entry is the scene-cutover predicate. Callback finish
@@ -1088,6 +1261,12 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         // This is an audible-cutover boundary, not a claim that a stateful
         // processor has reached its later mature output.
         jw.begin_object();
+        if (activating_matrix) {
+            serv.active_matrix = matrix->handle;
+            jw.write_kv("matrixHandle", matrix->handle);
+            jw.write_kv("matrixGeneration", matrix->generation);
+            jw.write_bool_kv("matrixActivated", true);
+        }
         jw.write_kv("applied", static_cast<int>(params.size() / 2));
         // Preserve the historical aggregate for older clients. It includes
         // resident bypass changes, so use the explicit field below to measure
@@ -1165,6 +1344,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_bool_kv("mnamGainSmootherSettled", mnam_gain_settled);
         jw.write_key("phaseTimingsMs");
         jw.begin_object();
+        jw.write_kv("parseDispatch", last_parse_dispatch_ms);
         jw.write_kv("validation", elapsed_ms(scene_started_at, validation_finished_at));
         jw.write_kv("parameterApply", elapsed_ms(validation_finished_at, parameters_finished_at));
         jw.write_kv("moduleCommit", elapsed_ms(parameters_finished_at, module_commit_finished_at));
@@ -1829,6 +2009,185 @@ static void note_snapshot_parameter_change(gx_engine::GxEngine& engine, gx_engin
     }
 }
 
+void GxService::release_matrix_assets() {
+    auto& engine = jack.get_engine();
+    engine.neural_amp.release_matrix_models();
+    engine.neural_amp_second.release_matrix_models();
+    engine.sneural_amp.release_matrix_models();
+    engine.mneural_amp.release_matrix_models();
+    engine.mono_convolver.release_matrix_irs();
+    engine.ir_convolver.release_matrix_irs();
+    engine.ir_convolver_second.release_matrix_irs();
+    engine.stereo_convolver.release_matrix_irs();
+}
+
+bool CmdConnection::matrix_assets_ready(const PreparedMatrixScene& matrix) {
+    auto& engine = serv.jack.get_engine();
+    for (const auto& asset : matrix.nam) {
+        const bool ready = (asset.slot == "A" || asset.slot == "B") ?
+            engine.mneural_amp.matrix_model_ready(asset.slot[0], asset.path, asset.size) :
+            (asset.slot == "nam" ? engine.neural_amp : asset.slot == "nam__2" ? engine.neural_amp_second : engine.sneural_amp).matrix_model_ready(asset.path, asset.size);
+        if (!ready) return false;
+    }
+    for (const auto& ir : matrix.ir) if (!ir.first->matrix_ir_ready(ir.second)) return false;
+    return true;
+}
+
+void CmdConnection::compile_matrix(PreparedMatrixScene& matrix) {
+    auto& engine = serv.jack.get_engine();
+    const unsigned int preparation_epoch = engine.snapshots.runtime_epoch();
+    auto& parameters = serv.settings.get_param();
+    if (engine.snapshots.busy() || !engine.scene_commit_ready()) throw RpcError(-32000, "Engine busy");
+    if (matrix.parameters.size() > 8192) throw RpcError(-32602, "Matrix assignment capacity exceeded");
+    std::set<std::string> names;
+    std::map<std::string, std::string> structure;
+    std::map<std::string, size_t> nam_bytes, ir_bytes;
+    std::vector<gx_engine::PreparedNamModelDescriptor> dual;
+    // Include every retained recipe in admission accounting; do not confuse
+    // cached assets with the number of live plugin wrappers.
+    PreparedMatrixScene resident_irs;
+    for (gx_engine::ConvolverAdapter* adapter : std::vector<gx_engine::ConvolverAdapter*>{static_cast<gx_engine::ConvolverAdapter*>(&engine.mono_convolver),
+            &engine.ir_convolver, &engine.ir_convolver_second, static_cast<gx_engine::ConvolverAdapter*>(&engine.stereo_convolver)})
+        for (const auto& settings : adapter->matrix_ir_inventory()) resident_irs.ir.push_back({adapter, settings});
+    std::vector<const PreparedMatrixScene*> pool{&matrix, &resident_irs};
+    for (const auto& item : serv.matrices) if (item.second->generation == serv.matrix_generation) pool.push_back(item.second.get());
+    for (unsigned i = 0; i < matrix.parameters.size(); i += 2) {
+        const std::string id = matrix.parameters[i]->getString();
+        if (!names.insert(id).second) throw RpcError(-32602, "Duplicate matrix setting: " + id);
+        auto* parameter = &parameters[id];
+        auto* value = matrix.parameters[i + 1];
+        std::function<void()> setter;
+        if (parameter->isFloat() || parameter->isInt() || parameter->isBool()) {
+            double number;
+            if (parameter->getControlType() == gx_engine::Parameter::Enum && dynamic_cast<JsonString*>(value))
+                number = parameter->isFloat() ? parameter->getFloat().idx_from_id(value->getString()) : parameter->getInt().idx_from_id(value->getString());
+            else number = value->getFloat();
+            if (!std::isfinite(number) || (parameter->isBool() && number != 0 && number != 1) ||
+                (parameter->isInt() && number != std::floor(number)) ||
+                (parameter->hasRange() && (number < parameter->getLowerAsFloat() || number > parameter->getUpperAsFloat())))
+                throw RpcError(-32602, "Invalid matrix scalar: " + id);
+            setter = [parameter, number]() {
+                if (parameter->isFloat()) parameter->getFloat().set(number);
+                else if (parameter->isInt()) parameter->getInt().set(number);
+                else parameter->getBool().set(number != 0);
+            };
+        } else if (auto* convolver = dynamic_cast<gx_engine::JConvParameter*>(parameter)) {
+            gx_engine::GxJConvSettings settings;
+            auto parser = value->getSubParser();
+            settings.readJSON(parser);
+            gx_engine::ConvolverAdapter* adapter = id == "jconv_mono.convolver" ? &engine.mono_convolver :
+                id == "ir.convolver" ? &engine.ir_convolver : id == "ir__2.convolver" ? &engine.ir_convolver_second :
+                id == "jconv.convolver" ? static_cast<gx_engine::ConvolverAdapter*>(&engine.stereo_convolver) : nullptr;
+            if (!adapter) throw RpcError(-32602, "Unsupported matrix convolver: " + id);
+            matrix.ir.push_back({adapter, settings});
+            setter = [convolver, settings]() { convolver->set(settings); };
+        } else throw RpcError(-32602, "Unsupported matrix asset/control: " + id);
+        matrix.assignments.push_back([parameter, setter]() {
+            parameter->set_blocked(true);
+            try { setter(); } catch (...) { parameter->set_blocked(false); throw; }
+            parameter->set_blocked(false);
+        });
+        if (id == "amp.out_master") matrix.smoother_targets |= 1;
+        if (id == "nam.input" || id == "nam.output" || id == "nam.on_off") matrix.smoother_targets |= 2;
+        if (id == "snam.input" || id == "snam.output" || id == "snam.on_off") matrix.smoother_targets |= 4;
+        if (id == "nam__2.input" || id == "nam__2.output" || id == "nam__2.on_off") matrix.smoother_targets |= 8;
+        if (id == "mnam.input" || id == "mnam.inputb" || id == "mnam.output" || id == "mnam.mix" || id == "mnam.on_off") matrix.smoother_targets |= 16;
+        const auto suffix = id.substr(id.rfind('.') + 1);
+        if (snapshot_structural_parameter_id(id) || (suffix == "on_off" &&
+                (id.compare(0, 7, "matrix_") == 0 || id == "ampstack.on_off" || id == "amp.tonestack.on_off"))) {
+            gx_system::JsonStringWriter writer;
+            if (dynamic_cast<JsonObject*>(value)) value->getSubParser().copy_object(writer);
+            else if (dynamic_cast<JsonString*>(value)) writer.write(value->getString());
+            else writer.write(value->getFloat());
+            structure[id] = writer.get_string();
+        }
+        // File selectors must not smuggle a synchronous load past preparation.
+        if (suffix == "flist" || suffix == "falist" || suffix == "fblist" || suffix.compare(0, 4, "load") == 0)
+            throw RpcError(-32602, "Matrix NAM files must use asset descriptors: " + id);
+        if (id == "nam.size" || id == "nam__2.size" || id == "snam.size" || id == "mnam.sizea" || id == "mnam.sizeb")
+            throw RpcError(-32602, "Matrix NAM profiles must use asset descriptors: " + id);
+    }
+    for (const std::string prefix : {"ir", "ir__2", "jconv_mono", "jconv"}) {
+        if (names.count(prefix + ".convolver")) continue;
+        for (unsigned i = 0; i < matrix.parameters.size(); i += 2) {
+            const std::string id = matrix.parameters[i]->getString();
+            if ((id == prefix + ".on_off" || id == prefix + ".scene_resident") && matrix.parameters[i + 1]->getInt())
+                throw RpcError(-32602, "Resident convolver requires an explicit prepared IR: " + prefix);
+        }
+    }
+    for (const auto* recipe : pool) {
+        for (const auto& asset : recipe->nam) {
+            if (asset.path.empty()) continue;
+            struct stat info;
+            if (stat(asset.path.c_str(), &info) || !S_ISREG(info.st_mode) || info.st_size <= 0)
+                throw RpcError(-32602, "Missing matrix NAM asset: " + asset.path);
+            const std::string key = asset.slot + ":" + asset.path + ":" + std::to_string(asset.size);
+            nam_bytes[key] = static_cast<size_t>(info.st_size) * 4;
+            if (asset.slot == "A" || asset.slot == "B") dual.push_back({asset.slot[0], asset.path, asset.size});
+        }
+        for (const auto& ir : recipe->ir) {
+            gx_engine::Audiofile audio;
+            if (audio.open_read(ir.second.getFullIRPath()) != 0 || !audio.rate())
+                throw RpcError(-32602, "Missing/invalid matrix IR asset");
+            gx_system::JsonStringWriter writer;
+            ir.second.writeJSON(writer);
+            const std::string key = std::to_string(reinterpret_cast<uintptr_t>(ir.first)) + writer.get_string();
+            // Conservative admission estimate: decoded/resampled IR, FFT
+            // partitions and block buffers. It is explicitly not measured RSS.
+            if (!std::isfinite(ir.second.getGain()) || ir.second.getDelay() > static_cast<unsigned>(audio.rate()) * 10 ||
+                ir.second.getOffset() >= audio.size() || ir.second.getLength() > audio.size())
+                throw RpcError(-32602, "Invalid prepared IR gain, offset, length or delay");
+            ir_bytes[key] = static_cast<size_t>(std::ceil((double(audio.size()) + ir.second.getDelay()) * engine.get_samplerate() / audio.rate())) *
+                std::max(2, audio.chan()) * 32 + 262144;
+        }
+    }
+    // Admission covers active and cached processors too, including an audible
+    // previous song that is deliberately left alone during this preparation.
+    const auto account_nam = [&](const std::string& slot, const gx_engine::PreparedNamModelDescriptor& asset) {
+        if (asset.filename.empty()) return;
+        struct stat info;
+        const size_t bytes = stat(asset.filename.c_str(), &info) == 0 ? static_cast<size_t>(info.st_size) * 4 : 33554432;
+        nam_bytes[slot + ":" + asset.filename + ":" + std::to_string(asset.size)] = bytes;
+    };
+    for (const auto& asset : engine.neural_amp.matrix_model_inventory()) account_nam("nam", asset);
+    for (const auto& asset : engine.neural_amp_second.matrix_model_inventory()) account_nam("nam__2", asset);
+    for (const auto& asset : engine.sneural_amp.matrix_model_inventory()) account_nam("snam", asset);
+    for (const auto& asset : engine.mneural_amp.matrix_model_inventory()) account_nam(std::string(1, asset.slot), asset);
+    matrix.nam_count = nam_bytes.size();
+    matrix.ir_count = ir_bytes.size();
+    if (nam_bytes.size() > 8 || ir_bytes.size() > 8) throw RpcError(-32000, "Song exceeds prepared NAM/IR asset capacity (8 each)");
+    for (const auto& item : nam_bytes) matrix.estimated_bytes += item.second;
+    for (const auto& item : ir_bytes) matrix.estimated_bytes += item.second;
+    if (matrix.estimated_bytes > 268435456) throw RpcError(-32000, "Song exceeds estimated prepared asset budget (256 MiB)");
+    for (const auto& item : structure) matrix.structure += item.first + "=" + item.second + "\n";
+    for (const auto& asset : matrix.nam) matrix.structure += asset.slot + ":" + asset.path + ":" + std::to_string(asset.size) + "\n";
+    for (const auto* recipe : pool) if (recipe != &matrix && recipe->matrix_id == matrix.matrix_id && recipe->structure != matrix.structure)
+        throw RpcError(-32602, "Snapshot changed a structural or file setting; use a new matrix identity");
+    try {
+        for (const auto& asset : matrix.nam) if (asset.slot != "A" && asset.slot != "B") {
+            auto& plugin = asset.slot == "nam" ? engine.neural_amp : asset.slot == "nam__2" ? engine.neural_amp_second : engine.sneural_amp;
+            if (!plugin.prepare_matrix_model(asset.path, asset.size)) throw RpcError(-32000, "NAM matrix preparation failed");
+        }
+        if (!engine.mneural_amp.prepare_song_models(std::to_string(serv.matrix_generation), dual).rapid_switch_ready)
+            throw RpcError(-32000, "Dual NAM matrix preparation failed");
+        for (const auto& ir : matrix.ir) if (!ir.first->prepare_matrix_ir(ir.second)) throw RpcError(-32000, "IR matrix preparation failed");
+        if (preparation_epoch != engine.snapshots.runtime_epoch() || !matrix_assets_ready(matrix))
+            throw RpcError(-32000, "Audio runtime changed during matrix preparation");
+    } catch (...) {
+        serv.invalidate_matrices();
+        serv.release_matrix_assets();
+        throw;
+    }
+    matrix.generation = serv.matrix_generation;
+    matrix.samplerate = engine.get_samplerate();
+    matrix.buffersize = engine.get_buffersize();
+    matrix.jack_generation = serv.jack.get_jack_client_activity_status().generation;
+    matrix.runtime_epoch = engine.snapshots.runtime_epoch();
+    matrix.handle = "matrix:" + engine.snapshots.instance() + ":" + std::to_string(matrix.generation) + ":" + std::to_string(++serv.matrix_serial);
+    // The caller owns the shared object until it is admitted here.
+    // Inserted by matrix_prepare after compile returns.
+}
+
 void CmdConnection::apply_parameter_set(JsonArray& params) {
     if (params.size() & 1) {
         throw RpcError(-32602, "Invalid param -- array length must be even");
@@ -1840,6 +2199,7 @@ void CmdConnection::apply_parameter_set(JsonArray& params) {
             continue;
         }
         gx_engine::Parameter& p = param[attr];
+        if (snapshot_structural_parameter_id(attr)) serv.invalidate_matrices();
         p.set_blocked(true);
         try {
             JsonValue *v = params[i+1];
@@ -2277,6 +2637,10 @@ bool CmdConnection::request(gx_system::JsonStringParser& jp, gx_system::JsonStri
     // host does not carry the gperf build dependency.
     static const methodnames fallback_methods[] = {
         { "set_scene", RPCM_set_scene },
+        { "matrix_begin", RPCM_matrix_begin },
+        { "matrix_prepare", RPCM_matrix_prepare },
+        { "matrix_activate", RPCM_matrix_activate },
+        { "matrix_release", RPCM_matrix_release },
         { "snapshot_clock", RPCM_snapshot_clock },
         { "snapshot_prepare", RPCM_snapshot_prepare },
         { "snapshot_activate", RPCM_snapshot_activate },
@@ -3024,6 +3388,7 @@ void GxService::connect_value_changed_signal(gx_engine::Parameter *p) {
 }
 
 void GxService::on_param_insert_remove(gx_engine::Parameter *p, bool inserted) {
+    invalidate_matrices();
     jack.get_engine().snapshots.invalidate();
     if (preg_map) {
         (*preg_map)[p->id()] = inserted;
@@ -3035,6 +3400,7 @@ void GxService::on_param_insert_remove(gx_engine::Parameter *p, bool inserted) {
 
 void GxService::on_param_value_changed(gx_engine::Parameter *p) {
     if (p->get_blocked()) return;
+    if (snapshot_structural_parameter_id(p->id())) invalidate_matrices();
     note_snapshot_parameter_change(jack.get_engine(), *p);
     gx_system::JsonStringWriter *jw = new gx_system::JsonStringWriter;
     jw->send_notify_begin("set");
@@ -3137,6 +3503,7 @@ void GxService::on_engine_state_change(gx_engine::GxEngineState state) {
 }
 
 void GxService::preset_changed() {
+    invalidate_matrices();
     jack.get_engine().snapshots.invalidate();
     if (!broadcast_listeners(CmdConnection::f_preset_changed)) {
         return;

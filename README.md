@@ -74,6 +74,8 @@ path for structural and asset changes. Resident bypass signals have their own
 RT dirty class, so ordinary bypass does not rerun module selectors or rebuild
 processing lists. Topology and asset changes invalidate prepared snapshot handles.
 
+Phase 2 additionally supports prepared matrix recipes as described below.
+
 For an already committed matrix, the compact JSON-RPC API is:
 
 - `snapshot_prepare(matrixSignature, snapshotId, parameter, value, ...)` resolves
@@ -115,3 +117,45 @@ in two instances, allocation-free activation, the 4 ms DC transition envelope,
 frame wrap, stale handles, late frames, constant guards and callback ownership
 after cancellation. Device recordings and end-to-end latency/XRUN measurement
 are still required to establish the performance acceptance targets.
+
+## Prepared matrix recipes (Trinity Phase 2)
+
+Song preparation now has a server-owned, generation-scoped recipe pool:
+
+- `matrix_begin()` retires previous handles and inactive prepared assets, and
+  returns protocol version 2, the generation and admission limits.
+- `matrix_prepare(generation, matrixId, snapshotId, sceneJson, namJson)` validates
+  the whole graph, resolves typed parameter setters and prepares its assets.
+  `sceneJson` is an encoded alternating parameter/value array. `namJson` is an
+  encoded sequence of slot/path/profile triples; slots are `nam`, `nam__2`,
+  `snam`, `A` and `B`. Empty paths explicitly clear a slot. Numeric directory
+  selectors, NAM profile setters and unhandled file controls are rejected.
+- `matrix_activate(handle, externallyMuted)` applies the retained recipe through
+  the existing scene commit (`externallyMuted` must be integer 1 in Phase 2). The reply
+  includes `matrixHandle`, `matrixGeneration`, `matrixActivated`, normal scene
+  readiness fields and timings. Error -32003 rejects stale handles/assets before
+  applying anything; other activation errors must be treated as uncertain.
+- `matrix_release(handle)` releases that recipe and invalidates snapshots.
+  Shared assets are retained until the next `matrix_begin()`.
+
+Each recipe contains its initial snapshot controls. Recipes sharing `matrixId`
+may differ only in nonstructural controls. Guitarix completes omitted dynamic
+rack state from deterministic defaults rather than the live graph. Once active,
+its handle can replace the legacy signature argument to `snapshot_prepare`.
+Matrix and snapshot handles include an engine-instance identity; pool epochs,
+JACK activity, runtime reconfiguration and sample/block dimensions fence reuse.
+
+Admission allows 128 recipes, eight NAM slot/file/profile identities and eight
+IR slot/configuration identities, including active assets. A 256 MiB estimated
+asset budget is enforced before loading. Replies expose `namCount`, `irCount`,
+`estimatedAssetBytes`, `assetBudgetBytes` and `memoryAccounting=estimated-assets`.
+These estimates cover source/model and convolution storage, not measured process
+RSS or every plugin/worker/allocator allocation. NAM models are loaded/prewarmed
+through their existing DSP loader. IR preparation creates and exercises separate
+convolvers; guarded activation transfers ownership of cached processors.
+
+`ready`/`assetsReady` means a validated recipe with prepared assets.
+`requiresGuard=true` and `pointerSwitchReady=false` are deliberate: module-list
+publication, plugin lifecycle work, resampler setup and the singular amp chain
+still use the general guarded commit. Phase 3's independently running Current/
+Next chains and Phase 4's short physical cutover are not implemented here.

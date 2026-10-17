@@ -1069,7 +1069,7 @@ JackClientActivityStatus GxJack::set_client_activity(bool active) {
         : !amp_client_active && (single_client || !fx_client_active);
     if (reached_target && changed && client_activity_last_error.empty()) {
         ++client_activity_generation;
-        engine.snapshots.invalidate();
+        engine.snapshots.invalidate_runtime();
     }
     return client_activity_status_unlocked(
         reached_target && client_activity_last_error.empty(), changed);

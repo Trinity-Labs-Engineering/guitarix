@@ -25,6 +25,8 @@
 #include "engine.h"
 #include <bitset>
 #include <queue>
+#include <functional>
+#include <memory>
 #include <giomm/init.h>     // NOLINT
 #include <giomm/socketservice.h>
 #ifndef GUITARIX_AS_PLUGIN
@@ -53,6 +55,23 @@ public:
     ~JsonArray();
     JsonValue *operator[](unsigned int i);
     void append(gx_system::JsonParser& jp);
+    void add_int(const std::string& name, int value);
+};
+
+// Control-thread objects. These describe a validated recipe, not a second
+// running DSP chain. Phase 2 activation still uses the guarded module commit.
+struct PreparedMatrixScene {
+    struct NamAsset { std::string slot; Glib::ustring path; float size; };
+    std::string handle, matrix_id, snapshot_id, structure;
+    unsigned int generation = 0, samplerate = 0, buffersize = 0, runtime_epoch = 0;
+    uint64_t jack_generation = 0;
+    gx_system::JsonStringParser parser;
+    JsonArray parameters;
+    std::vector<std::function<void()>> assignments;
+    std::vector<NamAsset> nam;
+    std::vector<std::pair<gx_engine::ConvolverAdapter*, gx_engine::GxJConvSettings>> ir;
+    size_t estimated_bytes = 0;
+    unsigned int nam_count = 0, ir_count = 0, smoother_targets = 0;
 };
 
 class CmdConnection: public sigc::trackable {
@@ -95,6 +114,8 @@ private:
     void call(gx_system::JsonWriter& jw, const methodnames *mn, JsonArray& params);
     void notify(gx_system::JsonStringWriter& jw, const methodnames *mn, JsonArray& params);
     void apply_parameter_set(JsonArray& params);
+    void compile_matrix(PreparedMatrixScene& matrix);
+    bool matrix_assets_ready(const PreparedMatrixScene& matrix);
     bool request(gx_system::JsonStringParser& jp, gx_system::JsonStringWriter& jw, bool batch_start);
     void write_error(gx_system::JsonWriter& jw, int code, const char *message);
     void write_error(gx_system::JsonWriter& jw, int code, Glib::ustring& message) { write_error(jw, code, message.c_str()); }
@@ -143,6 +164,14 @@ private:
     gx_system::JsonStringWriter *jwc;
     std::map<std::string,bool> *preg_map;
     std::map<std::string,float> maxlevel;
+    unsigned int matrix_generation = 1, matrix_serial = 0;
+    bool applying_matrix = false;
+    std::string active_matrix;
+    std::map<std::string, std::shared_ptr<PreparedMatrixScene>> matrices;
+    void invalidate_matrices() {
+        if (!applying_matrix) { ++matrix_generation; active_matrix.clear(); }
+    }
+    void release_matrix_assets();
 private:
     virtual bool on_incoming(const Glib::RefPtr<Gio::SocketConnection>& connection,
 			     const Glib::RefPtr<Glib::Object>& source_object);

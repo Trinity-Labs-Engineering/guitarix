@@ -389,7 +389,12 @@ typedef ParameterV<GxJConvSettings> JConvParameter;
 
 class ConvolverAdapter: protected PluginDef, public sigc::trackable {
 protected:
-    GxConvolver conv;
+    std::unique_ptr<GxConvolver> conv;
+    struct PreparedIR {
+        GxJConvSettings settings;
+        std::unique_ptr<GxConvolver> processor;
+    };
+    std::vector<PreparedIR> prepared_irs;
     boost::mutex activate_mutex;
     EngineControl& engine;
     sigc::slot<void> sync;
@@ -413,8 +418,17 @@ public:
     ~ConvolverAdapter();
     void restart();
     bool conv_start();
+    std::vector<GxJConvSettings> matrix_ir_inventory() const {
+        std::vector<GxJConvSettings> result;
+        if (has_configured_ir) result.push_back(configured_jcset);
+        for (const auto& ir : prepared_irs) result.push_back(ir.settings);
+        return result;
+    }
+    bool prepare_matrix_ir(const GxJConvSettings& settings);
+    bool matrix_ir_ready(const GxJConvSettings& settings);
+    void release_matrix_irs() { prepared_irs.clear(); }
     inline const std::string& getIRFile() const { return jcset.getIRFile(); }
-    inline void set_sync(bool val) { conv.set_sync(val); }
+    inline void set_sync(bool val) { conv->set_sync(val); }
     inline std::string getFullIRPath() const { return jcset.getFullIRPath(); }
     inline const std::string& getIRDir() const { return jcset.getIRDir(); }
     bool set(const GxJConvSettings& jcset) const { return jcp->set(jcset); }

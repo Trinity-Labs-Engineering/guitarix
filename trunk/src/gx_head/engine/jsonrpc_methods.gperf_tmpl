@@ -65,6 +65,10 @@ struct CmdConnection::methodnames;
 
 "get", true
 "set", false
+"matrix_begin", true
+"matrix_prepare", true
+"matrix_activate", true
+"matrix_release", true
 "snapshot_clock", true
 "snapshot_prepare", true
 "snapshot_activate", true

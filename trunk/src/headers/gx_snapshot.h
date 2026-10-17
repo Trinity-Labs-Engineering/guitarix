@@ -2,6 +2,7 @@
  * plugin lifecycle operations occur in the JACK callbacks. */
 #pragma once
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -30,12 +31,16 @@ struct PreparedSnapshot {
     std::vector<SnapshotControl> controls;
     bool bypass_changed;
     std::vector<SnapshotGuard> guards;
+    std::string matrix_handle;
+    unsigned int pool_generation = 0;
 };
 
 class SnapshotScheduler {
+    const std::string instance_id;
     std::map<std::string, PreparedSnapshot> prepared;
     std::atomic<PreparedSnapshot*> pending;
     std::atomic<unsigned int> matrix_generation;
+    std::atomic<unsigned int> runtime_generation;
     std::atomic<unsigned int> readers;
     struct Reader {
         std::atomic<unsigned int>& count;
@@ -51,7 +56,9 @@ class SnapshotScheduler {
     std::atomic<unsigned int> applied_controls;
     std::atomic<bool> changed_bypass;
 public:
-    SnapshotScheduler(): pending(nullptr), matrix_generation(1), readers(0), serial(0),
+    SnapshotScheduler(): instance_id(std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+        ":" + std::to_string(reinterpret_cast<std::uintptr_t>(this))),
+        pending(nullptr), matrix_generation(1), runtime_generation(1), readers(0), serial(0),
         target_frame(0), half_fade(1), first_output_frame(0), applied_controls(0), changed_bypass(false) {
         for (unsigned int i = 0; i < 2; ++i) {
             progress[i].store(0); completed_frame[i].store(0);
@@ -61,7 +68,10 @@ public:
         return static_cast<int32_t>(a - b); // JACK's wrapping 32-bit frame clock
     }
     unsigned int generation() const { return matrix_generation.load(); }
+    const std::string& instance() const { return instance_id; }
     void invalidate() { matrix_generation.fetch_add(1); }
+    void invalidate_runtime() { runtime_generation.fetch_add(1); invalidate(); }
+    unsigned int runtime_epoch() const { return runtime_generation.load(); }
     bool quiescent() const { return readers.load() == 0; }
     bool busy() const { return pending.load() != nullptr || !quiescent(); }
     PreparedSnapshot& prepare(std::vector<SnapshotControl> controls, bool bypass,
@@ -73,8 +83,8 @@ public:
             else ++i;
         }
         if (prepared.size() >= 256) prepared.erase(prepared.begin());
-        const std::string handle = std::to_string(generation()) + ":" + std::to_string(++serial);
-        PreparedSnapshot snapshot{handle, generation(), std::move(controls), bypass, std::move(guards)};
+        const std::string handle = instance_id + ":" + std::to_string(generation()) + ":" + std::to_string(++serial);
+        PreparedSnapshot snapshot{handle, generation(), std::move(controls), bypass, std::move(guards), {}, 0};
         return prepared.emplace(handle, std::move(snapshot)).first->second;
     }
     PreparedSnapshot* find(const std::string& handle) {

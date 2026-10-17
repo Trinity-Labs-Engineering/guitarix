@@ -696,7 +696,7 @@ void EngineControl::set_samplerate(unsigned int samplerate_) {
     if (samplerate == samplerate_) {
 	return;
     }
-    snapshots.invalidate();
+    snapshots.invalidate_runtime();
     samplerate = samplerate_;
     pluginlist.set_samplerate(samplerate);
     samplerate_change(samplerate);
@@ -706,7 +706,7 @@ void EngineControl::set_buffersize(unsigned int buffersize_) {
     if (buffersize == buffersize_) {
 	return;
     }
-    snapshots.invalidate();
+    snapshots.invalidate_runtime();
     buffersize = buffersize_;
     buffersize_change(buffersize);
 }
@@ -1143,7 +1143,7 @@ void __rt_func ModuleSequencer::set_stateflag(StateFlag flag) {
 	return;
     }
     boost::mutex::scoped_lock lock(stateflags_mutex);
-    snapshots.invalidate();
+    snapshots.invalidate_runtime();
     mono_chain.set_stopped(true);
     stereo_chain.set_stopped(true);
     if (!stateflags) {
@@ -1190,6 +1190,7 @@ void ModuleSequencer::set_state(GxEngineState state) {
 	return;
     }
     audio_mode = newmode;
+    snapshots.invalidate_runtime();
     set_rack_changed();
     state_change(state);
 }

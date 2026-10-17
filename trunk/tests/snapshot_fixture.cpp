@@ -97,6 +97,10 @@ int main() {
     a.begin(0, 352);
     assert(a.failed() && am.updates == old_updates);
     a.release();
+    assert(a.instance() != b.instance());
+    const auto epoch = a.runtime_epoch();
+    a.invalidate_runtime();
+    assert(a.runtime_epoch() == epoch + 1);
     // Structural/asset changes make old handles unusable; snapshot controls
     // cannot silently retain pointers from a previous engine generation.
     a.invalidate();
