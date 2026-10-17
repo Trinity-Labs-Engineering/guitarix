@@ -1193,11 +1193,11 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         bool snam_gain_preset = false;
         bool nam_second_gain_preset = false;
         bool mnam_gain_preset = false;
-        bool output_gain_control_preset = false;
-        bool nam_gain_control_preset = false;
-        bool snam_gain_control_preset = false;
-        bool nam_second_gain_control_preset = false;
-        bool mnam_gain_control_preset = false;
+        bool output_gain_callback_preset = false;
+        bool nam_gain_callback_preset = false;
+        bool snam_gain_callback_preset = false;
+        bool nam_second_gain_callback_preset = false;
+        bool mnam_gain_callback_preset = false;
         try {
             if (activating_matrix) {
                 engine.snapshots.invalidate();
@@ -1252,11 +1252,9 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         const auto chain_ramp_finished_at = SceneClock::now();
 
         // Commit first: activation of a newly inserted processor may clear its
-        // state. Once the final chain is published, quiesce every changed
-        // smoother together and use one callback completion as an ownership
-        // barrier. This is independent of processor position and closes the
-        // race where a callback had already passed mNAM/output before the old
-        // RT snap was armed, yet its later completion satisfied the wait.
+        // state. Then preset gains in the owning callbacks while DSP continues
+        // uninterrupted. The barrier checks the actual requests, including
+        // when an in-flight callback had already passed a requested processor.
         const bool scene_control_barrier_requested =
             commit_ok && chain_settled && requested_gain_snaps > 0;
         bool scene_control_barrier_finished =
@@ -1267,33 +1265,32 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                     snap_output_gain, snap_nam_gain_rt,
                     snap_snam_gain_rt, snap_mnam_gain_rt, snap_nam_second_gain_rt);
             if (scene_control_barrier_finished) {
-                output_gain_control_preset = snap_output_gain;
-                nam_gain_control_preset = snap_nam_gain_rt;
-                snam_gain_control_preset = snap_snam_gain_rt;
-                nam_second_gain_control_preset = snap_nam_second_gain_rt;
-                mnam_gain_control_preset = snap_mnam_gain_rt;
-                output_gain_preset = output_gain_control_preset;
-                nam_gain_preset = nam_gain_preset || nam_gain_control_preset;
-                snam_gain_preset = snam_gain_preset || snam_gain_control_preset;
-                nam_second_gain_preset = nam_second_gain_preset || nam_second_gain_control_preset;
-                mnam_gain_preset = mnam_gain_preset || mnam_gain_control_preset;
+                output_gain_callback_preset = snap_output_gain;
+                nam_gain_callback_preset = snap_nam_gain_rt;
+                snam_gain_callback_preset = snap_snam_gain_rt;
+                nam_second_gain_callback_preset = snap_nam_second_gain_rt;
+                mnam_gain_callback_preset = snap_mnam_gain_rt;
+                output_gain_preset = output_gain_callback_preset;
+                nam_gain_preset = nam_gain_preset || nam_gain_callback_preset;
+                snam_gain_preset = snam_gain_preset || snam_gain_callback_preset;
+                nam_second_gain_preset = nam_second_gain_preset || nam_second_gain_callback_preset;
+                mnam_gain_preset = mnam_gain_preset || mnam_gain_callback_preset;
             }
         }
         const auto smoother_barrier_finished_at = SceneClock::now();
 
-        // A timed-out ownership barrier leaves accumulator state untouched and
-        // restores every processor. Retain the RT request as a bounded fallback
-        // so a transient scheduling delay can still complete this transaction.
+        // Retain unacknowledged RT requests as a bounded fallback so a transient
+        // scheduling delay can still complete this transaction.
         const bool output_gain_rt_requested =
-            snap_output_gain && !output_gain_control_preset;
+            snap_output_gain && !output_gain_callback_preset;
         const bool nam_gain_rt_requested =
-            snap_nam_gain_rt && !nam_gain_control_preset;
+            snap_nam_gain_rt && !nam_gain_callback_preset;
         const bool snam_gain_rt_requested =
-            snap_snam_gain_rt && !snam_gain_control_preset;
+            snap_snam_gain_rt && !snam_gain_callback_preset;
         const bool nam_second_gain_rt_requested =
-            snap_nam_second_gain_rt && !nam_second_gain_control_preset;
+            snap_nam_second_gain_rt && !nam_second_gain_callback_preset;
         const bool mnam_gain_rt_requested =
-            snap_mnam_gain_rt && !mnam_gain_control_preset;
+            snap_mnam_gain_rt && !mnam_gain_callback_preset;
         if (output_gain_rt_requested) {
             engine.scene_outputlevel.request_scene_smoother_snap();
         }
@@ -1341,15 +1338,15 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         const auto audio_cycle_finished_at = SceneClock::now();
 
         bool output_gain_settled =
-            !snap_output_gain || output_gain_control_preset;
+            !snap_output_gain || output_gain_callback_preset;
         bool nam_gain_settled =
-            !snap_nam_gain_rt || nam_gain_control_preset;
+            !snap_nam_gain_rt || nam_gain_callback_preset;
         bool snam_gain_settled =
-            !snap_snam_gain_rt || snam_gain_control_preset;
+            !snap_snam_gain_rt || snam_gain_callback_preset;
         bool nam_second_gain_settled =
-            !snap_nam_second_gain_rt || nam_second_gain_control_preset;
+            !snap_nam_second_gain_rt || nam_second_gain_callback_preset;
         bool mnam_gain_settled =
-            !snap_mnam_gain_rt || mnam_gain_control_preset;
+            !snap_mnam_gain_rt || mnam_gain_callback_preset;
         if (output_gain_rt_requested) {
             output_gain_settled =
                 engine.scene_outputlevel.finish_scene_smoother_snap();
@@ -1504,23 +1501,23 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             "sceneControlBarrierFinished", scene_control_barrier_finished);
         jw.write_bool_kv("outputGainSmootherRequested", snap_output_gain);
         jw.write_bool_kv("outputGainSmootherPreset", output_gain_preset);
-        jw.write_bool_kv("outputGainSmootherRtRequested", output_gain_rt_requested);
+        jw.write_bool_kv("outputGainSmootherRtRequested", snap_output_gain);
         jw.write_bool_kv("outputGainSmootherSettled", output_gain_settled);
         jw.write_bool_kv("namGainSmootherRequested", snap_nam_gain_rt);
         jw.write_bool_kv("namGainSmootherPreset", nam_gain_preset);
-        jw.write_bool_kv("namGainSmootherRtRequested", nam_gain_rt_requested);
+        jw.write_bool_kv("namGainSmootherRtRequested", snap_nam_gain_rt);
         jw.write_bool_kv("namGainSmootherSettled", nam_gain_settled);
         jw.write_bool_kv("snamGainSmootherRequested", snap_snam_gain_rt);
         jw.write_bool_kv("namSecondGainSmootherRequested", snap_nam_second_gain_rt);
         jw.write_bool_kv("snamGainSmootherPreset", snam_gain_preset);
         jw.write_bool_kv("namSecondGainSmootherPreset", nam_second_gain_preset);
-        jw.write_bool_kv("snamGainSmootherRtRequested", snam_gain_rt_requested);
-        jw.write_bool_kv("namSecondGainSmootherRtRequested", nam_second_gain_rt_requested);
+        jw.write_bool_kv("snamGainSmootherRtRequested", snap_snam_gain_rt);
+        jw.write_bool_kv("namSecondGainSmootherRtRequested", snap_nam_second_gain_rt);
         jw.write_bool_kv("snamGainSmootherSettled", snam_gain_settled);
         jw.write_bool_kv("namSecondGainSmootherSettled", nam_second_gain_settled);
         jw.write_bool_kv("mnamGainSmootherRequested", snap_mnam_gain_rt);
         jw.write_bool_kv("mnamGainSmootherPreset", mnam_gain_preset);
-        jw.write_bool_kv("mnamGainSmootherRtRequested", mnam_gain_rt_requested);
+        jw.write_bool_kv("mnamGainSmootherRtRequested", snap_mnam_gain_rt);
         jw.write_bool_kv("mnamGainSmootherSettled", mnam_gain_settled);
         jw.write_key("phaseTimingsMs");
         jw.begin_object();
@@ -2239,7 +2236,21 @@ std::shared_ptr<PreparedMatrixBank> CmdConnection::compile_matrix_bank(std::shar
             values[id] = parameter.isFloat() ? parameter.getFloat().idx_from_id(value->getString()) : parameter.getInt().idx_from_id(value->getString());
         else values[id] = value->getFloat();
     }
-    const auto get = [&values](gx_engine::Plugin* plugin, const char* suffix, int fallback) {
+    // Selectors are control proxies: their alternative DSP children occupy
+    // the chain. Keep the selected amp recipe fixed, but order those children
+    // at the proxy's position in each bank (serial and split racks differ).
+    std::map<gx_engine::Plugin*, gx_engine::Plugin*> selector_parents;
+    for (auto* selector : {&engine.crybaby, &engine.crybaby_second,
+            &engine.wah, &engine.wah_second, &engine.tonestack,
+            &engine.ampstack, &engine.poweramps})
+        for (auto* child : selector->get_modules())
+            selector_parents[child] = &selector->plugin;
+    const auto get = [&values, &selector_parents](gx_engine::Plugin* plugin, const char* suffix, int fallback) {
+        auto parent = selector_parents.find(plugin);
+        if (parent != selector_parents.end()) {
+            plugin = parent->second;
+            fallback = std::string(suffix) == ".position" ? plugin->get_position() : plugin->get_effect_post_pre();
+        }
         auto found = values.find(std::string(plugin->get_pdef()->id) + suffix);
         return found == values.end() ? fallback : static_cast<int>(found->second);
     };
@@ -2249,6 +2260,13 @@ std::shared_ptr<PreparedMatrixBank> CmdConnection::compile_matrix_bank(std::shar
     if (!engine.pluginlist.validate_matrix(routing, error)) throw RpcError(-32602, error);
     std::set<gx_engine::Plugin*> mono_resident(engine.mono_chain.resident_modules().begin(), engine.mono_chain.resident_modules().end());
     std::set<gx_engine::Plugin*> stereo_resident(engine.stereo_chain.resident_modules().begin(), engine.stereo_chain.resident_modules().end());
+    for (const auto& item : selector_parents) {
+        auto* child = item.first;
+        if ((child->get_on_off() || child->get_scene_resident()) &&
+            (child->get_pdef()->mono_audio || child->get_pdef()->stereo_audio) &&
+            !mono_resident.count(child) && !stereo_resident.count(child))
+            throw RpcError(-32004, "Selector processor is not resident: " + std::string(child->get_pdef()->id));
+    }
     // Keep the resident superset alive. A bank changes order/routing/bypass,
     // never module ownership, activation, or callback domain.
     list<gx_engine::Plugin*> mono = engine.mono_chain.resident_modules();
@@ -2266,6 +2284,16 @@ std::shared_ptr<PreparedMatrixBank> CmdConnection::compile_matrix_bank(std::shar
         const bool matrix_mono = source || matrix_resident;
         const bool was_mono = mono_resident.count(plugin);
         const bool was_stereo = stereo_resident.count(plugin);
+        if (!pd->mono_audio && !pd->stereo_audio) {
+            // A GUI selector cannot itself be resident. Its children already
+            // are; changing their selection/bypass still needs a guarded
+            // transaction and is never silently applied to just the proxy.
+            if (active != plugin->get_on_off() || resident != plugin->get_scene_resident() ||
+                source != plugin->get_matrix_source() || matrix_resident != plugin->get_matrix_resident() ||
+                get(plugin, ".matrix_lane", plugin->get_matrix_lane()) != plugin->get_matrix_lane())
+                throw RpcError(-32004, "Selector state requires a guarded matrix: " + std::string(pd->id));
+            continue;
+        }
         if ((active || resident || matrix_mono) && !(was_mono || was_stereo))
             throw RpcError(-32004, "Processor is not resident: " + std::string(pd->id));
         if ((was_mono || was_stereo) && pd->stereo_audio && matrix_mono != was_mono)
@@ -2284,7 +2312,22 @@ std::shared_ptr<PreparedMatrixBank> CmdConnection::compile_matrix_bank(std::shar
         const bool rack = plugin && (plugin->get_pdef()->flags & gx_engine::PGNI_DYN_POSITION) && !(plugin->get_pdef()->flags & PGN_ALTERNATIVE);
         const unsigned stream = plugin && stereo_resident.count(plugin) ? 1 : (item.first == "amp.out_master" ? 1 : 0);
         if (rack && (suffix == "on_off" || suffix == "scene_resident" || suffix == "matrix_lane" || suffix == "matrix_source" || suffix == "matrix_resident")) continue;
-        if (rack && (suffix == "position" || suffix == "pp") && parameter.isInt()) {
+        if (item.first.compare(0, 3, "ui.") == 0 && parameter.isBool()) {
+            const auto id = item.first.substr(3);
+            auto* visible_plugin = engine.pluginlist.lookup_plugin(id);
+            if (visible_plugin && parameters.hasId(id + ".on_off")) {
+                // Rack visibility is metadata, not an amp recipe. Mirror its
+                // MIDI enable flag without emitting GUI/chain signals in RT.
+                const unsigned ui_stream = stereo_resident.count(visible_plugin) ? 1 : 0;
+                controls.push_back({&parameter.getBool(), [](void* p, double v) { static_cast<gx_engine::BoolParameter*>(p)->set_snapshot_value(v != 0); }, item.second, ui_stream});
+                controls.push_back({&parameters[id + ".on_off"], [](void* p, double v) { static_cast<gx_engine::Parameter*>(p)->set_midi_blocked(v == 0); }, item.second, ui_stream});
+                continue;
+            }
+        }
+        // Fixed amp stages also move with the amp block between serial and
+        // split matrices. Their metadata follows the compiled image just like
+        // rack processors; PGNI_DYN_POSITION only controls editor placement.
+        if (plugin && (suffix == "position" || suffix == "pp") && parameter.isInt()) {
             controls.push_back({&parameter.getInt(), [](void* p, double v) { static_cast<gx_engine::IntParameter*>(p)->set_snapshot_value(v); }, item.second, stream});
         } else if (!snapshot_structural_parameter_id(item.first) && parameter.snapshot_safe && parameter.isFloat() && parameter.getFloat().signal_changed().size() == 1) {
             controls.push_back({parameter.getFloat().snapshot_pointer(), [](void* p, double v) { *static_cast<float*>(p) = v; }, item.second, stream});

@@ -640,6 +640,15 @@ void ModuleSelectorFromList::set_module() {
     }
 }
 
+std::vector<Plugin*> ModuleSelectorFromList::get_modules() const {
+    std::vector<Plugin*> result;
+    for (unsigned int i = 0; i < size; ++i) {
+        if (auto* child = seq.pluginlist.lookup_plugin(modules[i]->id))
+            result.push_back(child);
+    }
+    return result;
+}
+
 
 /****************************************************************
  ** class EngineControl

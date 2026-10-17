@@ -368,13 +368,11 @@ class SceneSwitchingContractTests(unittest.TestCase):
             multi_compute.index("preset_scene_smoother_targets();"),
         )
 
-    def test_muted_smoothers_use_one_post_commit_control_ownership_barrier(
+    def test_muted_smoothers_use_post_commit_rt_requests_without_bypassing_dsp(
         self,
     ) -> None:
         rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
         engine = (ENGINE / "gx_engine.cpp").read_text(encoding="utf-8")
-        neural = (ENGINE / "gx_neural_plugins.cpp").read_text(encoding="utf-8")
-        output = (ENGINE / "gx_internal_plugins.cpp").read_text(encoding="utf-8")
         scene = rpc.split("FUNCTION(set_scene)", maxsplit=1)[1].split(
             "FUNCTION(get) {", maxsplit=1
         )[0]
@@ -395,28 +393,17 @@ class SceneSwitchingContractTests(unittest.TestCase):
         coordinator = engine.split(
             "bool GxEngine::preset_muted_scene_smoothers", maxsplit=1
         )[1].split("void GxEngine::load_static_plugins", maxsplit=1)[0]
-        self.assertEqual(coordinator.count("wait_scene_control_cycle("), 1)
-        self.assertLess(
-            coordinator.index("suspend_scene_smoother_for_control"),
-            coordinator.index("wait_scene_control_cycle("),
-        )
-        self.assertLess(
-            coordinator.index("wait_scene_control_cycle("),
-            coordinator.index("finish_scene_smoother_control"),
-        )
-        self.assertIn("scene_outputlevel.suspend_scene_smoother", coordinator)
-        self.assertIn("neural_amp.suspend_scene_smoother", coordinator)
-        self.assertIn("sneural_amp.suspend_scene_smoother", coordinator)
-        self.assertIn("mneural_amp.suspend_scene_smoother", coordinator)
-        self.assertIn("gx_system::atomic_set(&ready, 0);", neural)
-        self.assertIn("scene_smoother_control_suspended", output)
+        self.assertNotIn("suspend_scene_smoother", coordinator)
+        self.assertNotIn("finish_scene_smoother_control", coordinator)
+        for plugin in ("scene_outputlevel", "neural_amp", "neural_amp_second", "sneural_amp", "mneural_amp"):
+            self.assertIn(f"{plugin}.request_scene_smoother_snap()", coordinator)
+            self.assertIn(f"{plugin}.is_scene_smoother_snap_pending()", coordinator)
 
-        # If the checked ownership wait times out, every gate is restored
-        # without a control-thread accumulator write and the RT fallback stays
-        # bounded. A successful authoritative preset suppresses that fallback.
+        # A stalled callback keeps the RT fallback bounded. Successful request
+        # consumption suppresses a second snap and never bypasses an amp.
         for plugin in ("nam", "snam", "mnam"):
             self.assertIn(
-                f"snap_{plugin}_gain_rt && !{plugin}_gain_control_preset", scene
+                f"snap_{plugin}_gain_rt && !{plugin}_gain_callback_preset", scene
             )
         failure_predicate = scene.split("if (!commit_ok", maxsplit=1)[1].split(
             ") {", maxsplit=1

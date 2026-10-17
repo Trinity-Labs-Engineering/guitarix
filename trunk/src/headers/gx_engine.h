@@ -56,6 +56,7 @@ public:
         bool second_instance = false);
     ~ModuleSelectorFromList();
     void set_module();
+    std::vector<Plugin*> get_modules() const;
 };
 
 
@@ -127,10 +128,8 @@ public:
 public:
     GxEngine(const string& plugin_dir, ParameterGroups& groups, const gx_system::CmdlineOptions& options);
     ~GxEngine();
-    // While an external hardware guard is muted, acquire one callback-wide
-    // ownership window and preset every requested scene gain smoother as one
-    // transaction. Returns false without touching accumulator state if a
-    // genuinely stalled audio callback prevents safe ownership.
+    // Preset scene gain smoothers in their owning callbacks without interrupting
+    // DSP. Wait for the actual requests within one bounded control deadline.
     bool preset_muted_scene_smoothers(bool output_gain, bool nam_gain,
                                       bool snam_gain, bool mnam_gain, bool nam_second_gain = false);
     void ladspaloader_update_plugins();

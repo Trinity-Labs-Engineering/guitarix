@@ -9,6 +9,32 @@ TRUNK = Path(__file__).resolve().parents[1]
 
 
 class MatrixBankTests(unittest.TestCase):
+    def test_selector_proxies_use_resident_children_and_bank_positions(self):
+        source = (TRUNK / "src/gx_head/engine/jsonrpc.cpp").read_text()
+        compiler = source.split("std::shared_ptr<PreparedMatrixBank> CmdConnection::compile_matrix_bank(", 1)[1]
+        controls = "    std::map<gx_engine::Plugin*, gx_engine::Plugin*> selector_parents;" + compiler.split(
+            "    std::map<gx_engine::Plugin*, gx_engine::Plugin*> selector_parents;", 1)[1].split(
+                "    for (const auto& item : values) {", 1)[0]
+        order = "    const auto order = " + compiler.split("    const auto order = ", 1)[1].split(
+            "    if (compile_image) {", 1)[0]
+        values = "    for (const auto& item : values) {" + compiler.split(
+            "    for (const auto& item : values) {", 1)[1].split("    cutover->nam.reserve", 1)[0]
+        structural = "static bool snapshot_structural_parameter_id(" + source.split(
+            "static bool snapshot_structural_parameter_id(", 1)[1].split("class JsonString", 1)[0]
+        with tempfile.TemporaryDirectory(prefix="gx-bank-selectors-") as directory:
+            path = Path(directory)
+            (path / "matrix_bank_selectors_under_test.h").write_text(controls + order)
+            (path / "matrix_bank_values_under_test.h").write_text(values)
+            (path / "matrix_bank_structural_under_test.h").write_text(structural)
+            binary = path / "matrix-bank-selectors"
+            result = subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                                     f"-I{path}", f"-I{TRUNK / 'src/headers'}",
+                                     str(Path(__file__).with_name("matrix_bank_selectors_fixture.cpp")), "-o", str(binary)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_rpc_banks_retain_five_matrices_and_snapshots_across_promotions(self):
         source = (TRUNK / "src/gx_head/engine/jsonrpc.cpp").read_text()
         header = (TRUNK / "src/headers/jsonrpc.h").read_text()
