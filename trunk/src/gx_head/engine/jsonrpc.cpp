@@ -19,6 +19,7 @@
 #include "jsonrpc.h"
 #include <sys/stat.h>
 #include "gx_harmoniser_plugin.h"
+#include "gx_scene_value.h"
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <ctime>
@@ -870,10 +871,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                 value = parameter.isFloat() ? parameter.getFloat().idx_from_id(params[i + 1]->getString()) :
                     parameter.getInt().idx_from_id(params[i + 1]->getString());
             } else value = params[i + 1]->getFloat();
-            if (!std::isfinite(value) ||
-                (parameter.hasRange() && (value < parameter.getLowerAsFloat() || value > parameter.getUpperAsFloat())) ||
-                (parameter.isBool() && value != 0 && value != 1) ||
-                (parameter.isInt() && value != std::floor(value)))
+            if (!gx_engine::valid_scene_scalar(parameter, value))
                 throw RpcError(-32602, "Invalid snapshot control value: " + id);
             gx_engine::Plugin* plugin = engine.pluginlist.find_plugin(parameter.group_id());
             const unsigned int stream = plugin && (plugin->get_pdef()->flags & PGN_STEREO) &&
@@ -1201,6 +1199,12 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         try {
             if (activating_matrix) {
                 engine.snapshots.invalidate();
+                // A refreshed song can have identical legacy membership and
+                // only bypass/control deltas. Still retire the selected old
+                // bank under this guard, otherwise it keeps an invalid image
+                // selected and blocks compilation of the new song's banks.
+                if (engine.mono_chain.has_bank() || engine.stereo_chain.has_bank())
+                    engine.set_rack_changed();
                 for (const auto& asset : matrix->nam) {
                     if (asset.slot == "A" || asset.slot == "B") engine.mneural_amp.select_matrix_model(asset.slot[0], asset.path, asset.size);
                     else (asset.slot == "nam" ? engine.neural_amp : asset.slot == "nam__2" ? engine.neural_amp_second : engine.sneural_amp).select_matrix_model(asset.path, asset.size);
@@ -2258,6 +2262,11 @@ std::shared_ptr<PreparedMatrixBank> CmdConnection::compile_matrix_bank(std::shar
     for (const auto& item : values) routing[item.first] = static_cast<int>(item.second);
     std::string error;
     if (!engine.pluginlist.validate_matrix(routing, error)) throw RpcError(-32602, error);
+    // Even with an identical amp and no stereo ownership transfer, crossing
+    // between the serial and split processing contracts remains guarded.
+    auto* combiner = engine.pluginlist.lookup_plugin("matrix_combiner");
+    if (combiner && bool(get(combiner, ".on_off", combiner->get_on_off())) != combiner->get_on_off())
+        throw RpcError(-32004, "Split/serial topology change requires guarded activation");
     std::set<gx_engine::Plugin*> mono_resident(engine.mono_chain.resident_modules().begin(), engine.mono_chain.resident_modules().end());
     std::set<gx_engine::Plugin*> stereo_resident(engine.stereo_chain.resident_modules().begin(), engine.stereo_chain.resident_modules().end());
     for (const auto& item : selector_parents) {
@@ -2405,9 +2414,7 @@ void CmdConnection::compile_matrix(PreparedMatrixScene& matrix) {
             if (parameter->getControlType() == gx_engine::Parameter::Enum && dynamic_cast<JsonString*>(value))
                 number = parameter->isFloat() ? parameter->getFloat().idx_from_id(value->getString()) : parameter->getInt().idx_from_id(value->getString());
             else number = value->getFloat();
-            if (!std::isfinite(number) || (parameter->isBool() && number != 0 && number != 1) ||
-                (parameter->isInt() && number != std::floor(number)) ||
-                (parameter->hasRange() && (number < parameter->getLowerAsFloat() || number > parameter->getUpperAsFloat())))
+            if (!gx_engine::valid_scene_scalar(*parameter, number))
                 throw RpcError(-32602, "Invalid matrix scalar: " + id);
             setter = [parameter, number]() {
                 if (parameter->isFloat()) parameter->getFloat().set(number);

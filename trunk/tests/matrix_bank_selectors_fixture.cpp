@@ -146,6 +146,12 @@ int main() {
     Plugin boundary{{"matrix_combiner", gx_engine::PGNI_DYN_POSITION, true, false}};
     engine.pluginlist["amp.bass_boost"] = &fixed;
     engine.pluginlist["matrix_combiner"] = &boundary;
+    pedal.def.stereo_audio = false;
+    engine.mono_chain.modules.push_back(&boundary);
+    guarded({{"matrix_combiner.on_off", 0}});
+    boundary.active = 0;
+    guarded({{"matrix_combiner.on_off", 1}});
+    compile(engine, {{"matrix_combiner.on_off", 0}});
     Parameters parameters;
     parameters["amp.bass_boost.position"] = {'i', "amp.bass_boost"};
     parameters["ui.matrix_combiner"] = {'b', "ui"};

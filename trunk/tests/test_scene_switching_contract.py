@@ -11,6 +11,13 @@ LADSPA_HOST = TRUNK / "src" / "ladspa" / "ladspa_guitarix.cpp"
 
 
 class SceneSwitchingContractTests(unittest.TestCase):
+    def test_guarded_matrix_refresh_retires_an_unchanged_executable_chain(self):
+        rpc = (ENGINE / "jsonrpc.cpp").read_text()
+        activation = next(section for section in rpc.split("if (activating_matrix) {")[1:]
+                          if section.lstrip().startswith("engine.snapshots.invalidate();")).split("for (", 1)[0]
+        self.assertIn("engine.mono_chain.has_bank() || engine.stereo_chain.has_bank()", activation)
+        self.assertIn("engine.set_rack_changed();", activation)
+
     def test_ack_distinguishes_bypass_publication_from_topology_and_steady_audio(self):
         rpc = (ENGINE / "jsonrpc.cpp").read_text(encoding="utf-8")
         audio = (ENGINE / "gx_engine_audio.cpp").read_text(encoding="utf-8")

@@ -62,8 +62,12 @@ static inline double asymclip(double x) {
     double f = fabs(x);
     f = (f/(3.0 + f) - clip.low) * clip.istep;
     int i = static_cast<int>(f);
-    if (i < 0) {
-        f = clip.data[0];
+    if (f < 0) {
+        // The first tabulated point is above zero. Interpolating backward
+        // with an integer index truncated toward zero produced a nonzero
+        // output at silence (and a sign discontinuity). Join the origin to
+        // that first point; retain the measured curve above it.
+        f = clip.data[0] * (fabs(x) / (3.0 + fabs(x))) / clip.low;
     } else if (i >= clip.size-1) {
         f = clip.data[clip.size-1];
     } else {

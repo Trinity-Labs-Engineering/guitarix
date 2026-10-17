@@ -77,9 +77,12 @@ class MatrixBankTests(unittest.TestCase):
             sections.append(start + source.split(start, 1)[1].split(end, 1)[0])
         with tempfile.TemporaryDirectory(prefix="gx-bank-nam-") as directory:
             path = Path(directory)
+            (path / "matrix_bank_nam_process_under_test.h").write_text(
+                "inline void process_nam_mono(" + source.split("inline void process_nam_mono(", 1)[1].split(
+                    "} // namespace", 1)[0])
             (path / "matrix_bank_nam_under_test.h").write_text("\n".join(sections))
             binary = path / "matrix-bank-nam"
-            result = subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", f"-I{path}",
+            result = subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", f"-I{path}", f"-I{TRUNK / 'src/headers'}",
                                      str(Path(__file__).with_name("matrix_bank_nam_fixture.cpp")), "-o", str(binary)],
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)

@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <cstdlib>
+#include "gx_nam_dc.h"
 static unsigned allocations = 0, constructions = 0, destructions = 0;
 static bool fail_allocation = false;
 void* operator new(std::size_t n) { ++allocations; if (fail_allocation) throw std::bad_alloc(); if (void* p = std::malloc(n)) return p; throw std::bad_alloc(); }
@@ -20,20 +21,23 @@ namespace Glib { using ustring = std::string; }
 namespace gx_system { template<class T> T atomic_get(T value) { return value; } template<class T> void atomic_set(T* p, T v) { *p = v; } }
 namespace nam {
 struct DSP {
-    float gain;
+    float gain, bias;
     unsigned frames = 0;
-    explicit DSP(float g): gain(g) { ++constructions; }
+    explicit DSP(float g): gain(g), bias(g / 200) { ++constructions; }
     ~DSP() { ++destructions; }
+    void process(float** in, float** out, int count) {
+        frames += count;
+        for (int i = 0; i < count; ++i) out[0][i] = in[0][i] * gain + bias;
+    }
 };
 }
 static void update_nam_level_calibration(nam::DSP*, float* in, float* out, float* loudness,
                                          const char*, const std::string&, const char*) {
     *in = *out = *loudness = 0;
 }
-static void process_nam_mono(nam::DSP* model, float* in, float* out, int n) {
-    model->frames += n;
-    for (int i = 0; i < n; ++i) out[i] = in[i] * model->gain;
-}
+using gx_engine::remove_nam_dc;
+#define AVOIDDENORMALS()
+#include "matrix_bank_nam_process_under_test.h"
 struct Resampler {
     int max_out_count(int n) { return n; }
     int up(int n, float*, float*) { assert(false); return n; }
@@ -47,10 +51,11 @@ struct Ramp {
 #define always_inline
 class NeuralAmp {
 public:
-    struct MatrixModel { NeuralAmp* owner; nam::DSP* model; Glib::ustring filename; float size, input_trim, output_trim, loudness; };
-    struct CachedNamModel { Glib::ustring filename; float size; int sample_rate, host_sample_rate; std::unique_ptr<nam::DSP> model; };
+    struct MatrixModel { NeuralAmp* owner; nam::DSP* model; Glib::ustring filename; float size, input_trim, output_trim, loudness; float dc_offset = 0; };
+    struct CachedNamModel { Glib::ustring filename; float size; int sample_rate, host_sample_rate; std::unique_ptr<nam::DSP> model; float dc_offset = 0; };
     std::atomic<const MatrixModel*> matrix_model{nullptr};
     nam::DSP* model = new nam::DSP(0.5f);
+    float model_dc_offset = gx_engine::measure_nam_dc(model);
     std::vector<CachedNamModel> model_cache;
     Glib::ustring current_file = "current", load_file;
     float fVslider0 = 0, fVslider1 = 0, fVslider2 = .49f, current_model_size = .49f;
@@ -77,6 +82,7 @@ int main() {
         for (unsigned i = 1; i < 5; ++i)
             amp.model_cache.push_back({names[i], .49f, 48000, 48000, std::unique_ptr<nam::DSP>(new nam::DSP(gains[i]))});
         amp.model_cache.push_back({"different-rate", .49f, 44100, 48000, std::unique_ptr<nam::DSP>(new nam::DSP(1))});
+        for (auto& entry : amp.model_cache) entry.dc_offset = gx_engine::measure_nam_dc(entry.model.get());
         NeuralAmp::MatrixModel banks[5];
         assert(!amp.compile_matrix_model("different-rate", .49f, banks[1]));
         assert(!amp.compile_matrix_model("absent", .49f, banks[1]));
@@ -98,6 +104,8 @@ int main() {
             const unsigned frames = bank.model->frames;
             amp.materialize_matrix_model();
             assert(amp.model == bank.model && amp.model->frames == frames);
+            assert(amp.model_dc_offset == amp.model->bias);
+            for (const auto& entry : amp.model_cache) assert(entry.dc_offset == entry.model->bias);
             assert(amp.model_cache.size() == 5 && constructions == created && destructions == destroyed);
         }
         NeuralAmp::MatrixModel pending;

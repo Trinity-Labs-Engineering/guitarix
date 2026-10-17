@@ -26,6 +26,7 @@
 
 #include "engine.h"
 #include "gx_faust_support.h"
+#include "gx_nam_dc.h"
 #include "calibration.h"
 #include "container.h"
 #include "lstm.h"
@@ -225,7 +226,7 @@ float clamp_nam_size(float size) {
 
 bool set_nam_slimmable_size(nam::DSP* model, float size, int host_sample_rate,
                             int model_sample_rate, const char* module_name,
-                            const Glib::ustring& filename, const char* slot_name) {
+                            const Glib::ustring& filename, const char* slot_name, float* dc_offset) {
     auto* slimmable = dynamic_cast<nam::SlimmableModel*>(model);
     if (!slimmable) {
         return false;
@@ -236,6 +237,7 @@ bool set_nam_slimmable_size(nam::DSP* model, float size, int host_sample_rate,
         slimmable->SetSlimmableSize(clamped_size);
         model->ResetAndPrewarm(model_sample_rate,
                                max_nam_model_block_frames(host_sample_rate, model_sample_rate));
+        *dc_offset = measure_nam_dc(model);
         gx_print_info(module_name, std::string("set ") + slot_name + " size " +
                       std::to_string(clamped_size) + " for " + std::string(filename));
         return true;
@@ -254,7 +256,7 @@ std::unique_ptr<nam::DSP> load_nam_model(const Glib::ustring& filename,
                                          int* model_sample_rate,
                                          const char* module_name,
                                          float model_size,
-                                         const char* slot_name) {
+                                         const char* slot_name, float* dc_offset) {
     try {
         ensure_nam_builtin_parsers_registered();
         std::unique_ptr<nam::DSP> next =
@@ -286,6 +288,7 @@ std::unique_ptr<nam::DSP> load_nam_model(const Glib::ustring& filename,
                                   module_name, filename)) {
             return nullptr;
         }
+        *dc_offset = measure_nam_dc(next.get());
         return next;
     } catch (const std::exception& error) {
         gx_print_info(module_name, "fail to load " + std::string(filename) +
@@ -366,11 +369,12 @@ bool get_selected_nam_file(float selector, const Glib::ustring& load_path,
     return true;
 }
 
-inline void process_nam_mono(nam::DSP* model, float* input, float* output, int frames) {
+inline void process_nam_mono(nam::DSP* model, float* input, float* output, int frames, float dc_offset) {
     AVOIDDENORMALS();
     float* inputs[] = {input};
     float* outputs[] = {output};
     model->process(inputs, outputs, frames);
+    remove_nam_dc(output, frames, dc_offset);
 }
 
 } // namespace
@@ -530,7 +534,7 @@ NeuralAmp::RuntimeStatus NeuralAmp::get_runtime_status() const {
 }
 
 std::unique_ptr<nam::DSP> NeuralAmp::take_cached_model(
-    const Glib::ustring& filename, float size, int* sample_rate) {
+    const Glib::ustring& filename, float size, int* sample_rate, float* dc_offset) {
     const auto cached = std::find_if(
         model_cache.begin(), model_cache.end(),
         [&](const CachedNamModel& entry) {
@@ -546,6 +550,7 @@ std::unique_ptr<nam::DSP> NeuralAmp::take_cached_model(
     if (sample_rate) {
         *sample_rate = cached->sample_rate;
     }
+    *dc_offset = cached->dc_offset;
     model_cache.erase(cached);
     return result;
 }
@@ -572,9 +577,10 @@ bool NeuralAmp::prepare_matrix_model(const Glib::ustring& filename, float size) 
     if (matrix_model_ready(filename, size)) return true;
     if (model_cache.size() >= kNamModelCacheEntries) return false;
     int rate = 0;
-    auto prepared = load_nam_model(filename, fSampleRate, &rate, "Neural Amp Modeler", size, "prepared matrix");
+    float dc_offset = 0;
+    auto prepared = load_nam_model(filename, fSampleRate, &rate, "Neural Amp Modeler", size, "prepared matrix", &dc_offset);
     if (!prepared) return false;
-    model_cache.push_back(CachedNamModel{filename, size, rate, fSampleRate, std::move(prepared)});
+    model_cache.push_back(CachedNamModel{filename, size, rate, fSampleRate, std::move(prepared), dc_offset});
     return true;
 }
 
@@ -586,6 +592,7 @@ bool NeuralAmp::compile_matrix_model(const Glib::ustring& filename, float size, 
         return true;
     }
     nam::DSP* selected = model;
+    float dc_offset = model_dc_offset;
     int rate = mSampleRate;
     if (filename != current_file || std::fabs(size - current_model_size) > 0.0001f) {
         auto entry = std::find_if(model_cache.begin(), model_cache.end(), [&](const CachedNamModel& entry) {
@@ -593,9 +600,10 @@ bool NeuralAmp::compile_matrix_model(const Glib::ustring& filename, float size, 
         });
         if (entry == model_cache.end()) return false;
         selected = entry->model.get(); rate = entry->sample_rate;
+        dc_offset = entry->dc_offset;
     }
     if (selected && (!gx_system::atomic_get(ready) || rate != mSampleRate)) return false;
-    result = {this, selected, filename, size, 0, 0, 0};
+    result = {this, selected, filename, size, 0, 0, 0, dc_offset};
     if (selected) update_nam_level_calibration(selected, &result.input_trim, &result.output_trim, &result.loudness,
                                               "Neural Amp Modeler", filename, "prepared bank");
     return true;
@@ -625,11 +633,13 @@ void NeuralAmp::materialize_matrix_model() {
         entry->model.reset(model);
         entry->filename.swap(outgoing_file);
         entry->size = current_model_size;
+        entry->dc_offset = model_dc_offset;
         model = next;
     }
     current_file.swap(selected_file);
     load_file.swap(selected_load_file);
     current_model_size = fVslider2 = selection->size;
+    model_dc_offset = selection->dc_offset;
     nam_input_trim_db = selection->input_trim;
     nam_output_trim_db = selection->output_trim;
     loudness = selection->loudness;
@@ -677,6 +687,7 @@ void NeuralAmp::cache_current_model() {
         mSampleRate,
         fSampleRate,
         std::move(model_to_cache),
+        model_dc_offset,
     });
 }
 
@@ -729,6 +740,7 @@ void always_inline NeuralAmp::compute(int count, float *input0, float *output0)
     if (!processing_ready && !snap_pending) return;
     const auto* selection = matrix_model.load(std::memory_order_acquire);
     nam::DSP* processing_model = selection ? selection->model : model;
+    const float dc_offset = selection ? selection->dc_offset : model_dc_offset;
     const bool has_model = processing_model != nullptr;
     if (!has_model && !snap_pending) return;
     double fSlow0 = 0.0010000000000000009 *
@@ -770,7 +782,7 @@ void always_inline NeuralAmp::compute(int count, float *input0, float *output0)
                     memcpy(buf, output0, ReCount * sizeof(float));
                 }
 
-                process_nam_mono(processing_model, buf, buf, ReCount);
+                process_nam_mono(processing_model, buf, buf, ReCount, dc_offset);
 
                 if (need_resample == 1) {
                     smp.down(buf, output0);
@@ -779,7 +791,7 @@ void always_inline NeuralAmp::compute(int count, float *input0, float *output0)
                 }
             }
         } else {
-            process_nam_mono(processing_model, output0, output0, count);
+            process_nam_mono(processing_model, output0, output0, count, dc_offset);
         }
     }
     for (int i0 = 0; i0 < count; i0 = i0 + 1) {
@@ -821,9 +833,10 @@ void NeuralAmp::load_nam_file() {
 
         std::unique_ptr<nam::DSP> next_model;
         int next_sample_rate = 0;
+        float next_dc_offset = 0;
         if (has_selection) {
             next_model = take_cached_model(
-                selected_file, fVslider2, &next_sample_rate);
+                selected_file, fVslider2, &next_sample_rate, &next_dc_offset);
             if (next_model) {
                 gx_print_info(
                     "Neural Amp Modeler",
@@ -832,7 +845,7 @@ void NeuralAmp::load_nam_file() {
             if (!next_model) {
                 next_model = load_nam_model(selected_file, fSampleRate,
                                             &next_sample_rate, "Neural Amp Modeler",
-                                            fVslider2, "model");
+                                            fVslider2, "model", &next_dc_offset);
             }
         }
 
@@ -852,6 +865,7 @@ void NeuralAmp::load_nam_file() {
 
         if (next_model) {
             model = next_model.release();
+            model_dc_offset = next_dc_offset;
             mSampleRate = next_sample_rate;
             scratch.resize(max_nam_model_block_frames(fSampleRate, mSampleRate));
             need_resample = setup_nam_resampler(smp, fSampleRate, mSampleRate);
@@ -890,7 +904,7 @@ void NeuralAmp::set_nam_size() {
     sync();
 
     if (set_nam_slimmable_size(model, fVslider2, fSampleRate, mSampleRate,
-                               "Neural Amp Modeler", current_file, "model")) {
+                               "Neural Amp Modeler", current_file, "model", &model_dc_offset)) {
         current_model_size = fVslider2;
         update_nam_level_calibration(
             model, &nam_input_trim_db, &nam_output_trim_db, &loudness,
@@ -1111,7 +1125,7 @@ NeuralAmp::RuntimeStatus NeuralAmpMulti::get_runtime_status(bool slot_b) const {
 }
 
 std::unique_ptr<nam::DSP> NeuralAmpMulti::take_cached_model(
-    char slot, const Glib::ustring& filename, float size, int* sample_rate) {
+    char slot, const Glib::ustring& filename, float size, int* sample_rate, float* dc_offset) {
     const auto cached = std::find_if(
         model_cache.begin(), model_cache.end(),
         [&](const CachedNamModel& entry) {
@@ -1127,6 +1141,7 @@ std::unique_ptr<nam::DSP> NeuralAmpMulti::take_cached_model(
     if (sample_rate) {
         *sample_rate = cached->sample_rate;
     }
+    *dc_offset = cached->dc_offset;
     model_cache.erase(cached);
     return result;
 }
@@ -1190,6 +1205,7 @@ void NeuralAmpMulti::cache_model(
         prepared_key_matches(slot, filename, size)
             ? prepared_generation : Glib::ustring(),
         std::move(model_to_cache),
+        slot == 'A' ? model_dc_offseta : model_dc_offsetb,
     });
 }
 
@@ -1299,10 +1315,11 @@ PreparedNamModelResult NeuralAmpMulti::prepare_song_models(
         }
 
         int model_sample_rate = 0;
+        float dc_offset = 0;
         std::unique_ptr<nam::DSP> prepared = load_nam_model(
             descriptor.filename, fSampleRate, &model_sample_rate,
             "Neural Multi Amp Modeler", descriptor.size,
-            descriptor.slot == 'A' ? "prepared A" : "prepared B");
+            descriptor.slot == 'A' ? "prepared A" : "prepared B", &dc_offset);
         if (!prepared) {
             continue;
         }
@@ -1314,6 +1331,7 @@ PreparedNamModelResult NeuralAmpMulti::prepare_song_models(
             fSampleRate,
             generation,
             std::move(prepared),
+            dc_offset,
         });
         ++result.loaded;
     }
@@ -1438,7 +1456,7 @@ void always_inline NeuralAmpMulti::processModelA(int count, float *bufa) {
                     memcpy(bufa1, bufa, ReCounta * sizeof(float));
                 }
 
-                process_nam_mono(modela, bufa1, bufa1, ReCounta);
+                process_nam_mono(modela, bufa1, bufa1, ReCounta, model_dc_offseta);
 
                 if (need_aresample == 1) {
                     smpa.down(bufa1, bufa);
@@ -1447,7 +1465,7 @@ void always_inline NeuralAmpMulti::processModelA(int count, float *bufa) {
                 }
             }
         } else {
-            process_nam_mono(modela, bufa, bufa, count);
+            process_nam_mono(modela, bufa, bufa, count, model_dc_offseta);
         }
         const double calibration_gain =
             std::pow(1e+01, 0.05 * double(nam_output_trim_dba));
@@ -1490,7 +1508,7 @@ void always_inline NeuralAmpMulti::processModelB() {
                     memcpy(buf1, buf, ReCountb * sizeof(float));
                 }
 
-                process_nam_mono(modelb, buf1, buf1, ReCountb);
+                process_nam_mono(modelb, buf1, buf1, ReCountb, model_dc_offsetb);
 
                 if (need_bresample == 1) {
                     smpb.down(buf1, buf);
@@ -1499,7 +1517,7 @@ void always_inline NeuralAmpMulti::processModelB() {
                 }
             }
         } else {
-            process_nam_mono(modelb, buf, buf, nframes);
+            process_nam_mono(modelb, buf, buf, nframes, model_dc_offsetb);
         }
         const double calibration_gain =
             std::pow(1e+01, 0.05 * double(nam_output_trim_dbb));
@@ -1651,9 +1669,10 @@ void NeuralAmpMulti::load_nam_afile() {
 
         std::unique_ptr<nam::DSP> next_model;
         int next_sample_rate = 0;
+        float next_dc_offset = 0;
         if (has_selection) {
             next_model = take_cached_model(
-                'A', selected_file, fVslider3, &next_sample_rate);
+                'A', selected_file, fVslider3, &next_sample_rate, &next_dc_offset);
             if (next_model) {
                 gx_print_info(
                     "Neural Multi Amp Modeler",
@@ -1663,7 +1682,7 @@ void NeuralAmpMulti::load_nam_afile() {
                 next_model = load_nam_model(selected_file, fSampleRate,
                                             &next_sample_rate,
                                             "Neural Multi Amp Modeler",
-                                            fVslider3, "A");
+                                            fVslider3, "A", &next_dc_offset);
             }
         }
 
@@ -1684,6 +1703,7 @@ void NeuralAmpMulti::load_nam_afile() {
 
         if (next_model) {
             modela = next_model.release();
+            model_dc_offseta = next_dc_offset;
             maSampleRate = next_sample_rate;
             scratch_modela.resize(max_nam_model_block_frames(fSampleRate, maSampleRate));
             need_aresample = setup_nam_resampler(smpa, fSampleRate, maSampleRate);
@@ -1733,9 +1753,10 @@ void NeuralAmpMulti::load_nam_bfile() {
 
         std::unique_ptr<nam::DSP> next_model;
         int next_sample_rate = 0;
+        float next_dc_offset = 0;
         if (has_selection) {
             next_model = take_cached_model(
-                'B', selected_file, fVslider4, &next_sample_rate);
+                'B', selected_file, fVslider4, &next_sample_rate, &next_dc_offset);
             if (next_model) {
                 gx_print_info(
                     "Neural Multi Amp Modeler",
@@ -1745,7 +1766,7 @@ void NeuralAmpMulti::load_nam_bfile() {
                 next_model = load_nam_model(selected_file, fSampleRate,
                                             &next_sample_rate,
                                             "Neural Multi Amp Modeler",
-                                            fVslider4, "B");
+                                            fVslider4, "B", &next_dc_offset);
             }
         }
 
@@ -1766,6 +1787,7 @@ void NeuralAmpMulti::load_nam_bfile() {
 
         if (next_model) {
             modelb = next_model.release();
+            model_dc_offsetb = next_dc_offset;
             mbSampleRate = next_sample_rate;
             scratch_modelb.resize(max_nam_model_block_frames(fSampleRate, mbSampleRate));
             need_bresample = setup_nam_resampler(smpb, fSampleRate, mbSampleRate);
@@ -1804,7 +1826,7 @@ void NeuralAmpMulti::set_nam_asize() {
     sync();
 
     if (set_nam_slimmable_size(modela, fVslider3, fSampleRate, maSampleRate,
-                               "Neural Multi Amp Modeler", current_afile, "A")) {
+                               "Neural Multi Amp Modeler", current_afile, "A", &model_dc_offseta)) {
         current_model_sizea = fVslider3;
         update_nam_level_calibration(
             modela, &nam_input_trim_dba, &nam_output_trim_dba, &loudnessa,
@@ -1836,7 +1858,7 @@ void NeuralAmpMulti::set_nam_bsize() {
     sync();
 
     if (set_nam_slimmable_size(modelb, fVslider4, fSampleRate, mbSampleRate,
-                               "Neural Multi Amp Modeler", current_bfile, "B")) {
+                               "Neural Multi Amp Modeler", current_bfile, "B", &model_dc_offsetb)) {
         current_model_sizeb = fVslider4;
         update_nam_level_calibration(
             modelb, &nam_input_trim_dbb, &nam_output_trim_dbb, &loudnessb,

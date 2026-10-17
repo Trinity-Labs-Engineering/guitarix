@@ -95,6 +95,7 @@ public:
         nam::DSP* model;
         Glib::ustring filename;
         float size, input_trim, output_trim, loudness;
+        float dc_offset = 0;
     };
 private:
     std::atomic<const MatrixModel*> matrix_model{nullptr};
@@ -104,9 +105,11 @@ private:
         int sample_rate;
         int host_sample_rate;
         std::unique_ptr<nam::DSP> model;
+        float dc_offset = 0;
     };
 
     nam::DSP* model;
+    float model_dc_offset = 0;
     ParamMap& param;
     gx_resample::FixedRateResampler smp;
     Ramp ramp;
@@ -154,7 +157,7 @@ private:
     void publish_runtime_status(const nam::DSP* current_model,
                                 const Glib::ustring& model_path);
     std::unique_ptr<nam::DSP> take_cached_model(
-        const Glib::ustring& filename, float size, int* sample_rate);
+        const Glib::ustring& filename, float size, int* sample_rate, float* dc_offset);
     void cache_current_model();
     int register_par(const ParamReg& reg);
 
@@ -210,10 +213,12 @@ private:
         int host_sample_rate;
         Glib::ustring pin_generation;
         std::unique_ptr<nam::DSP> model;
+        float dc_offset = 0;
     };
 
     nam::DSP* modela;
     nam::DSP* modelb;
+    float model_dc_offseta = 0, model_dc_offsetb = 0;
     ParamMap& param;
     ParallelThread* pro;
     gx_resample::FixedRateResampler smpa;
@@ -306,7 +311,7 @@ private:
     void create_nam_afilelist();
     void create_nam_bfilelist();
     std::unique_ptr<nam::DSP> take_cached_model(
-        char slot, const Glib::ustring& filename, float size, int* sample_rate);
+        char slot, const Glib::ustring& filename, float size, int* sample_rate, float* dc_offset);
     void cache_model(nam::DSP*& active_model, const Glib::ustring& filename,
                      float size, int sample_rate, char slot);
     bool prepared_key_matches(char slot, const Glib::ustring& filename,

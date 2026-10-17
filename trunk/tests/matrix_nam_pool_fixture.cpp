@@ -20,15 +20,17 @@ static const char* kNamNone = "None";
 static void gx_print_info(const char*, const std::string&) {}
 static bool nam_model_is_slimmable(nam::DSP*) { return true; }
 static bool set_nam_slimmable_size(nam::DSP* model, float size, int, int,
-                                  const char*, const std::string&, const char*) {
+                                  const char*, const std::string&, const char*, float* dc_offset) {
     ++resizes;
     model->size = size;
+    *dc_offset = size / 100;
     return true;
 }
 static std::unique_ptr<nam::DSP> load_nam_model(const std::string&, int rate,
-    int* model_rate, const char*, float size, const char*) {
+    int* model_rate, const char*, float size, const char*, float* dc_offset) {
     ++constructions;
     *model_rate = rate;
+    *dc_offset = size / 100;
     return std::unique_ptr<nam::DSP>(new nam::DSP{size});
 }
 static bool get_selected_nam_file(float index, const std::string& directory,
@@ -53,6 +55,7 @@ struct CachedNamModel {
     int sample_rate, host_sample_rate;
     std::string pin_generation;
     std::unique_ptr<nam::DSP> model;
+    float dc_offset = 0;
 };
 struct Ramp {
     enum Mode { OFF, DOWN, UP };
@@ -66,6 +69,7 @@ public:
     int ready = 0, barriers = 0;
     nam::DSP* modela = nullptr;
     nam::DSP* modelb = nullptr;
+    float model_dc_offseta = 0, model_dc_offsetb = 0;
     float fVslider3 = 1, fVslider4 = 1, current_model_sizea = 1, current_model_sizeb = 1;
     float afilelist = 1, bfilelist = 1;
     std::string load_apath = "/models", load_bpath = "/models";
@@ -99,7 +103,7 @@ public:
     void load_nam_bfile();
     void set_nam_asize();
     void set_nam_bsize();
-    std::unique_ptr<nam::DSP> take_cached_model(char, const std::string&, float, int*);
+    std::unique_ptr<nam::DSP> take_cached_model(char, const std::string&, float, int*, float*);
     bool prepared_key_matches(char, const std::string&, float) const;
     void cache_model(nam::DSP*&, const std::string&, float, int, char);
     PreparedNamModelResult prepare_song_models(const std::string&, const std::vector<PreparedNamModelDescriptor>&);
@@ -137,6 +141,8 @@ int main() {
             assert(amp.barriers == before + 2);
             assert(amp.modela && amp.modelb && amp.modela != amp.modelb);
             assert(amp.modela->size == size && amp.modelb->size == size);
+            assert(amp.model_dc_offseta == size / 100 && amp.model_dc_offsetb == size / 100);
+            for (const auto& entry : amp.model_cache) assert(entry.dc_offset == entry.size / 100);
             assert(amp.current_afile == (selector == 1 ? "/models/shared.nam" : "/models/other.nam"));
             assert(amp.current_bfile == amp.current_afile);
             assert(constructions == 6 && resizes == 0);
