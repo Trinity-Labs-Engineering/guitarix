@@ -19,7 +19,8 @@ struct GxJConvSettings {
     unsigned getLength() const { return 0; }
     int getGainline() const { return 0; }
 };
-static int configurations = 0, warmups = 0;
+static int configurations = 0;
+struct Convproc { enum { ST_STOP }; };
 struct GxConvolver {
     unsigned samplerate = 48000, buffersize = 32;
     bool running = false;
@@ -28,18 +29,13 @@ struct GxConvolver {
     void set_buffersize(unsigned value) { buffersize = value; }
     unsigned get_samplerate() const { return samplerate; }
     unsigned get_buffersize() const { return buffersize; }
-    void set_sync(bool) {}
     bool configure(std::string path, float, float, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, int) {
         ++configurations;
         if (path == "missing") return false;
         file = path;
         return true;
     }
-    bool start(int, int) { running = true; return true; }
-    bool compute(int, float*, float*, float*, float*) { assert(running); ++warmups; return true; }
-    void set_not_runnable() { running = false; }
-    void stop_process() { running = false; }
-    bool checkstate() { return true; }
+    int state() const { return Convproc::ST_STOP; }
 };
 struct Engine {
     unsigned rate = 48000, block = 32;
@@ -69,7 +65,7 @@ int main() {
     assert(adapter.prepare_matrix_ir({"next"}));
     assert(adapter.conv.get() == audible && audible->running && audible->file == "audible");
     assert(adapter.prepare_matrix_ir({"next"}));
-    assert(configurations == 2 && warmups == 1);
+    assert(configurations == 2);
     for (int i = 0; i < 1000; ++i) {
         // The production restart path first stops RT use under sync().
         adapter.conv->running = false;
@@ -77,7 +73,7 @@ int main() {
         assert(adapter.configure_current_ir());
         assert(adapter.conv->file == adapter.jcset.file);
         assert(adapter.matrix_ir_ready({"next"}) && adapter.matrix_ir_ready({"audible"}));
-        assert(configurations == 2 && warmups == 1);
+        assert(configurations == 2);
     }
     assert(!adapter.prepare_matrix_ir({"missing"}));
     assert(adapter.conv->file == "audible");

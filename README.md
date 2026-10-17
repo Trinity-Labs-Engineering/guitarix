@@ -123,7 +123,8 @@ are still required to establish the performance acceptance targets.
 Song preparation now has a server-owned, generation-scoped recipe pool:
 
 - `matrix_begin()` retires previous handles and inactive prepared assets, and
-  returns protocol version 2, the generation and admission limits.
+  returns protocol version 3, the generation and admission limits. Version 2
+  must not be used: its IR worker warm-up can deadlock the control thread.
 - `matrix_prepare(generation, matrixId, snapshotId, sceneJson, namJson)` validates
   the whole graph, resolves typed parameter setters and prepares its assets.
   `sceneJson` is an encoded alternating parameter/value array. `namJson` is an
@@ -151,8 +152,10 @@ asset budget is enforced before loading. Replies expose `namCount`, `irCount`,
 `estimatedAssetBytes`, `assetBudgetBytes` and `memoryAccounting=estimated-assets`.
 These estimates cover source/model and convolution storage, not measured process
 RSS or every plugin/worker/allocator allocation. NAM models are loaded/prewarmed
-through their existing DSP loader. IR preparation creates and exercises separate
-convolvers; guarded activation transfers ownership of cached processors.
+through their existing DSP loader. IR preparation configures separate stopped
+convolvers, including FFT plans and transformed IR partitions, without starting
+worker threads. Guarded activation transfers ownership of cached processors and
+starts them with normal asynchronous processing.
 
 `ready`/`assetsReady` means a validated recipe with prepared assets.
 `requiresGuard=true` and `pointerSwitchReady=false` are deliberate: module-list

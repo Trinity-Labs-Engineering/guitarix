@@ -605,7 +605,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         serv.jack.get_engine().snapshots.invalidate();
         jw.begin_object();
         jw.write_kv("generation", serv.matrix_generation);
-        jw.write_kv("protocolVersion", 2);
+        jw.write_kv("protocolVersion", 3);
         jw.write_kv("matrixCapacity", 128);
         jw.write_kv("namCapacity", 8);
         jw.write_kv("irCapacity", 8);

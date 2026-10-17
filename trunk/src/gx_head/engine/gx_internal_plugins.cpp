@@ -28,7 +28,6 @@
 #include "engine.h"
 #include "gx_matrix.h"
 #include "gx_faust_support.h"
-#include <thread>
 
 namespace gx_engine {
 
@@ -775,20 +774,18 @@ bool ConvolverAdapter::prepare_matrix_ir(const GxJConvSettings& settings) {
     std::unique_ptr<GxConvolver> prepared(new GxConvolver());
     prepared->set_samplerate(engine.get_samplerate());
     prepared->set_buffersize(engine.get_buffersize());
-    prepared->set_sync(true);
     const float gain = settings.getGainCor() ? settings.getGain() : 1.0f;
     if (!prepared->configure(settings.getFullIRPath(), gain, gain, settings.getDelay(),
             settings.getDelay(), settings.getOffset(), settings.getLength(), 0, 0, settings.getGainline()))
         return false;
-    // Allocate FFT partitions and exercise the processor off the audio thread.
-    // Only zero history is parked; preparation never borrows the audible conv.
-    if (!prepared->start(SCHED_OTHER, 0)) return false;
-    std::vector<float> silence(engine.get_buffersize(), 0), left(silence), right(silence);
-    const bool warmed = prepared->compute(silence.size(), silence.data(), silence.data(), left.data(), right.data());
-    prepared->set_not_runnable();
-    prepared->stop_process();
-    while (!prepared->checkstate()) std::this_thread::yield();
-    if (!warmed) return false;
+    // configure() already allocates the FFT plans/partitions and transforms
+    // the IR. Park it in ST_STOP, without starting worker threads. Starting
+    // and immediately stopping zita can miss a worker still entering main():
+    // stop() sees ST_IDLE, then the worker sets ST_PROC and waits forever.
+    // One silent block cannot synchronize every partition worker (in
+    // particular at JACK's 32-frame quantum). Keep normal asynchronous
+    // processing when conv_start() eventually activates this processor.
+    if (prepared->state() != Convproc::ST_STOP) return false;
     prepared_irs.push_back(PreparedIR{settings, std::move(prepared)});
     return true;
 }
