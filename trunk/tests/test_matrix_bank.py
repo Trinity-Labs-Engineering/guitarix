@@ -9,14 +9,23 @@ TRUNK = Path(__file__).resolve().parents[1]
 
 
 class MatrixBankTests(unittest.TestCase):
-    def test_rpc_banks_retain_all_five_snapshots_across_ab_promotions(self):
+    def test_rpc_banks_retain_five_matrices_and_snapshots_across_promotions(self):
         source = (TRUNK / "src/gx_head/engine/jsonrpc.cpp").read_text()
+        header = (TRUNK / "src/headers/jsonrpc.h").read_text()
         sections = []
         for start, end in (("    FUNCTION(matrix_prepare_next)", "    FUNCTION(matrix_promote)"),
-                           ("    FUNCTION(matrix_promote)", "    FUNCTION(matrix_release)")):
+                           ("    FUNCTION(matrix_promote)", "    FUNCTION(matrix_release)"),
+                           ("    FUNCTION(snapshot_activate)", "    FUNCTION(set_scene)")):
             sections.append(start + source.split(start, 1)[1].split(end, 1)[0] + "break;\n")
         with tempfile.TemporaryDirectory(prefix="gx-bank-rpc-") as directory:
             path = Path(directory)
+            (path / "matrix_bank_capacity_under_test.h").write_text(
+                "constexpr unsigned int kExecutableMatrixCapacity" + header.split(
+                    "constexpr unsigned int kExecutableMatrixCapacity", 1)[1].split("// Executable images", 1)[0])
+            (path / "matrix_bank_lookup_under_test.h").write_text(
+                "    std::shared_ptr<PreparedMatrixBank> bank_for_handle" + header.split(
+                    "    std::shared_ptr<PreparedMatrixBank> bank_for_handle", 1)[1].split(
+                    "    std::map<std::string, std::shared_ptr<PreparedMatrixScene>> matrices;", 1)[0])
             (path / "matrix_bank_rpc_under_test.h").write_text("\n".join(sections))
             binary = path / "matrix-bank-rpc"
             result = subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra", "-Werror",
@@ -26,7 +35,7 @@ class MatrixBankTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("two images, five snapshots", result.stdout)
+            self.assertIn("five images, ten snapshots", result.stdout)
 
     def test_nam_cutover_has_no_lifecycle_or_allocation_and_preserves_ownership(self):
         compiler = os.environ.get("CXX", "c++")

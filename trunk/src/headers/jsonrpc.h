@@ -74,9 +74,13 @@ struct PreparedMatrixScene {
     unsigned int nam_count = 0, ir_count = 0, smoother_targets = 0;
 };
 
-// Exactly two executable images; recipe/asset caches are not running engines.
-// Both images borrow the resident processors. Incompatible lifecycles and
-// callback ownership changes retain the guarded scene path.
+constexpr unsigned int kExecutableMatrixCapacity = 5;
+// Two pedal NAMs plus the shared dual-NAM amp recipe per matrix. Admission
+// still enforces the memory budget and each processor's bounded model cache.
+constexpr unsigned int kMatrixNamCapacity = 4 * kExecutableMatrixCapacity;
+
+// Executable images borrow the resident processors, not running engines.
+// Incompatible lifecycles and callback ownership changes retain the guarded path.
 struct PreparedMatrixCutover {
     std::shared_ptr<PreparedMatrixScene> recipe;
     gx_engine::PreparedSnapshot snapshot;
@@ -190,7 +194,13 @@ private:
     unsigned int matrix_generation = 1, matrix_serial = 0;
     bool applying_matrix = false;
     std::string active_matrix;
+    std::map<std::string, std::shared_ptr<PreparedMatrixBank>> matrix_banks;
     std::shared_ptr<PreparedMatrixBank> current_bank, next_bank;
+    std::shared_ptr<PreparedMatrixBank> bank_for_handle(const std::string& handle) const {
+        for (const auto& item : matrix_banks)
+            if (item.second->cutovers.count(handle)) return item.second;
+        return nullptr;
+    }
     bool matrix_cutover_pending() const {
         return next_bank && (next_bank->mono_chain->owns_bank(next_bank->mono.data()) ||
                              next_bank->stereo_chain->owns_bank(next_bank->stereo.data()));

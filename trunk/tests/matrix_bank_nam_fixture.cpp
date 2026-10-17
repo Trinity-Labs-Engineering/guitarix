@@ -72,31 +72,33 @@ public:
 int main() {
     {
         NeuralAmp amp;
-        amp.model_cache.push_back({"next", .49f, 48000, 48000, std::unique_ptr<nam::DSP>(new nam::DSP(-.5f))});
+        const std::string names[] = {"current", "next", "third", "fourth", "fifth"};
+        const float gains[] = {.5f, -.5f, .25f, -.25f, .75f};
+        for (unsigned i = 1; i < 5; ++i)
+            amp.model_cache.push_back({names[i], .49f, 48000, 48000, std::unique_ptr<nam::DSP>(new nam::DSP(gains[i]))});
         amp.model_cache.push_back({"different-rate", .49f, 44100, 48000, std::unique_ptr<nam::DSP>(new nam::DSP(1))});
-        NeuralAmp::MatrixModel banks[2];
+        NeuralAmp::MatrixModel banks[5];
         assert(!amp.compile_matrix_model("different-rate", .49f, banks[1]));
         assert(!amp.compile_matrix_model("absent", .49f, banks[1]));
+        for (unsigned i = 0; i < 5; ++i)
+            assert(amp.compile_matrix_model(names[i], .49f, banks[i]));
         float input[32], output[32];
         unsigned seed = 7;
         for (unsigned i = 0; i < 1000; ++i) {
             seed = seed * 1664525u + 1013904223u;
-            bool next = seed & 0x100;
-            auto& bank = banks[i % 2];
-            nam::DSP* before = amp.model;
-            assert(amp.compile_matrix_model(next ? "next" : "current", .49f, bank));
-            assert(amp.model == before); // preparation did not switch audio
+            const unsigned target = (seed >> 8) % 5;
+            auto& bank = banks[target];
             const auto heap = allocations, created = constructions, destroyed = destructions;
             NeuralAmp::apply_matrix_model(&bank, 0);
             for (unsigned j = 0; j < 32; ++j) input[j] = std::sin((i * 32 + j) * .02f);
             amp.compute(32, input, output);
-            for (unsigned j = 0; j < 32; ++j) assert(std::fabs(output[j] - input[j] * (next ? -.5f : .5f)) < 1e-6f);
+            for (unsigned j = 0; j < 32; ++j) assert(std::fabs(output[j] - input[j] * gains[target]) < 1e-6f);
             assert(allocations == heap && constructions == created && destructions == destroyed);
             // Promotion transfers ownership without resetting either DSP.
             const unsigned frames = bank.model->frames;
             amp.materialize_matrix_model();
             assert(amp.model == bank.model && amp.model->frames == frames);
-            assert(amp.model_cache.size() == 2 && constructions == created && destructions == destroyed);
+            assert(amp.model_cache.size() == 5 && constructions == created && destructions == destroyed);
         }
         NeuralAmp::MatrixModel pending;
         assert(amp.compile_matrix_model("next", .49f, pending));

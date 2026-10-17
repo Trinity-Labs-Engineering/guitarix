@@ -249,28 +249,39 @@ int main() {
     assert(mono_pool.publications == 1 && stereo_pool.publications == 0);
     chorus.matrix_resident.value = false;
     assert(chorus.matrix_source_state_changed()); // Real transfers still drain callbacks.
-    // The production pointer holder switches between two compiled images at
+    // The production pointer holder switches between five compiled images at
     // the scheduled frame. No legacy publication or processor lifecycle runs.
     TestChain bank_chain;
-    assert(bank_chain.set_plugin_list({&first, &second}));
+    Plugin third{{"third"}};
+    assert(bank_chain.set_plugin_list({&first, &second, &third}));
     assert(bank_chain.commit(true, parameters));
-    auto current = TestChain::compile_bank({&first, &second});
-    auto next = TestChain::compile_bank({&second, &first});
+    std::vector<ChainNode> images[] = {
+        TestChain::compile_bank({&first, &second, &third}),
+        TestChain::compile_bank({&first, &third, &second}),
+        TestChain::compile_bank({&second, &first, &third}),
+        TestChain::compile_bank({&second, &third, &first}),
+        TestChain::compile_bank({&third, &first, &second}),
+    };
     struct Selection { TestChain* chain; ChainNode* image; };
-    Selection selections[] = {{&bank_chain, current.data()}, {&bank_chain, next.data()}};
+    Selection selections[5];
     gx_engine::SnapshotScheduler scheduler;
-    std::string handles[2];
-    for (unsigned i = 0; i < 2; ++i)
+    std::string handles[5];
+    for (unsigned i = 0; i < 5; ++i) {
+        selections[i] = {&bank_chain, images[i].data()};
         handles[i] = scheduler.prepare({{&selections[i], [](void* p, double) {
             auto* selection = static_cast<Selection*>(p);
             selection->chain->select_bank(selection->image);
         }, 0, 0}}, false, {}).handle;
-    const auto initialized = first.definition.initialization_count + second.definition.initialization_count;
+    }
+    const auto lifecycle_count = [&]() {
+        return first.definition.initialization_count + second.definition.initialization_count + third.definition.initialization_count;
+    };
+    const auto initialized = lifecycle_count();
     const auto publications = bank_chain.publications;
     unsigned random = 71;
     for (unsigned i = 0; i < 1000; ++i) {
         random = random * 1664525u + 1013904223u;
-        const unsigned target = (random >> 8) & 1;
+        const unsigned target = (random >> 8) % 5;
         const auto heap = allocations;
         auto* previous = bank_chain.published();
         assert(scheduler.schedule(*scheduler.find(handles[target]), 320, 0, 32, 192));
@@ -286,7 +297,7 @@ int main() {
         scheduler.release();
         assert(allocations == heap);
         assert(bank_chain.publications == publications);
-        assert(first.definition.initialization_count + second.definition.initialization_count == initialized);
+        assert(lifecycle_count() == initialized);
     }
     // An ordinary edit must publish its legacy chain even if membership is
     // unchanged, and retire the bank override without resetting processors.
@@ -295,6 +306,6 @@ int main() {
     assert(bank_chain.commit(true, parameters));
     assert(!bank_chain.has_bank());
     assert(bank_chain.published()[0].owner == &first);
-    assert(first.definition.initialization_count + second.definition.initialization_count == initialized);
+    assert(lifecycle_count() == initialized);
     std::cout << "scene-chain-reuse-ok\n";
 }

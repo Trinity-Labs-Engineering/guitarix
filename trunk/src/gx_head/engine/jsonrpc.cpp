@@ -608,9 +608,9 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_kv("generation", serv.matrix_generation);
         jw.write_kv("protocolVersion", 3);
         jw.write_bool_kv("matrixBankSupported", true);
-        jw.write_kv("executableMatrixCapacity", 2);
+        jw.write_kv("executableMatrixCapacity", kExecutableMatrixCapacity);
         jw.write_kv("matrixCapacity", 128);
-        jw.write_kv("namCapacity", 8);
+        jw.write_kv("namCapacity", kMatrixNamCapacity);
         jw.write_kv("irCapacity", 8);
         jw.write_kv("assetBudgetBytes", 268435456);
         jw.end_object();
@@ -654,7 +654,9 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                 !bank->cutovers.empty() &&
                 bank->cutovers.begin()->second->snapshot.generation == engine.snapshots.generation();
         };
-        const bool reused = reusable(serv.next_bank, found->second);
+        auto cached_entry = serv.matrix_banks.find(found->second->matrix_id);
+        auto cached = cached_entry == serv.matrix_banks.end() ? nullptr : cached_entry->second;
+        const bool reused = reusable(cached, found->second);
         try {
             // An editor change can invalidate controls while the old arrays
             // are still audible. A callback barrier alone does not retire a
@@ -663,16 +665,34 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                 (engine.mono_chain.owns_bank(serv.current_bank->mono.data()) ||
                  engine.stereo_chain.owns_bank(serv.current_bank->stereo.data())))
                 throw RpcError(-32004, "Current bank changed; guarded reconciliation required");
+            // Retain every valid song image. Discard stale images only after
+            // both callbacks drained and neither callback still selects one.
+            auto banks = serv.matrix_banks;
+            for (auto it = banks.begin(); it != banks.end();) {
+                if (reusable(it->second, it->second->recipe)) { ++it; continue; }
+                if (engine.mono_chain.owns_bank(it->second->mono.data()) ||
+                    engine.stereo_chain.owns_bank(it->second->stereo.data()))
+                    throw RpcError(-32004, "Selected bank changed; guarded reconciliation required");
+                it = banks.erase(it);
+            }
+            // Pin the song's images: an adjacent song must not evict an
+            // already prepared matrix just because it was visited less recently.
+            const size_t required = banks.size() + !banks.count(active->second->matrix_id) +
+                !banks.count(found->second->matrix_id);
+            if (required > kExecutableMatrixCapacity)
+                throw RpcError(-32004, "Executable matrix capacity reached (5); song images retained");
             // Adopt the initial guarded Current as an executable image too.
             // Otherwise the first return from B to A has nothing to reuse.
             auto current = reusable(serv.current_bank, active->second) ? serv.current_bank : compile_matrix_bank(active->second);
-            auto next = reused ? serv.next_bank : compile_matrix_bank(found->second);
-            // Compile every song snapshot for these two graphs off-path. Each
-            // snapshot borrows the SAME two arrays; no extra DSP is created.
+            auto next = reused ? cached : compile_matrix_bank(found->second);
+            banks[current->recipe->matrix_id] = current;
+            banks[next->recipe->matrix_id] = next;
+            // Compile every song snapshot for the retained graphs off-path.
+            // Snapshots share their matrix's arrays; no extra DSP is created.
             for (const auto& item : serv.matrices) {
                 auto recipe = item.second;
-                auto bank = recipe->matrix_id == current->recipe->matrix_id ? current :
-                    recipe->matrix_id == next->recipe->matrix_id ? next : nullptr;
+                auto entry = banks.find(recipe->matrix_id);
+                auto bank = entry == banks.end() ? nullptr : entry->second;
                 if (!bank || recipe->generation != serv.matrix_generation || bank->cutovers.count(item.first)) continue;
                 try { compile_matrix_bank(recipe, bank); }
                 catch (const RpcError& error) { if (error.code != -32004) throw; }
@@ -680,6 +700,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             if (!next->cutovers.count(found->first)) compile_matrix_bank(found->second, next);
             serv.current_bank = std::move(current);
             serv.next_bank = std::move(next);
+            serv.matrix_banks = std::move(banks);
         } catch (const RpcError& error) {
             if (error.code != -32004) throw;
             jw.begin_object();
@@ -690,7 +711,11 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             jw.end_object();
             break;
         }
-        engine.matrix_bank_owners = {serv.current_bank, serv.next_bank};
+        // Engine ownership survives service teardown while callbacks may still
+        // read any selected array. Replace the owner set only behind the barrier.
+        std::vector<std::shared_ptr<void>> owners;
+        for (const auto& item : serv.matrix_banks) owners.push_back(item.second);
+        engine.matrix_bank_owners = std::move(owners);
         jw.begin_object();
         jw.write_kv("handle", found->second->handle);
         jw.write_kv("generation", engine.snapshots.generation());
@@ -698,11 +723,13 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_bool_kv("pointerSwitchReady", true);
         jw.write_bool_kv("requiresGuard", false);
         jw.write_bool_kv("bankReused", reused);
+        jw.write_kv("executableMatrixCapacity", kExecutableMatrixCapacity);
+        jw.write_kv("executableMatrixCount", static_cast<unsigned int>(serv.matrix_banks.size()));
         jw.write_kv("currentMatrixId", serv.current_bank->recipe->matrix_id);
         jw.write_kv("nextMatrixId", serv.next_bank->recipe->matrix_id);
         jw.write_key("readyHandles"); jw.begin_array();
-        for (const auto& bank : {serv.current_bank, serv.next_bank})
-            for (const auto& item : bank->cutovers) jw.write(item.first);
+        for (const auto& bank : serv.matrix_banks)
+            for (const auto& item : bank.second->cutovers) jw.write(item.first);
         jw.end_array();
         jw.end_object();
     }
@@ -728,7 +755,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         serv.current_bank.swap(serv.next_bank);
         if (serv.next_bank) serv.next_bank->acknowledged = false;
         // Promotion changes the selected matrix, not the runtime epoch. Keep
-        // both banks and their snapshots reusable for A/B song transitions.
+        // all song banks and their snapshots reusable for arbitrary transitions.
         jw.begin_object();
         jw.write_bool_kv("promoted", true);
         jw.write_kv("handle", serv.active_matrix);
@@ -904,12 +931,12 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         auto& engine = serv.jack.get_engine();
         auto& snapshots = engine.snapshots;
         const bool bank_activation = mn->m_id == RPCM_matrix_activate_next;
-        if (!bank_activation && serv.matrix_cutover_pending())
+        if (serv.matrix_cutover_pending())
             throw RpcError(-32000, "Matrix cutover awaits coordinated promotion");
-        auto bank = bank_activation ? serv.next_bank : nullptr;
+        auto bank = bank_activation ? serv.bank_for_handle(params[0]->getString()) : nullptr;
         auto cutover = bank && bank->cutovers.count(params[0]->getString()) ? bank->cutovers.at(params[0]->getString()) : nullptr;
         auto* snapshot = cutover ? &cutover->snapshot : (bank_activation ? nullptr : snapshots.find(params[0]->getString()));
-        if (bank && (!cutover || bank->acknowledged ||
+        if (bank && (bank == serv.current_bank || !cutover || bank->acknowledged ||
             bank->recipe->runtime_epoch != snapshots.runtime_epoch()))
             throw RpcError(-32003, "Next matrix is stale or already awaiting promotion");
         if (snapshot && !snapshot->matrix_handle.empty() &&
@@ -937,6 +964,9 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                 serv.jack.get_time_is(), engine.get_buffersize(),
                 static_cast<unsigned int>(engine.get_samplerate() * transition_ms / 1000.0)))
             throw RpcError(-32000, "Snapshot stale, matrix not ready, or scheduled frame too late");
+        // Track the scheduled target even on timeout: either callback may have
+        // selected it, and further preparation must wait for guarded recovery.
+        if (bank) serv.next_bank = bank;
         const auto published_at = std::chrono::steady_clock::now();
         const auto deadline = published_at + std::chrono::milliseconds(250);
         while (!snapshots.finished() && !snapshots.failed() && std::chrono::steady_clock::now() < deadline)
@@ -1138,7 +1168,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             jw.write_bool_kv("pointerSwitchReady", false);
             jw.write_kv("estimatedAssetBytes", static_cast<double>(matrix->estimated_bytes));
             jw.write_kv("assetBudgetBytes", 268435456);
-            jw.write_kv("namCapacity", 8);
+            jw.write_kv("namCapacity", kMatrixNamCapacity);
             jw.write_kv("irCapacity", 8);
             jw.write_kv("namCount", matrix->nam_count);
             jw.write_kv("irCount", matrix->ir_count);
@@ -2425,7 +2455,8 @@ void CmdConnection::compile_matrix(PreparedMatrixScene& matrix) {
     for (const auto& asset : engine.mneural_amp.matrix_model_inventory()) account_nam(std::string(1, asset.slot), asset);
     matrix.nam_count = nam_bytes.size();
     matrix.ir_count = ir_bytes.size();
-    if (nam_bytes.size() > 8 || ir_bytes.size() > 8) throw RpcError(-32000, "Song exceeds prepared NAM/IR asset capacity (8 each)");
+    if (nam_bytes.size() > kMatrixNamCapacity || ir_bytes.size() > 8)
+        throw RpcError(-32000, "Song exceeds prepared asset capacity (20 NAM / 8 IR)");
     for (const auto& item : nam_bytes) matrix.estimated_bytes += item.second;
     for (const auto& item : ir_bytes) matrix.estimated_bytes += item.second;
     if (matrix.estimated_bytes > 268435456) throw RpcError(-32000, "Song exceeds estimated prepared asset budget (256 MiB)");
