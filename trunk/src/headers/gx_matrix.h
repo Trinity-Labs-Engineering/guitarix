@@ -11,7 +11,7 @@ namespace gx_engine {
 
 // Registration is a control-thread operation. The scoped indirection preserves
 // the original DSP object passed to generated and handwritten callbacks while
-// giving every second instance independent parameter storage and identifiers.
+// giving each instance independent parameter storage and identifiers.
 class ScopedParamNamespace {
     const ParamReg& parent;
     std::string replacement;
@@ -114,7 +114,10 @@ public:
                 std::string group(p[0]);
                 if (!group.empty() && group[0] == '.') {
                     const size_t end = group.find('.', 1);
-                    group.insert(end == std::string::npos ? group.size() : end, "__2");
+                    if (prefix.empty())
+                        group.insert(end == std::string::npos ? group.size() : end, "__2");
+                    else
+                        group = "." + prefix + (end == std::string::npos ? "" : group.substr(end));
                 }
                 group_names.push_back(group);
                 group_names.push_back(p[1]);

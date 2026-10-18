@@ -166,7 +166,13 @@ class CodeGenerator(generate_code.CodeGenerator):
         d.overwrite("filter_init", "\n   ".join(l))
         fields = ["Array<double, %d, 1> %s;" % r for r in
                   ((6,"K0"),(6,"K1"),(6,"K2"),(6,"K3"),(6,"K4"),(6,"K5"),(6,"Y"),(6,"X"))]
+        fields.extend(["creal solver_values[8] = {};", "Map<Matrix<creal, 8, 1> > solver{solver_values};",
+                       "int solver_info = 0;", "int solver_evaluations = 0;",
+                       "double dc_y = 0;", "double dc_xm1 = 0;"])
         d.overwrite("DKPlugin_fields", "\n    ".join(fields))
+        d.overwrite("nonlin_mat_list_calc", d["nonlin_mat_list_calc"].replace(
+            "&g_v", "&self.solver").replace("&g_info", "&self.solver_info").replace(
+            "&g_nfev", "&self.solver_evaluations"))
         d.overwrite("add_npl", 1)
         d.overwrite("DKPlugin_init", ", K0(), K1(), K2(), K3(), K4(), K5(), Y(), X()")
         d.overwrite("process_add", """\
@@ -216,11 +222,9 @@ def highpass_as_postfilter(f0, FS):
     a1 = (1 - w0) * b0
     return (
         "{\n"
-        "            static double y;\n"
-        "            static double xm1;\n"
-        "            y = %s * (buf[j] - xm1) + %s * y;\n"
-        "            xm1 = buf[j];\n"
-        "            buf[j] = y;\n"
+        "            self.dc_y = %s * (buf[j] - self.dc_xm1) + %s * self.dc_y;\n"
+        "            self.dc_xm1 = buf[j];\n"
+        "            buf[j] = self.dc_y;\n"
         "        }\n"
         % (b0, a1))
 

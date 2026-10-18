@@ -3861,6 +3861,13 @@ public:
 private:
     creal pots_last[0+1];
     Matrix<creal, 7, 1> x_last;
+    // A curated head and both matrix pedals can run in the same callback.
+    creal solver_values[8] = {};
+    Map<Matrix<creal, 8, 1> > solver{solver_values};
+    int solver_info = 0;
+    int solver_evaluations = 0;
+    double dc_y = 0;
+    double dc_xm1 = 0;
     Array<double, 6, 1> K0;
     Array<double, 6, 1> K1;
     Array<double, 6, 1> K2;
@@ -3981,7 +3988,7 @@ void DKPlugin::process(int n, float *u, float *o, PluginDef *plugin) {
     creal fnorm;
     Matrix<creal, 8, 1> mp;
     Array<creal, 8, 1> p_val;
-    nonlin_param par(&mp, &mi, &g_v, &g_info, &g_nfev, &fnorm, &p_val);
+    nonlin_param par(&mp, &mi, &self.solver, &self.solver_info, &self.solver_evaluations, &fnorm, &p_val);
     
     if( self.resamp) {
         self.bufsize = self.smp.max_out_count(n);
@@ -4010,11 +4017,9 @@ void DKPlugin::process(int n, float *u, float *o, PluginDef *plugin) {
         Map<Matrix<float, 1, 1> > xo(buf+1*j);
         xo = (Mo * d).cast<float>();
         {
-            static double y;
-            static double xm1;
-            y = 0.999345929619 * (buf[j] - xm1) + 0.998691859237 * y;
-            xm1 = buf[j];
-            buf[j] = y;
+            self.dc_y = 0.999345929619 * (buf[j] - self.dc_xm1) + 0.998691859237 * self.dc_y;
+            self.dc_xm1 = buf[j];
+            buf[j] = self.dc_y;
         }
 
     }

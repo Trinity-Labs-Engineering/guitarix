@@ -479,6 +479,9 @@ void GxEngine::load_static_plugins() {
     add_pedal(gx_effects::low_high_pass::plugin, PGN_GUI);
     add_pedal(gx_effects::highbooster::plugin, PGN_GUI);
     add_pedal(gx_effects::selecteq::plugin, PGN_GUI);
+    // Curated amp voicing must not borrow either matrix pedal instance.
+    pl.add(new SecondPluginInstance(gx_effects::selecteq::plugin(), "amp_eqs"),
+           PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&crybaby_second.plugin, PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&wah_second.plugin, PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&crybaby.plugin,                       PLUGIN_POS_RACK, PGN_GUI);
@@ -547,6 +550,8 @@ void GxEngine::load_static_plugins() {
 #ifndef DEBUG
 #ifndef GUITARIX_AS_PLUGIN
     add_pedal(pluginlib::jcm800pre::plugin, PGN_GUI);
+    pl.add(new SecondPluginInstance(pluginlib::jcm800pre::plugin(), "amp_JCM800Pre"),
+           PLUGIN_POS_RACK, PGN_GUI);
 #endif
 #endif
     add_pedal(pluginlib::gcb_95::plugin, PGN_GUI);
