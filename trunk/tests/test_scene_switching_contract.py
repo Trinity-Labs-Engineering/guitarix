@@ -669,13 +669,13 @@ class SceneSwitchingContractTests(unittest.TestCase):
 
         self.assertIn("configured_jcset == jcset", source)
         self.assertIn(
-            "configured_samplerate == conv.get_samplerate()", source
+            "configured_samplerate == conv->get_samplerate()", source
         )
         self.assertIn(
-            "configured_buffersize == conv.get_buffersize()", source
+            "configured_buffersize == conv->get_buffersize()", source
         )
         self.assertIn(
-            "configuration_matches() && conv.state() == Convproc::ST_STOP",
+            "configuration_matches() && conv->state() == Convproc::ST_STOP",
             source,
         )
         self.assertIn("retain_configuration_while_bypassed = true;", source)

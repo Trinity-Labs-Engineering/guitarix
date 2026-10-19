@@ -24,6 +24,8 @@ enum jsonrpc_method {
 	RPCM_set_scene,
 	RPCM_set_scene_muted,
 	RPCM_prepare_mnam_models,
+	RPCM_prepare_nam_models,
+	RPCM_prepare_ir_configs,
 	RPCM_parameterlist,
 	RPCM_get_parameter,
 	RPCM_get_parameter_value,

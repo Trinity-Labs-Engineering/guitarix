@@ -573,7 +573,15 @@ void NeuralAmp::cache_current_model() {
             }),
         model_cache.end());
     if (model_cache.size() >= kNamModelCacheEntries) {
-        model_cache.erase(model_cache.begin());
+        const auto unpinned = std::find_if(
+            model_cache.begin(), model_cache.end(),
+            [&](const CachedNamModel& entry) {
+                return !prepared_key_matches(entry.filename, entry.size);
+            });
+        if (unpinned == model_cache.end()) {
+            return;
+        }
+        model_cache.erase(unpinned);
     }
     model_cache.push_back(CachedNamModel{
         current_file,
@@ -582,6 +590,71 @@ void NeuralAmp::cache_current_model() {
         fSampleRate,
         std::move(model_to_cache),
     });
+}
+
+bool NeuralAmp::prepared_key_matches(const Glib::ustring& filename, float size) const {
+    return std::any_of(prepared_models.begin(), prepared_models.end(),
+        [&](const PreparedNamModelDescriptor& entry) {
+            return entry.filename == filename && std::fabs(entry.size - size) < 0.0001f;
+        });
+}
+
+PreparedNamModelResult NeuralAmp::prepare_song_models(
+    const std::vector<PreparedNamModelDescriptor>& descriptors) {
+    PreparedNamModelResult result = {
+        0, 0, 0, 0, static_cast<int>(kNamModelCacheEntries), is_inited ? fSampleRate : 0, false,
+    };
+    if (!is_inited || fSampleRate <= 0) {
+        result.requested = static_cast<int>(descriptors.size());
+        return result;
+    }
+    prepared_models.clear();
+    for (const auto& descriptor : descriptors) {
+        if (!prepared_key_matches(descriptor.filename, descriptor.size)) {
+            prepared_models.push_back(descriptor);
+        }
+    }
+    result.requested = static_cast<int>(prepared_models.size());
+    model_cache.erase(std::remove_if(model_cache.begin(), model_cache.end(),
+        [&](const CachedNamModel& entry) { return entry.host_sample_rate != fSampleRate; }),
+        model_cache.end());
+    for (const auto& descriptor : prepared_models) {
+        if (model && current_file == descriptor.filename &&
+            std::fabs(current_model_size - descriptor.size) < 0.0001f) {
+            ++result.active_hits;
+            continue;
+        }
+        if (std::any_of(model_cache.begin(), model_cache.end(),
+            [&](const CachedNamModel& entry) {
+                return entry.filename == descriptor.filename &&
+                    std::fabs(entry.size - descriptor.size) < 0.0001f;
+            })) {
+            ++result.cache_hits;
+            continue;
+        }
+        if (model_cache.size() >= kNamModelCacheEntries) {
+            const auto stale = std::find_if(model_cache.begin(), model_cache.end(),
+                [&](const CachedNamModel& entry) {
+                    return !prepared_key_matches(entry.filename, entry.size);
+                });
+            if (stale == model_cache.end()) {
+                continue;
+            }
+            model_cache.erase(stale);
+        }
+        int sample_rate = 0;
+        auto prepared = load_nam_model(descriptor.filename, fSampleRate,
+            &sample_rate, "Neural Amp Modeler", descriptor.size, "prepared pedal");
+        if (!prepared) {
+            continue;
+        }
+        model_cache.push_back(CachedNamModel{descriptor.filename, descriptor.size,
+            sample_rate, fSampleRate, std::move(prepared)});
+        ++result.loaded;
+    }
+    result.rapid_switch_ready =
+        result.active_hits + result.cache_hits + result.loaded == result.requested;
+    return result;
 }
 
 inline void NeuralAmp::clear_state_f()

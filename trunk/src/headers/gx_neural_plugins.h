@@ -127,6 +127,8 @@ private:
         nam::RuntimeDSPClass::None, -1, false};
     Glib::ustring runtime_model_path;
     std::vector<CachedNamModel> model_cache;
+    std::vector<PreparedNamModelDescriptor> prepared_models;
+    bool prepared_key_matches(const Glib::ustring& filename, float size) const;
     volatile int scene_smoother_snap_pending;
     bool muted_scene_parameter_batch;
     bool scene_smoother_preset;
@@ -164,6 +166,8 @@ public:
     Plugin plugin;
     NeuralAmp(ParamMap& param_, std::string id, sigc::slot<void> sync);
     ~NeuralAmp();
+    PreparedNamModelResult prepare_song_models(
+        const std::vector<PreparedNamModelDescriptor>& descriptors);
     void begin_scene_parameter_batch(bool externally_muted);
     bool finish_scene_parameter_batch();
     // Temporarily make the wrapper transparent, then (after the caller has

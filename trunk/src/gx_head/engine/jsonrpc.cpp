@@ -492,7 +492,8 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         break;
     }
 
-    FUNCTION(prepare_mnam_models) {
+    FUNCTION(prepare_mnam_models)
+    case RPCM_prepare_nam_models: {
         if (params.empty() || (params.size() - 1) % 3 != 0) {
             throw RpcError(
                 -32602,
@@ -505,22 +506,66 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         if ((params.size() - 1) / 3 > 32) {
             throw RpcError(-32602, "Invalid param -- too many prepared NAM models");
         }
-        std::vector<gx_engine::PreparedNamModelDescriptor> descriptors;
+        std::vector<gx_engine::PreparedNamModelDescriptor> descriptors, pedals, secondary_pedals;
         for (unsigned int i = 1; i < params.size(); i += 3) {
             const Glib::ustring slot_name = params[i]->getString();
             const Glib::ustring filename = params[i+1]->getString();
             const float size = params[i+2]->getFloat();
-            if ((slot_name != "A" && slot_name != "B") || filename.empty() ||
+            const bool standalone = mn->m_id == RPCM_prepare_nam_models &&
+                (slot_name == "NAM" || slot_name == "SNAM");
+            if ((!standalone && slot_name != "A" && slot_name != "B") || filename.empty() ||
                 !std::isfinite(size) || size < 0.0f || size > 1.0f) {
                 throw RpcError(-32602, "Invalid prepared NAM model descriptor");
             }
-            descriptors.push_back(gx_engine::PreparedNamModelDescriptor{
+            auto& target = slot_name == "NAM" ? pedals :
+                slot_name == "SNAM" ? secondary_pedals : descriptors;
+            target.push_back(gx_engine::PreparedNamModelDescriptor{
                 static_cast<char>(slot_name[0]), filename, size,
             });
         }
-        const gx_engine::PreparedNamModelResult result =
-            serv.jack.get_engine().mneural_amp.prepare_song_models(
-                generation, descriptors);
+        auto& engine = serv.jack.get_engine();
+        gx_engine::PreparedNamModelResult result =
+            engine.mneural_amp.prepare_song_models(generation, descriptors);
+        // Legacy amp-only preparation also releases preceding pedal pins.
+        for (const auto& pedal_result : {
+            engine.neural_amp.prepare_song_models(pedals),
+            engine.sneural_amp.prepare_song_models(secondary_pedals)}) {
+            if (mn->m_id == RPCM_prepare_nam_models) {
+                result.requested += pedal_result.requested;
+                result.active_hits += pedal_result.active_hits;
+                result.cache_hits += pedal_result.cache_hits;
+                result.loaded += pedal_result.loaded;
+                result.capacity += pedal_result.capacity;
+                result.rapid_switch_ready = result.rapid_switch_ready &&
+                    pedal_result.rapid_switch_ready;
+            }
+        }
+        jw.begin_object();
+        jw.write_kv("requested", result.requested);
+        jw.write_kv("activeHits", result.active_hits);
+        jw.write_kv("cacheHits", result.cache_hits);
+        jw.write_kv("loaded", result.loaded);
+        jw.write_kv("capacity", result.capacity);
+        jw.write_kv("hostSampleRate", result.host_sample_rate);
+        jw.write_bool_kv("rapidSwitchReady", result.rapid_switch_ready);
+        jw.end_object();
+    }
+
+    FUNCTION(prepare_ir_configs) {
+        if (params.empty() || params.size() > 33 || params[0]->getString().empty()) {
+            throw RpcError(-32602, "Expected generation followed by at most 32 IR configurations");
+        }
+        std::vector<gx_engine::GxJConvSettings> settings;
+        for (unsigned int i = 1; i < params.size(); ++i) {
+            gx_engine::GxJConvSettings setting;
+            gx_system::JsonSubParser parser = params[i]->getSubParser();
+            setting.readJSON(parser);
+            if (setting.getFullIRPath().empty()) {
+                throw RpcError(-32602, "Prepared IR path must not be empty");
+            }
+            settings.push_back(setting);
+        }
+        const auto result = serv.jack.get_engine().mono_convolver.prepare_song_irs(settings);
         jw.begin_object();
         jw.write_kv("requested", result.requested);
         jw.write_kv("activeHits", result.active_hits);
@@ -2018,6 +2063,8 @@ bool CmdConnection::request(gx_system::JsonStringParser& jp, gx_system::JsonStri
     static const methodnames fallback_methods[] = {
         { "set_scene", RPCM_set_scene },
         { "prepare_mnam_models", RPCM_prepare_mnam_models },
+        { "prepare_nam_models", RPCM_prepare_nam_models },
+        { "prepare_ir_configs", RPCM_prepare_ir_configs },
         { "jack_performance_status", RPCM_jack_performance_status },
         { "jack_deactivate", RPCM_jack_deactivate },
         { "jack_activate", RPCM_jack_activate },

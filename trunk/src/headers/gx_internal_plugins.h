@@ -24,6 +24,8 @@
 
 #include "gx_neural_plugins.h"
 #include "gx_poly_pitch_shifter.h"
+#include <atomic>
+#include <memory>
 
 namespace gx_jack { class GxJack; }
 
@@ -389,7 +391,19 @@ typedef ParameterV<GxJConvSettings> JConvParameter;
 
 class ConvolverAdapter: protected PluginDef, public sigc::trackable {
 protected:
-    GxConvolver conv;
+    std::unique_ptr<GxConvolver> conv;
+    // The audio callback snapshots this pointer once. Retiring an engine
+    // unpublishes it and crosses a callback barrier before ownership changes.
+    std::atomic<GxConvolver*> audio_convolver;
+    struct CachedIR {
+        GxJConvSettings settings;
+        unsigned int samplerate;
+        unsigned int buffersize;
+        std::unique_ptr<GxConvolver> convolver;
+    };
+    std::vector<CachedIR> ir_cache;
+    std::vector<GxJConvSettings> prepared_irs;
+    bool convolver_sync;
     boost::mutex activate_mutex;
     EngineControl& engine;
     sigc::slot<void> sync;
@@ -406,6 +420,9 @@ protected:
     bool configuration_matches();
     bool configure_current_ir();
     bool conv_prepare();
+    void suspend_convolver();
+    bool ir_is_prepared(const GxJConvSettings& settings) const;
+    std::unique_ptr<GxConvolver> configure_ir(const GxJConvSettings& settings);
 public:
     Plugin plugin;
 public:
@@ -413,8 +430,13 @@ public:
     ~ConvolverAdapter();
     void restart();
     bool conv_start();
+    PreparedNamModelResult prepare_song_irs(const std::vector<GxJConvSettings>& settings);
     inline const std::string& getIRFile() const { return jcset.getIRFile(); }
-    inline void set_sync(bool val) { conv.set_sync(val); }
+    inline void set_sync(bool val) {
+        convolver_sync = val;
+        conv->set_sync(val);
+        for (auto& entry : ir_cache) entry.convolver->set_sync(val);
+    }
     inline std::string getFullIRPath() const { return jcset.getFullIRPath(); }
     inline const std::string& getIRDir() const { return jcset.getIRDir(); }
     bool set(const GxJConvSettings& jcset) const { return jcp->set(jcset); }
