@@ -540,6 +540,15 @@ bool GxJack::gx_jack_init(bool startserver, int wait_after_connect, const gx_sys
 		    _("Sample rates above 96kHz ain't be supported"));
 		return false;
 	}
+    const char* analysis_enabled = std::getenv("GUITARIX_HOUSTON_ANALYSIS");
+    if (analysis_enabled && std::string(analysis_enabled) == "1") {
+        try {
+            houston_analysis.start(client_instance, ServerName);
+        } catch (const std::exception& error) {
+            // Telemetry must never prevent the instrument's DSP from starting.
+            gx_print_warning("Houston analysis", error.what());
+        }
+    }
     return true;
 }
 
@@ -550,6 +559,7 @@ void GxJack::cleanup_slot(bool otherthread) {
 	// called from other thread. Since most cleanup functions are
 	// not thread safe, just do minimal jack cleanup
         std::lock_guard<std::mutex> lock(client_activity_mutex);
+        houston_analysis.stop();
         if (jack_shutdown_seen.load(std::memory_order_acquire)) {
             amp_client_active = false;
             fx_client_active = false;
@@ -579,6 +589,7 @@ void GxJack::cleanup_slot(bool otherthread) {
 // -----Function that cleans the jack stuff on shutdown
 void GxJack::gx_jack_cleanup() {
     std::lock_guard<std::mutex> lock(client_activity_mutex);
+    houston_analysis.stop();
     if (!client || is_jack_down()) {
 	return;
     }
