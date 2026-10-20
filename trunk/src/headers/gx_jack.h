@@ -29,7 +29,6 @@
 
 #ifndef GUITARIX_AS_PLUGIN
 
-#include "houston/Service.h"
 #include <jack/jack.h>          // NOLINT
 #include <jack/midiport.h>
 #include <jack/ringbuffer.h>
@@ -195,7 +194,6 @@ inline void MidiCC::fill(unsigned char *midi_send, int i) {
 }
 
 class GxJack: public sigc::trackable {
-    gx_houston::Service houston_analysis;
  private:
     GxRtCheck           rtc;
     bool                IS_RT;
