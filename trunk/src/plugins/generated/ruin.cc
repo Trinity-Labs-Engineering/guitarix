@@ -163,7 +163,7 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 		double fTemp2 = -1.11891193819806e-12 - fTemp1;
 		fRec2[0] = fSlow1 + 0.993 * fRec2[1];
 		double fTemp3 = fConst0 * (fConst22 + fConst20 * fRec2[0]) + 9.19249029158284e-05;
-		fRec3[0] = double(buf[i0]) - (fRec3[1] * (fConst25 * (-5.00422517066654e-10 - 6.46682287003193e-10 * fRec2[0]) + 0.000183849805831657) + fRec3[2] * (fConst0 * (fConst24 + fConst23 * fRec2[0]) + 9.19249029158284e-05)) / fTemp3;
+		fRec3[0] = 10.0 * double(buf[i0]) - (fRec3[1] * (fConst25 * (-5.00422517066654e-10 - 6.46682287003193e-10 * fRec2[0]) + 0.000183849805831657) + fRec3[2] * (fConst0 * (fConst24 + fConst23 * fRec2[0]) + 9.19249029158284e-05)) / fTemp3;
 		fRec1[0] = symclip(-(fConst26 * ((fRec3[0] - fRec3[2]) / fTemp3))) - (fRec1[1] * (fConst18 + fRec0[0] * (fConst0 * (fConst17 + fConst16 * fRec0[0]) + 8.63748904106094e-09) + 8.646126530102e-08) + fRec1[2] * (fConst15 + fRec0[0] * (fConst0 * (fConst13 + fConst11 * fRec0[0]) + 8.63748904106094e-09) + 8.646126530102e-08) + fRec1[3] * (fConst9 + fRec0[0] * (fConst0 * (fConst8 + fConst7 * fRec0[0]) + 2.87916301368698e-09) + 2.88204217670067e-08)) / fTemp0;
 		double fTemp4 = fTemp1 + 1.11891193819806e-12;
 		buf[i0] = FAUSTFLOAT(fConst25 * ((fRec1[0] * fTemp2 + fRec1[1] * fTemp4 + fRec1[2] * fTemp4 + fRec1[3] * fTemp2) / fTemp0));

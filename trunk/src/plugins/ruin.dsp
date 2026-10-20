@@ -69,4 +69,4 @@ ruinerp2  = pre : fi.iir((b0/a0,b1/a0,b2/a0,b3/a0),(a1/a0,a2/a0,a3/a0)) with {
     aclip(x) = atan(x)/ma.PI;
     //tclip = tranystageb(TB_SVEL34_68k,86.0,2700.0,25.922163) : tranystageb(TB_SVEL34_68k,86.0,2700.0,25.922163) ;
     tclip = tranystageb(TB_7199P_68k,86.0,2700.0,5.571981) : tranystageb(TB_7199P_68k,86.0,2700.0,5.571981) ;
-process = ruinerp1 : clip : ruinerp2  ;
+process = *(10.0) : ruinerp1 : clip : ruinerp2  ;

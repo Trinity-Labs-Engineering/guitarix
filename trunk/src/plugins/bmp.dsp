@@ -153,4 +153,4 @@ antialiasing = pre : fi.iir((b0/a0,b1/a0,b2/a0,b3/a0,b4/a0),(a1/a0,a2/a0,a3/a0,a
     sclip = symclip(_);
     clip(x) = atan(x)/ma.PI;
 
-process = bpmin : bpmamp1 : clip  : bpmamp2 : sclip  : bpmtone : bpmout;
+process = *(10.0) : bpmin : bpmamp1 : clip  : bpmamp2 : sclip  : bpmtone : bpmout;

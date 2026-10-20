@@ -160,6 +160,21 @@ Faust dsp files are in src/faust, the generated files get copied to
 src/faust-cc for distribution so the program can be build later even
 if faust is not installed (or no compatible version).
 
+The Artemis fuzz pedals apply a fixed 10x (+20 dB) boost before their
+effect processing, matching Houston's gain.gain maximum in the pedal
+library's Boost.json (Guitarix itself allows up to +40 dB). This covers
+astrofuzz, axface, bfuzz, bmp, buzz, cstb, foxeylady, fuzzdrive, ffreak,
+fumaster, fuzzface, fuzzfacefm, fuzzfacerm, hornet, muff, ruin, scream and
+susta. The boost is inside each existing plugin, with no new parameters
+or chain entries. Wet/dry controls retain their original dry signal path.
+Existing presets using an external Gain pedal for this boost should
+remove that extra gain.
+
+Keep the input multipliers in src/faust/fuzzface.dsp and src/plugins/*.dsp
+in sync with their checked-in C++ counterparts in src/faust-generated and
+src/plugins/generated, including when regenerating the circuit models.
+The separate LV2 implementations are unaffected.
+
 6. LADSPA
 ----------------------------------------------------------------
 

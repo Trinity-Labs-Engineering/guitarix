@@ -9,7 +9,7 @@ declare insert_p "clipper";
 import("stdfaust.lib");
 //import("trany.lib");
 
-process = pre :  fi.iir((b0/a0,b1/a0,b2/a0,b3/a0,b4/a0,b5/a0),(a1/a0,a2/a0,a3/a0,a4/a0,a5/a0))   with {
+process = *(10.0) : pre :  fi.iir((b0/a0,b1/a0,b2/a0,b3/a0,b4/a0,b5/a0),(a1/a0,a2/a0,a3/a0,a4/a0,a5/a0))   with {
     Inverted(b, x) = ba.if(b, 1 - x, x);
     s = 0.993;
     fs = float(ma.SR);

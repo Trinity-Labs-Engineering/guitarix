@@ -10,7 +10,7 @@ declare insert_p "tranyclipper";
 import("stdfaust.lib");
 import("trany.lib");
 
-process = pre : _<:*(dry),(*(wet) : fi.iir((b0/a0,b1/a0,b2/a0,b3/a0),(a1/a0,a2/a0,a3/a0)) ):>_ with {
+process = pre : _<:*(dry),(*(wet) : *(10.0) : fi.iir((b0/a0,b1/a0,b2/a0,b3/a0),(a1/a0,a2/a0,a3/a0)) ):>_ with {
     LogPot(a, x) = ba.if(a, (exp(a * x) - 1) / (exp(a) - 1), x);
     Inverted(b, x) = ba.if(b, 1 - x, x);
     s = 0.993;

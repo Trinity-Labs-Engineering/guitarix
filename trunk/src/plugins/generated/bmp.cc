@@ -198,7 +198,7 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 		double fTemp0 = fConst8 * fRec1[0] + 0.00401435914138484;
 		fRec4[0] = fSlow1 + 0.993 * fRec4[1];
 		double fTemp1 = fConst0 * (fConst23 + fRec4[0] * (fConst21 + fConst19 * fRec4[0])) + 0.000146000960455196;
-		fRec6[0] = double(buf[i0]) - fConst34 * (fConst32 * fRec6[2] + 0.000438032628543473 * fRec6[1]);
+		fRec6[0] = 10.0 * double(buf[i0]) - fConst34 * (fConst32 * fRec6[2] + 0.000438032628543473 * fRec6[1]);
 		fRec5[0] = fConst35 * (fRec6[0] - fRec6[2]) - (fRec5[1] * (fConst3 * (fRec4[0] * (2.26893039628251e-09 * fRec4[0] + -2.24624109231969e-09) + -2.5642240040786e-10) + 0.000292001920910392) + fRec5[2] * (fConst0 * (fConst30 + fRec4[0] * (fConst29 + fConst28 * fRec4[0])) + 0.000146000960455196)) / fTemp1;
 		fRec3[0] = 0.3183098861837907 * std::atan((fConst0 * fRec5[0] * (fConst37 + fConst36 * fRec4[0]) + fConst3 * fRec5[1] * (-4.52586774307001e-14 - 4.52586774307001e-12 * fRec4[0]) + fConst0 * fRec5[2] * (fConst27 + fConst25 * fRec4[0])) / fTemp1) - fConst17 * (fConst16 * fRec3[1] + fConst15 * fRec3[2]);
 		fRec2[0] = symclip(fConst17 * (fConst41 * fRec3[0] - fConst40 * fRec3[1] + fConst39 * fRec3[2])) - fConst13 * (fConst12 * fRec2[1] + fConst10 * fRec2[2]);
