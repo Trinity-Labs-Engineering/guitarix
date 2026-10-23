@@ -15,7 +15,7 @@ private:
 	FAUSTFLOAT fVslider1;
 	double fRec1[2];
 	int IOTA0;
-	double fVec0[16384];
+	double *fVec0;
 	FAUSTFLOAT fVslider2;
 	FAUSTFLOAT fVslider3;
 	double fConst0;
@@ -31,7 +31,7 @@ private:
 	double fRec15[2];
 	FAUSTFLOAT fVslider9;
 	double fRec14[2];
-	double fVec1[16384];
+	double *fVec1;
 	double fConst5;
 	int iConst6;
 	FAUSTFLOAT fVslider10;
@@ -43,7 +43,7 @@ private:
 	double fConst10;
 	double fRec19[2];
 	double fRec18[2];
-	double fVec3[16384];
+	double *fVec3;
 	double fConst11;
 	int iConst12;
 	double fVec4[2048];
@@ -53,7 +53,7 @@ private:
 	double fConst15;
 	double fRec23[2];
 	double fRec22[2];
-	double fVec5[16384];
+	double *fVec5;
 	double fConst16;
 	int iConst17;
 	double fVec6[4096];
@@ -63,7 +63,7 @@ private:
 	double fConst20;
 	double fRec27[2];
 	double fRec26[2];
-	double fVec7[16384];
+	double *fVec7;
 	double fConst21;
 	int iConst22;
 	double fVec8[2048];
@@ -73,10 +73,10 @@ private:
 	double fConst25;
 	double fRec31[2];
 	double fRec30[2];
-	double fVec9[32768];
+	double *fVec9;
 	double fConst26;
 	int iConst27;
-	double fVec10[16384];
+	double *fVec10;
 	double fVec11[4096];
 	int iConst28;
 	double fRec28[2];
@@ -84,7 +84,7 @@ private:
 	double fConst30;
 	double fRec35[2];
 	double fRec34[2];
-	double fVec12[16384];
+	double *fVec12;
 	double fConst31;
 	int iConst32;
 	double fVec13[4096];
@@ -94,7 +94,7 @@ private:
 	double fConst35;
 	double fRec39[2];
 	double fRec38[2];
-	double fVec14[32768];
+	double *fVec14;
 	double fConst36;
 	int iConst37;
 	double fVec15[4096];
@@ -104,7 +104,7 @@ private:
 	double fConst40;
 	double fRec43[2];
 	double fRec42[2];
-	double fVec16[32768];
+	double *fVec16;
 	double fConst41;
 	int iConst42;
 	double fVec17[2048];
@@ -123,6 +123,11 @@ private:
 	double fRec45[3];
 	double fRec44[3];
 
+	bool mem_allocated;
+	unsigned int pending_sample_rate;
+	void mem_alloc();
+	void mem_free();
+	int activate(bool start);
 	void clear_state_f();
 	int load_ui_f(const UiBuilder& b, int form);
 	static const char *glade_def;
@@ -130,6 +135,7 @@ private:
 	void compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *input1, FAUSTFLOAT *output0, FAUSTFLOAT *output1);
 	int register_par(const ParamReg& reg);
 
+	static int activate_static(bool start, PluginDef*);
 	static void clear_state_f_static(PluginDef*);
 	static int load_ui_f_static(const UiBuilder& b, int form);
 	static void init_static(unsigned int sample_rate, PluginDef*);
@@ -153,7 +159,19 @@ static const char* parm_groups[] = {
 	};
 
 Dsp::Dsp()
-	: PluginDef() {
+	: PluginDef(),
+	  fVec0(0),
+	  fVec1(0),
+	  fVec3(0),
+	  fVec5(0),
+	  fVec7(0),
+	  fVec9(0),
+	  fVec10(0),
+	  fVec12(0),
+	  fVec14(0),
+	  fVec16(0),
+	  mem_allocated(false),
+	  pending_sample_rate(0) {
 	version = PLUGINDEF_VERSION;
 	flags = 0;
 	id = "zita_rev1";
@@ -165,7 +183,7 @@ Dsp::Dsp()
 	mono_audio = 0;
 	stereo_audio = compute_static;
 	set_samplerate = init_static;
-	activate_plugin = 0;
+	activate_plugin = activate_static;
 	register_params = register_params_static;
 	load_ui = load_ui_f_static;
 	clear_state = clear_state_f_static;
@@ -173,10 +191,12 @@ Dsp::Dsp()
 }
 
 Dsp::~Dsp() {
+	mem_free();
 }
 
 inline void Dsp::clear_state_f()
 {
+	if (!mem_allocated) return;
 	for (int l0 = 0; l0 < 2; l0 = l0 + 1) fRec0[l0] = 0.0;
 	for (int l1 = 0; l1 < 2; l1 = l1 + 1) fRec1[l1] = 0.0;
 	for (int l2 = 0; l2 < 16384; l2 = l2 + 1) fVec0[l2] = 0.0;
@@ -288,12 +308,70 @@ inline void Dsp::init(unsigned int sample_rate)
 	iConst42 = int(std::min<double>(16384.0, std::max<double>(0.0, fConst39 - fConst41)));
 	iConst43 = int(std::min<double>(1024.0, std::max<double>(0.0, fConst41 + -1.0)));
 	IOTA0 = 0;
-	clear_state_f();
 }
 
 void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 {
-	static_cast<Dsp*>(p)->init(sample_rate);
+	Dsp *dsp = static_cast<Dsp*>(p);
+	dsp->pending_sample_rate = sample_rate;
+	if (dsp->mem_allocated) {
+		dsp->init(sample_rate);
+		dsp->clear_state_f();
+	}
+}
+
+void Dsp::mem_alloc()
+{
+	if (!fVec0) fVec0 = new double[16384];
+	if (!fVec1) fVec1 = new double[16384];
+	if (!fVec3) fVec3 = new double[16384];
+	if (!fVec5) fVec5 = new double[16384];
+	if (!fVec7) fVec7 = new double[16384];
+	if (!fVec9) fVec9 = new double[32768];
+	if (!fVec10) fVec10 = new double[16384];
+	if (!fVec12) fVec12 = new double[16384];
+	if (!fVec14) fVec14 = new double[32768];
+	if (!fVec16) fVec16 = new double[32768];
+	mem_allocated = true;
+}
+
+void Dsp::mem_free()
+{
+	mem_allocated = false;
+	if (fVec0) { delete[] fVec0; fVec0 = 0; }
+	if (fVec1) { delete[] fVec1; fVec1 = 0; }
+	if (fVec3) { delete[] fVec3; fVec3 = 0; }
+	if (fVec5) { delete[] fVec5; fVec5 = 0; }
+	if (fVec7) { delete[] fVec7; fVec7 = 0; }
+	if (fVec9) { delete[] fVec9; fVec9 = 0; }
+	if (fVec10) { delete[] fVec10; fVec10 = 0; }
+	if (fVec12) { delete[] fVec12; fVec12 = 0; }
+	if (fVec14) { delete[] fVec14; fVec14 = 0; }
+	if (fVec16) { delete[] fVec16; fVec16 = 0; }
+}
+
+int Dsp::activate(bool start)
+{
+	if (start) {
+		if (!mem_allocated) {
+			try {
+				mem_alloc();
+				if (pending_sample_rate) init(pending_sample_rate);
+				clear_state_f();
+			} catch (...) {
+				mem_free();
+				return -1;
+			}
+		}
+	} else {
+		mem_free();
+	}
+	return 0;
+}
+
+int Dsp::activate_static(bool start, PluginDef *p)
+{
+	return static_cast<Dsp*>(p)->activate(start);
 }
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *input1, FAUSTFLOAT *output0, FAUSTFLOAT *output1)

@@ -39,7 +39,7 @@ private:
 	double fRec15[2];
 	FAUSTFLOAT fHslider5;
 	double fRec16[2];
-	double fRec3[524288];
+	double *fRec3;
 	double fRec0[2];
 	int iRec1[2];
 	double fRec2[2];
@@ -53,7 +53,7 @@ private:
 	double fRec26[2];
 	FAUSTFLOAT fHslider7;
 	double fRec27[2];
-	double fRec20[524288];
+	double *fRec20;
 	double fRec17[2];
 	int iRec18[2];
 	double fRec19[2];
@@ -68,7 +68,7 @@ private:
 	double fRec38[2];
 	FAUSTFLOAT fHslider9;
 	double fRec39[2];
-	double fRec31[524288];
+	double *fRec31;
 	double fRec28[2];
 	int iRec29[2];
 	double fRec30[2];
@@ -84,7 +84,7 @@ private:
 	double fRec51[2];
 	FAUSTFLOAT fHslider11;
 	double fRec52[2];
-	double fRec43[524288];
+	double *fRec43;
 	double fRec40[2];
 	int iRec41[2];
 	double fRec42[2];
@@ -101,12 +101,17 @@ private:
 	double fRec65[2];
 	FAUSTFLOAT fHslider13;
 	double fRec66[2];
-	double fRec56[524288];
+	double *fRec56;
 	double fRec53[2];
 	int iRec54[2];
 	double fRec55[2];
 	FAUSTFLOAT fVbargraph4;
 
+	bool mem_allocated;
+	unsigned int pending_sample_rate;
+	void mem_alloc();
+	void mem_free();
+	int activate(bool start);
 	void clear_state_f();
 	int load_ui_f(const UiBuilder& b, int form);
 	static const char *glade_def;
@@ -114,6 +119,7 @@ private:
 	void compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0);
 	int register_par(const ParamReg& reg);
 
+	static int activate_static(bool start, PluginDef*);
 	static void clear_state_f_static(PluginDef*);
 	static int load_ui_f_static(const UiBuilder& b, int form);
 	static void init_static(unsigned int sample_rate, PluginDef*);
@@ -128,7 +134,14 @@ public:
 
 
 Dsp::Dsp()
-	: PluginDef() {
+	: PluginDef(),
+	  fRec3(0),
+	  fRec20(0),
+	  fRec31(0),
+	  fRec43(0),
+	  fRec56(0),
+	  mem_allocated(false),
+	  pending_sample_rate(0) {
 	version = PLUGINDEF_VERSION;
 	flags = 0;
 	id = "mbe";
@@ -140,7 +153,7 @@ Dsp::Dsp()
 	mono_audio = compute_static;
 	stereo_audio = 0;
 	set_samplerate = init_static;
-	activate_plugin = 0;
+	activate_plugin = activate_static;
 	register_params = register_params_static;
 	load_ui = load_ui_f_static;
 	clear_state = clear_state_f_static;
@@ -148,10 +161,12 @@ Dsp::Dsp()
 }
 
 Dsp::~Dsp() {
+	mem_free();
 }
 
 inline void Dsp::clear_state_f()
 {
+	if (!mem_allocated) return;
 	for (int l0 = 0; l0 < 2; l0 = l0 + 1) fVec0[l0] = 0.0;
 	for (int l1 = 0; l1 < 2; l1 = l1 + 1) fRec11[l1] = 0.0;
 	for (int l2 = 0; l2 < 3; l2 = l2 + 1) fRec10[l2] = 0.0;
@@ -239,12 +254,60 @@ inline void Dsp::init(unsigned int sample_rate)
 	fConst3 = 6e+01 * fConst0;
 	fConst4 = 1e+01 / fConst0;
 	IOTA0 = 0;
-	clear_state_f();
 }
 
 void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 {
-	static_cast<Dsp*>(p)->init(sample_rate);
+	Dsp *dsp = static_cast<Dsp*>(p);
+	dsp->pending_sample_rate = sample_rate;
+	if (dsp->mem_allocated) {
+		dsp->init(sample_rate);
+		dsp->clear_state_f();
+	}
+}
+
+void Dsp::mem_alloc()
+{
+	if (!fRec3) fRec3 = new double[524288];
+	if (!fRec20) fRec20 = new double[524288];
+	if (!fRec31) fRec31 = new double[524288];
+	if (!fRec43) fRec43 = new double[524288];
+	if (!fRec56) fRec56 = new double[524288];
+	mem_allocated = true;
+}
+
+void Dsp::mem_free()
+{
+	mem_allocated = false;
+	if (fRec3) { delete[] fRec3; fRec3 = 0; }
+	if (fRec20) { delete[] fRec20; fRec20 = 0; }
+	if (fRec31) { delete[] fRec31; fRec31 = 0; }
+	if (fRec43) { delete[] fRec43; fRec43 = 0; }
+	if (fRec56) { delete[] fRec56; fRec56 = 0; }
+}
+
+int Dsp::activate(bool start)
+{
+	if (start) {
+		if (!mem_allocated) {
+			try {
+				mem_alloc();
+				if (pending_sample_rate) init(pending_sample_rate);
+				clear_state_f();
+			} catch (...) {
+				mem_free();
+				return -1;
+			}
+		}
+	} else {
+		mem_free();
+	}
+	return 0;
+}
+
+int Dsp::activate_static(bool start, PluginDef *p)
+{
+	return static_cast<Dsp*>(p)->activate(start);
 }
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0)

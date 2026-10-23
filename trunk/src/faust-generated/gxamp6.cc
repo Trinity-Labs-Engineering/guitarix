@@ -88,7 +88,7 @@ private:
 	double fRec52[2];
 	double fRec17[2];
 	int IOTA0;
-	double fVec6[32768];
+	double *fVec6;
 	int iConst21;
 	double fRec16[2];
 	double fConst22;
@@ -181,11 +181,17 @@ private:
 	double fRec2[2];
 	double fRec0[2];
 
+	bool mem_allocated;
+	unsigned int pending_sample_rate;
+	void mem_alloc();
+	void mem_free();
+	int activate(bool start);
 	void clear_state_f();
 	void init(unsigned int sample_rate);
 	void compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0);
 	int register_par(const ParamReg& reg);
 
+	static int activate_static(bool start, PluginDef*);
 	static void clear_state_f_static(PluginDef*);
 	static void init_static(unsigned int sample_rate, PluginDef*);
 	static void compute_static(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0, PluginDef*);
@@ -199,7 +205,10 @@ public:
 
 
 Dsp::Dsp()
-	: PluginDef() {
+	: PluginDef(),
+	  fVec6(0),
+	  mem_allocated(false),
+	  pending_sample_rate(0) {
 	version = PLUGINDEF_VERSION;
 	flags = 0;
 	id = "pre 6DJ8/ push-pull 6V6";
@@ -211,7 +220,7 @@ Dsp::Dsp()
 	mono_audio = compute_static;
 	stereo_audio = 0;
 	set_samplerate = init_static;
-	activate_plugin = 0;
+	activate_plugin = activate_static;
 	register_params = register_params_static;
 	load_ui = 0;
 	clear_state = clear_state_f_static;
@@ -219,10 +228,12 @@ Dsp::Dsp()
 }
 
 Dsp::~Dsp() {
+	mem_free();
 }
 
 inline void Dsp::clear_state_f()
 {
+	if (!mem_allocated) return;
 	for (int l0 = 0; l0 < 2; l0 = l0 + 1) fRec12[l0] = 0.0;
 	for (int l1 = 0; l1 < 2; l1 = l1 + 1) fRec14[l1] = 0.0;
 	for (int l2 = 0; l2 < 2; l2 = l2 + 1) fRec26[l2] = 0.0;
@@ -393,12 +404,52 @@ inline void Dsp::init(unsigned int RsamplingFreq)
 	fConst67 = 1.0 / (fConst31 * fConst35);
 	fConst68 = 0.025 / fConst1;
 	IOTA0 = 0;
-	clear_state_f();
 }
 
 void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 {
-	static_cast<Dsp*>(p)->init(sample_rate);
+	Dsp *dsp = static_cast<Dsp*>(p);
+	dsp->pending_sample_rate = sample_rate;
+	if (dsp->mem_allocated) {
+		dsp->init(sample_rate);
+		dsp->clear_state_f();
+	}
+}
+
+void Dsp::mem_alloc()
+{
+	if (!fVec6) fVec6 = new double[32768];
+	mem_allocated = true;
+}
+
+void Dsp::mem_free()
+{
+	mem_allocated = false;
+	if (fVec6) { delete[] fVec6; fVec6 = 0; }
+}
+
+int Dsp::activate(bool start)
+{
+	if (start) {
+		if (!mem_allocated) {
+			try {
+				mem_alloc();
+				if (pending_sample_rate) init(pending_sample_rate);
+				clear_state_f();
+			} catch (...) {
+				mem_free();
+				return -1;
+			}
+		}
+	} else {
+		mem_free();
+	}
+	return 0;
+}
+
+int Dsp::activate_static(bool start, PluginDef *p)
+{
+	return static_cast<Dsp*>(p)->activate(start);
 }
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0)

@@ -21,7 +21,7 @@ private:
 	FAUSTFLOAT fHslider0;
 	FAUSTFLOAT fHslider1;
 	int IOTA0;
-	double fVec0[524288];
+	double *fVec0;
 	double fConst11;
 	FAUSTFLOAT fHslider2;
 	double fConst12;
@@ -29,7 +29,7 @@ private:
 	double fConst13;
 	double fRec5[2];
 	double fRec3[2];
-	double fVec1[524288];
+	double *fVec1;
 	double fRec7[2];
 	double fRec4[2];
 	double fConst14;
@@ -86,6 +86,11 @@ private:
 	double fRec34[2];
 	double fRec33[2];
 
+	bool mem_allocated;
+	unsigned int pending_sample_rate;
+	void mem_alloc();
+	void mem_free();
+	int activate(bool start);
 	void clear_state_f();
 	int load_ui_f(const UiBuilder& b, int form);
 	static const char *glade_def;
@@ -93,6 +98,7 @@ private:
 	void compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *input1, FAUSTFLOAT *output0, FAUSTFLOAT *output1);
 	int register_par(const ParamReg& reg);
 
+	static int activate_static(bool start, PluginDef*);
 	static void clear_state_f_static(PluginDef*);
 	static int load_ui_f_static(const UiBuilder& b, int form);
 	static void init_static(unsigned int sample_rate, PluginDef*);
@@ -107,7 +113,11 @@ public:
 
 
 Dsp::Dsp()
-	: PluginDef() {
+	: PluginDef(),
+	  fVec0(0),
+	  fVec1(0),
+	  mem_allocated(false),
+	  pending_sample_rate(0) {
 	version = PLUGINDEF_VERSION;
 	flags = 0;
 	id = "duckDelaySt";
@@ -119,7 +129,7 @@ Dsp::Dsp()
 	mono_audio = 0;
 	stereo_audio = compute_static;
 	set_samplerate = init_static;
-	activate_plugin = 0;
+	activate_plugin = activate_static;
 	register_params = register_params_static;
 	load_ui = load_ui_f_static;
 	clear_state = clear_state_f_static;
@@ -127,10 +137,12 @@ Dsp::Dsp()
 }
 
 Dsp::~Dsp() {
+	mem_free();
 }
 
 inline void Dsp::clear_state_f()
 {
+	if (!mem_allocated) return;
 	for (int l0 = 0; l0 < 524288; l0 = l0 + 1) fVec0[l0] = 0.0;
 	for (int l1 = 0; l1 < 2; l1 = l1 + 1) fRec6[l1] = 0.0;
 	for (int l2 = 0; l2 < 2; l2 = l2 + 1) fRec5[l2] = 0.0;
@@ -211,12 +223,54 @@ inline void Dsp::init(unsigned int sample_rate)
 	fConst29 = 1.0 / (fConst18 * fConst25);
 	fConst30 = 1.0 / fConst0;
 	IOTA0 = 0;
-	clear_state_f();
 }
 
 void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 {
-	static_cast<Dsp*>(p)->init(sample_rate);
+	Dsp *dsp = static_cast<Dsp*>(p);
+	dsp->pending_sample_rate = sample_rate;
+	if (dsp->mem_allocated) {
+		dsp->init(sample_rate);
+		dsp->clear_state_f();
+	}
+}
+
+void Dsp::mem_alloc()
+{
+	if (!fVec0) fVec0 = new double[524288];
+	if (!fVec1) fVec1 = new double[524288];
+	mem_allocated = true;
+}
+
+void Dsp::mem_free()
+{
+	mem_allocated = false;
+	if (fVec0) { delete[] fVec0; fVec0 = 0; }
+	if (fVec1) { delete[] fVec1; fVec1 = 0; }
+}
+
+int Dsp::activate(bool start)
+{
+	if (start) {
+		if (!mem_allocated) {
+			try {
+				mem_alloc();
+				if (pending_sample_rate) init(pending_sample_rate);
+				clear_state_f();
+			} catch (...) {
+				mem_free();
+				return -1;
+			}
+		}
+	} else {
+		mem_free();
+	}
+	return 0;
+}
+
+int Dsp::activate_static(bool start, PluginDef *p)
+{
+	return static_cast<Dsp*>(p)->activate(start);
 }
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *input1, FAUSTFLOAT *output0, FAUSTFLOAT *output1)

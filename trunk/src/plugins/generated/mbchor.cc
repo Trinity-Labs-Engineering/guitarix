@@ -60,7 +60,7 @@ private:
 	double fRec4[3];
 	double fRec3[3];
 	int IOTA0;
-	double fVec1[131072];
+	double *fVec1;
 	FAUSTFLOAT fHslider4;
 	double fConst3;
 	double fRec9[2];
@@ -80,7 +80,7 @@ private:
 	double fRec16[3];
 	double fRec15[3];
 	double fRec14[3];
-	double fVec3[131072];
+	double *fVec3;
 	FAUSTFLOAT fHslider8;
 	double fRec20[2];
 	FAUSTFLOAT fHslider9;
@@ -97,7 +97,7 @@ private:
 	double fRec27[2];
 	double fRec26[3];
 	double fRec25[3];
-	double fVec5[131072];
+	double *fVec5;
 	FAUSTFLOAT fHslider12;
 	double fRec30[2];
 	FAUSTFLOAT fHslider13;
@@ -113,7 +113,7 @@ private:
 	double fVec6[2];
 	double fRec36[2];
 	double fRec35[3];
-	double fVec7[131072];
+	double *fVec7;
 	FAUSTFLOAT fHslider16;
 	double fRec39[2];
 	FAUSTFLOAT fHslider17;
@@ -126,7 +126,7 @@ private:
 	FAUSTFLOAT fVbargraph3;
 	double fRec45[2];
 	double fRec44[3];
-	double fVec8[131072];
+	double *fVec8;
 	FAUSTFLOAT fHslider20;
 	double fRec46[2];
 	FAUSTFLOAT fHslider21;
@@ -138,6 +138,11 @@ private:
 	double fRec43[2];
 	FAUSTFLOAT fVbargraph4;
 
+	bool mem_allocated;
+	unsigned int pending_sample_rate;
+	void mem_alloc();
+	void mem_free();
+	int activate(bool start);
 	void clear_state_f();
 	int load_ui_f(const UiBuilder& b, int form);
 	static const char *glade_def;
@@ -145,6 +150,7 @@ private:
 	void compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0);
 	int register_par(const ParamReg& reg);
 
+	static int activate_static(bool start, PluginDef*);
 	static void clear_state_f_static(PluginDef*);
 	static int load_ui_f_static(const UiBuilder& b, int form);
 	static void init_static(unsigned int sample_rate, PluginDef*);
@@ -159,7 +165,14 @@ public:
 
 
 Dsp::Dsp()
-	: PluginDef() {
+	: PluginDef(),
+	  fVec1(0),
+	  fVec3(0),
+	  fVec5(0),
+	  fVec7(0),
+	  fVec8(0),
+	  mem_allocated(false),
+	  pending_sample_rate(0) {
 	version = PLUGINDEF_VERSION;
 	flags = 0;
 	id = "mbchor";
@@ -171,7 +184,7 @@ Dsp::Dsp()
 	mono_audio = compute_static;
 	stereo_audio = 0;
 	set_samplerate = init_static;
-	activate_plugin = 0;
+	activate_plugin = activate_static;
 	register_params = register_params_static;
 	load_ui = load_ui_f_static;
 	clear_state = clear_state_f_static;
@@ -179,10 +192,12 @@ Dsp::Dsp()
 }
 
 Dsp::~Dsp() {
+	mem_free();
 }
 
 inline void Dsp::clear_state_f()
 {
+	if (!mem_allocated) return;
 	for (int l0 = 0; l0 < 2; l0 = l0 + 1) fVec0[l0] = 0.0;
 	for (int l1 = 0; l1 < 2; l1 = l1 + 1) fRec7[l1] = 0.0;
 	for (int l2 = 0; l2 < 3; l2 = l2 + 1) fRec6[l2] = 0.0;
@@ -259,12 +274,60 @@ inline void Dsp::init(unsigned int sample_rate)
 	fConst3 = 0.016666666666666666 / fConst0;
 	fConst4 = 0.5 * fConst0;
 	IOTA0 = 0;
-	clear_state_f();
 }
 
 void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 {
-	static_cast<Dsp*>(p)->init(sample_rate);
+	Dsp *dsp = static_cast<Dsp*>(p);
+	dsp->pending_sample_rate = sample_rate;
+	if (dsp->mem_allocated) {
+		dsp->init(sample_rate);
+		dsp->clear_state_f();
+	}
+}
+
+void Dsp::mem_alloc()
+{
+	if (!fVec1) fVec1 = new double[131072];
+	if (!fVec3) fVec3 = new double[131072];
+	if (!fVec5) fVec5 = new double[131072];
+	if (!fVec7) fVec7 = new double[131072];
+	if (!fVec8) fVec8 = new double[131072];
+	mem_allocated = true;
+}
+
+void Dsp::mem_free()
+{
+	mem_allocated = false;
+	if (fVec1) { delete[] fVec1; fVec1 = 0; }
+	if (fVec3) { delete[] fVec3; fVec3 = 0; }
+	if (fVec5) { delete[] fVec5; fVec5 = 0; }
+	if (fVec7) { delete[] fVec7; fVec7 = 0; }
+	if (fVec8) { delete[] fVec8; fVec8 = 0; }
+}
+
+int Dsp::activate(bool start)
+{
+	if (start) {
+		if (!mem_allocated) {
+			try {
+				mem_alloc();
+				if (pending_sample_rate) init(pending_sample_rate);
+				clear_state_f();
+			} catch (...) {
+				mem_free();
+				return -1;
+			}
+		}
+	} else {
+		mem_free();
+	}
+	return 0;
+}
+
+int Dsp::activate_static(bool start, PluginDef *p)
+{
+	return static_cast<Dsp*>(p)->activate(start);
 }
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0)

@@ -37,15 +37,13 @@
 
 
 #if !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(_WINDOWS)
-#include <malloc.h>
-
 void set_memory_allocation() {
     if (mlockall(MCL_CURRENT | MCL_FUTURE))
         gx_print_error("system init", "mlockall failed:");
-#if defined(M_TRIM_THRESHOLD) && defined(M_MMAP_MAX)
-    mallopt(M_TRIM_THRESHOLD, -1);
-    mallopt(M_MMAP_MAX, 0);
-#endif
+    // Keep real-time pages locked, but retain libc's normal mmap/trim policy.
+    // Model preparation and DSP activation run on the control thread; their
+    // large temporary allocations and released resident buffers must be able
+    // to return memory to the OS on the 2 GiB production device.
 }
 
 #else

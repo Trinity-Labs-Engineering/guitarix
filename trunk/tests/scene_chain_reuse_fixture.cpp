@@ -45,6 +45,7 @@ public:
     unsigned int lifetime_waits = 0;
     bool next_commit_needs_ramp = false;
     bool set_plugin_list(const list<Plugin*>& plugins);
+    void clear_module_states();
     bool has_pending_module_list() const { return pending_module_list; }
     void set_latch() { ++publications; }
     void wait_latch() { ++lifetime_waits; }
@@ -140,6 +141,17 @@ int main() {
     assert(first.definition.initialization_count == 1);
     assert(second.definition.initialization_count == 1);
     assert(chain.publications == 5);
+
+    // A resident lazy processor's activation may do no work. An explicit
+    // chain reset must still clear its history, while a failed activation
+    // must never call clear_state against absent storage.
+    second.definition.activate_plugin = [](bool, PluginDef*) { return 0; };
+    rejected.definition.activate_plugin = reject_activation;
+    rejected.definition.clear_state = initialize;
+    chain.clear_module_states();
+    assert(first.definition.initialization_count == 2);
+    assert(second.definition.initialization_count == 2);
+    assert(rejected.definition.initialization_count == 1);
 
     assert(chain.set_plugin_list({}));
     assert(chain.commit(true, parameters));

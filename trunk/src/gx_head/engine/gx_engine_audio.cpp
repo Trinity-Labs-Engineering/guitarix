@@ -317,8 +317,13 @@ void ProcessingChainBase::clear_module_states() {
     for (list<Plugin*>::const_iterator p = modules.begin(); p != modules.end(); ++p) {
 	PluginDef* pd = (*p)->get_pdef();
 	if (pd->activate_plugin) {
-	    pd->activate_plugin(true, pd);
-	} else if (pd->clear_state) {
+	    if (pd->activate_plugin(true, pd) != 0) {
+		continue;
+	    }
+	}
+	// Activation may only ensure lazy DSP storage exists. Explicit resets
+	// must still clear already-resident processors, whose activation is a no-op.
+	if (pd->clear_state) {
 	    pd->clear_state(pd);
 	}
     }

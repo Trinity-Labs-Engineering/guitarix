@@ -26,6 +26,7 @@
 
 #include "engine.h"
 #include "gx_faust_support.h"
+#include "gx_nam_block_adapter.h"
 #include "calibration.h"
 #include "container.h"
 #include "lstm.h"
@@ -56,9 +57,18 @@ namespace gx_engine {
 
 namespace {
 
-constexpr int kMaxNamHostBlockFrames = 8192;
 constexpr int kNamSelectorSlots = 128;
-constexpr std::size_t kNamModelCacheEntries = 8;
+// Six prepared scenes need twelve independent A/B amp graphs. Keep a bounded
+// pool that can hold the whole bank even before any of its models is active.
+const std::size_t kNamModelCacheEntries = [] {
+    const char* raw = std::getenv("GUITARIX_NAM_CACHE_ENTRIES");
+    if (!raw || !*raw) return std::size_t{16};
+    char* end = nullptr;
+    errno = 0;
+    const long value = std::strtol(raw, &end, 10);
+    if (errno || end == raw || *end || value < 12 || value > 32) return std::size_t{16};
+    return static_cast<std::size_t>(value);
+}();
 constexpr float kDefaultNamSlimmableSize = 0.49f;
 constexpr const char* kNamNone = "None";
 constexpr double kDefaultNamReferenceLevelDbu = 12.0;
@@ -186,15 +196,17 @@ void ensure_nam_builtin_parsers_registered() {
     (void)registered;
 }
 
-// Allow for resampler rounding while preallocating the largest NAM block.
-int max_nam_model_block_frames(int host_sample_rate, int model_sample_rate) {
+// Only the wrapper scratch spans a host callback; NAM graphs always process
+// bounded model-rate chunks. Keep resampler phase/count behavior independent
+// of that internal chunking, with room for resampler rounding.
+int nam_resampler_scratch_frames(int host_sample_rate, int model_sample_rate) {
     const int safe_host_sample_rate = host_sample_rate > 0 ? host_sample_rate : 1;
     const double ratio = static_cast<double>(model_sample_rate) /
         static_cast<double>(safe_host_sample_rate);
     return static_cast<int>(std::ceil(kMaxNamHostBlockFrames * ratio)) + 64;
 }
 
-bool initialize_nam_model(nam::DSP* model, int host_sample_rate,
+bool initialize_nam_model(nam::DSP* model, int /*host_sample_rate*/,
                           int model_sample_rate, const char* module_name,
                           const Glib::ustring& filename) {
     if (model->NumInputChannels() != 1 || model->NumOutputChannels() != 1) {
@@ -205,8 +217,7 @@ bool initialize_nam_model(nam::DSP* model, int host_sample_rate,
 
     try {
         // Reset and prewarm outside the audio callback to avoid allocations there.
-        model->ResetAndPrewarm(model_sample_rate,
-                               max_nam_model_block_frames(host_sample_rate, model_sample_rate));
+        model->ResetAndPrewarm(model_sample_rate, kNamModelBlockFrames);
         return true;
     } catch (const std::exception& error) {
         gx_print_info(module_name, "fail to initialize " + std::string(filename) +
@@ -223,32 +234,6 @@ float clamp_nam_size(float size) {
     return std::max<float>(0.0f, std::min<float>(1.0f, size));
 }
 
-bool set_nam_slimmable_size(nam::DSP* model, float size, int host_sample_rate,
-                            int model_sample_rate, const char* module_name,
-                            const Glib::ustring& filename, const char* slot_name) {
-    auto* slimmable = dynamic_cast<nam::SlimmableModel*>(model);
-    if (!slimmable) {
-        return false;
-    }
-
-    const float clamped_size = clamp_nam_size(size);
-    try {
-        slimmable->SetSlimmableSize(clamped_size);
-        model->ResetAndPrewarm(model_sample_rate,
-                               max_nam_model_block_frames(host_sample_rate, model_sample_rate));
-        gx_print_info(module_name, std::string("set ") + slot_name + " size " +
-                      std::to_string(clamped_size) + " for " + std::string(filename));
-        return true;
-    } catch (const std::exception& error) {
-        gx_print_info(module_name, std::string("fail to set ") + slot_name +
-                      " size for " + std::string(filename) + ": " + error.what());
-    } catch (...) {
-        gx_print_info(module_name, std::string("fail to set ") + slot_name +
-                      " size for " + std::string(filename));
-    }
-    return false;
-}
-
 std::unique_ptr<nam::DSP> load_nam_model(const Glib::ustring& filename,
                                          int host_sample_rate,
                                          int* model_sample_rate,
@@ -259,7 +244,7 @@ std::unique_ptr<nam::DSP> load_nam_model(const Glib::ustring& filename,
         ensure_nam_builtin_parsers_registered();
         std::unique_ptr<nam::DSP> next =
             nam::get_dsp(std::filesystem::path{std::string(filename)},
-                         nam::PrewarmMode::SKIP);
+                         nam::PrewarmMode::SKIP, clamp_nam_size(model_size));
         if (!next) {
             gx_print_info(module_name, "fail to load " + std::string(filename));
             return nullptr;
@@ -368,9 +353,7 @@ bool get_selected_nam_file(float selector, const Glib::ustring& load_path,
 
 inline void process_nam_mono(nam::DSP* model, float* input, float* output, int frames) {
     AVOIDDENORMALS();
-    float* inputs[] = {input};
-    float* outputs[] = {output};
-    model->process(inputs, outputs, frames);
+    process_nam_mono_bounded(model, input, output, frames);
 }
 
 } // namespace
@@ -682,7 +665,7 @@ inline void NeuralAmp::init(unsigned int sample_rate)
     fSampleRate = sample_rate;
     clear_state_f();
     reset_nam_filelist(nam_file_names);
-    scratch.resize(max_nam_model_block_frames(fSampleRate, fSampleRate));
+    scratch.resize(nam_resampler_scratch_frames(fSampleRate, fSampleRate));
     ramp.init(fSampleRate);
     is_inited = true;
     load_nam_file();
@@ -767,7 +750,10 @@ void always_inline NeuralAmp::compute(int count, float *input0, float *output0)
 
 void NeuralAmp::compute_static(int count, float *input0, float *output0, PluginDef *p)
 {
-    static_cast<NeuralAmp*>(p)->compute(count, input0, output0);
+    for (int offset = 0; offset < count; offset += kMaxNamHostBlockFrames) {
+        static_cast<NeuralAmp*>(p)->compute(
+            std::min<int>(kMaxNamHostBlockFrames, count - offset), input0 + offset, output0 + offset);
+    }
 }
 
 // non rt callback
@@ -785,7 +771,9 @@ void NeuralAmp::load_nam_file() {
         const bool has_selection = get_selected_nam_file(filelist, load_path,
             nam_file_names, &selected_file, "Neural Amp Modeler");
 
-        if (has_selection && model && (current_file.compare(selected_file) == 0)) {
+        if (has_selection && model && (current_file.compare(selected_file) == 0) &&
+            (!nam_model_is_slimmable(model) ||
+             std::fabs(current_model_size - fVslider2) < 0.0001f)) {
             if (ramp.mode == ramp.DOWN) ramp.mode = ramp.UP;
             return;
         }
@@ -824,7 +812,7 @@ void NeuralAmp::load_nam_file() {
         if (next_model) {
             model = next_model.release();
             mSampleRate = next_sample_rate;
-            scratch.resize(max_nam_model_block_frames(fSampleRate, mSampleRate));
+            scratch.resize(nam_resampler_scratch_frames(fSampleRate, mSampleRate));
             need_resample = setup_nam_resampler(smp, fSampleRate, mSampleRate);
             load_file = selected_file;
             current_file = selected_file;
@@ -851,28 +839,9 @@ void NeuralAmp::set_nam_size() {
     if (!model || !nam_model_is_slimmable(model)) {
         return;
     }
-
-    if (gx_system::atomic_get(ready) && ramp.mode == ramp.OFF) {
-        ramp.startRampDown();
-    }
-    gx_system::atomic_set(&ready, 0);
-    publish_runtime_status(nullptr, Glib::ustring());
-    sync();
-
-    if (set_nam_slimmable_size(model, fVslider2, fSampleRate, mSampleRate,
-                               "Neural Amp Modeler", current_file, "model")) {
-        current_model_size = fVslider2;
-        update_nam_level_calibration(
-            model, &nam_input_trim_db, &nam_output_trim_db, &loudness,
-            "Neural Amp Modeler", current_file, "model");
-        if (muted_scene_parameter_batch) {
-            preset_scene_smoother_targets();
-            scene_smoother_preset = true;
-        }
-    }
-    publish_runtime_status(model, current_file);
-    gx_system::atomic_set(&ready, model ? 1 : 0);
-    ramp.mode = model ? ramp.UP : ramp.OFF;
+    // Size is part of the cache key. Reuse its prepared graph rather than
+    // mutating/prewarming the active graph or retaining unused container children.
+    load_nam_file_impl();
 }
 
 // non rt callback
@@ -1289,8 +1258,8 @@ inline void NeuralAmpMulti::init(unsigned int sample_rate)
     reset_nam_filelist(nam_bfile_names);
     scratcha.resize(kMaxNamHostBlockFrames);
     scratchb.resize(kMaxNamHostBlockFrames);
-    scratch_modela.resize(max_nam_model_block_frames(fSampleRate, fSampleRate));
-    scratch_modelb.resize(max_nam_model_block_frames(fSampleRate, fSampleRate));
+    scratch_modela.resize(nam_resampler_scratch_frames(fSampleRate, fSampleRate));
+    scratch_modelb.resize(nam_resampler_scratch_frames(fSampleRate, fSampleRate));
     is_inited = true;
     buf = nullptr;
     IOTA0 = 0;
@@ -1544,7 +1513,10 @@ void always_inline NeuralAmpMulti::compute(int count, float *input0, float *outp
 
 void NeuralAmpMulti::compute_static(int count, float *input0, float *output0, PluginDef *p)
 {
-    static_cast<NeuralAmpMulti*>(p)->compute(count, input0, output0);
+    for (int offset = 0; offset < count; offset += kMaxNamHostBlockFrames) {
+        static_cast<NeuralAmpMulti*>(p)->compute(
+            std::min<int>(kMaxNamHostBlockFrames, count - offset), input0 + offset, output0 + offset);
+    }
 }
 
 // non rt callback
@@ -1562,7 +1534,9 @@ void NeuralAmpMulti::load_nam_afile() {
         const bool has_selection = get_selected_nam_file(afilelist, load_apath,
             nam_afile_names, &selected_file, "Neural Multi Amp Modeler");
 
-        if (has_selection && modela && (current_afile.compare(selected_file) == 0)) {
+        if (has_selection && modela && (current_afile.compare(selected_file) == 0) &&
+            (!nam_model_is_slimmable(modela) ||
+             std::fabs(current_model_sizea - fVslider3) < 0.0001f)) {
             if (rampA.mode == rampA.DOWN) rampA.mode = rampA.UP;
             return;
         }
@@ -1603,7 +1577,7 @@ void NeuralAmpMulti::load_nam_afile() {
         if (next_model) {
             modela = next_model.release();
             maSampleRate = next_sample_rate;
-            scratch_modela.resize(max_nam_model_block_frames(fSampleRate, maSampleRate));
+            scratch_modela.resize(nam_resampler_scratch_frames(fSampleRate, maSampleRate));
             need_aresample = setup_nam_resampler(smpa, fSampleRate, maSampleRate);
             load_afile = selected_file;
             current_afile = selected_file;
@@ -1638,7 +1612,9 @@ void NeuralAmpMulti::load_nam_bfile() {
         const bool has_selection = get_selected_nam_file(bfilelist, load_bpath,
             nam_bfile_names, &selected_file, "Neural Multi Amp Modeler");
 
-        if (has_selection && modelb && (current_bfile.compare(selected_file) == 0)) {
+        if (has_selection && modelb && (current_bfile.compare(selected_file) == 0) &&
+            (!nam_model_is_slimmable(modelb) ||
+             std::fabs(current_model_sizeb - fVslider4) < 0.0001f)) {
             if (rampB.mode == rampB.DOWN) rampB.mode = rampB.UP;
             return;
         }
@@ -1679,7 +1655,7 @@ void NeuralAmpMulti::load_nam_bfile() {
         if (next_model) {
             modelb = next_model.release();
             mbSampleRate = next_sample_rate;
-            scratch_modelb.resize(max_nam_model_block_frames(fSampleRate, mbSampleRate));
+            scratch_modelb.resize(nam_resampler_scratch_frames(fSampleRate, mbSampleRate));
             need_bresample = setup_nam_resampler(smpb, fSampleRate, mbSampleRate);
             load_bfile = selected_file;
             current_bfile = selected_file;
@@ -1703,56 +1679,18 @@ void NeuralAmpMulti::set_nam_asize() {
     if (!modela || !nam_model_is_slimmable(modela)) {
         return;
     }
-
-    if (gx_system::atomic_get(ready) && rampA.mode == rampA.OFF) {
-        rampA.startRampDown();
-    }
-    gx_system::atomic_set(&ready, 0);
-    publish_runtime_status(false, nullptr, Glib::ustring());
-    sync();
-
-    if (set_nam_slimmable_size(modela, fVslider3, fSampleRate, maSampleRate,
-                               "Neural Multi Amp Modeler", current_afile, "A")) {
-        current_model_sizea = fVslider3;
-        update_nam_level_calibration(
-            modela, &nam_input_trim_dba, &nam_output_trim_dba, &loudnessa,
-            "Neural Multi Amp Modeler", current_afile, "A");
-        if (muted_scene_parameter_batch) {
-            preset_scene_smoother_targets();
-            scene_smoother_preset = true;
-        }
-    }
-    publish_runtime_status(false, modela, current_afile);
-    gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
-    rampA.mode = modela ? rampA.UP : rampA.OFF;
+    // Size is part of the cache key. Reuse its prepared graph rather than
+    // mutating/prewarming the active graph or retaining unused container children.
+    load_nam_afile_impl();
 }
 
 void NeuralAmpMulti::set_nam_bsize() {
     if (!modelb || !nam_model_is_slimmable(modelb)) {
         return;
     }
-
-    if (gx_system::atomic_get(ready) && rampB.mode == rampB.OFF) {
-        rampB.startRampDown();
-    }
-    gx_system::atomic_set(&ready, 0);
-    publish_runtime_status(true, nullptr, Glib::ustring());
-    sync();
-
-    if (set_nam_slimmable_size(modelb, fVslider4, fSampleRate, mbSampleRate,
-                               "Neural Multi Amp Modeler", current_bfile, "B")) {
-        current_model_sizeb = fVslider4;
-        update_nam_level_calibration(
-            modelb, &nam_input_trim_dbb, &nam_output_trim_dbb, &loudnessb,
-            "Neural Multi Amp Modeler", current_bfile, "B");
-        if (muted_scene_parameter_batch) {
-            preset_scene_smoother_targets();
-            scene_smoother_preset = true;
-        }
-    }
-    publish_runtime_status(true, modelb, current_bfile);
-    gx_system::atomic_set(&ready, (modela || modelb) ? 1 : 0);
-    rampB.mode = modelb ? rampB.UP : rampB.OFF;
+    // Size is part of the cache key. Reuse its prepared graph rather than
+    // mutating/prewarming the active graph or retaining unused container children.
+    load_nam_bfile_impl();
 }
 
 // non rt callback

@@ -55,7 +55,7 @@ private:
 	FAUSTFLOAT fHslider2;
 	FAUSTFLOAT fHslider3;
 	int IOTA0;
-	double fVec1[524288];
+	double *fVec1;
 	FAUSTFLOAT fHslider4;
 	double fConst0;
 	double fConst1;
@@ -78,37 +78,42 @@ private:
 	double fVec5[2048];
 	int iConst6;
 	double fRec9[2];
-	double fVec6[8192];
+	double *fVec6;
 	double fConst7;
 	double fRec23[2];
 	FAUSTFLOAT fHslider6;
 	int iConst8;
 	double fRec7[2];
-	double fRec8[32768];
+	double *fRec8;
 	int iConst9;
 	FAUSTFLOAT fHslider7;
 	double fRec6[3];
 	FAUSTFLOAT fHslider8;
-	double fVec8[16384];
+	double *fVec8;
 	int iConst10;
 	double fRec4[2];
-	double fVec9[32768];
+	double *fVec9;
 	int iConst11;
 	double fRec0[2];
-	double fVec10[8192];
+	double *fVec10;
 	int iConst12;
 	double fRec27[2];
-	double fRec28[32768];
+	double *fRec28;
 	int iConst13;
 	double fRec26[3];
-	double fVec11[32768];
+	double *fVec11;
 	int iConst14;
 	double fRec24[2];
-	double fVec12[32768];
+	double *fVec12;
 	int iConst15;
 	double fRec1[2];
 	FAUSTFLOAT fHslider9;
 
+	bool mem_allocated;
+	unsigned int pending_sample_rate;
+	void mem_alloc();
+	void mem_free();
+	int activate(bool start);
 	void clear_state_f();
 	int load_ui_f(const UiBuilder& b, int form);
 	static const char *glade_def;
@@ -116,6 +121,7 @@ private:
 	void compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *input1, FAUSTFLOAT *output0, FAUSTFLOAT *output1);
 	int register_par(const ParamReg& reg);
 
+	static int activate_static(bool start, PluginDef*);
 	static void clear_state_f_static(PluginDef*);
 	static int load_ui_f_static(const UiBuilder& b, int form);
 	static void init_static(unsigned int sample_rate, PluginDef*);
@@ -130,7 +136,18 @@ public:
 
 
 Dsp::Dsp()
-	: PluginDef() {
+	: PluginDef(),
+	  fVec1(0),
+	  fVec6(0),
+	  fRec8(0),
+	  fVec8(0),
+	  fVec9(0),
+	  fVec10(0),
+	  fRec28(0),
+	  fVec11(0),
+	  fVec12(0),
+	  mem_allocated(false),
+	  pending_sample_rate(0) {
 	version = PLUGINDEF_VERSION;
 	flags = 0;
 	id = "dattorros_progenitor";
@@ -142,7 +159,7 @@ Dsp::Dsp()
 	mono_audio = 0;
 	stereo_audio = compute_static;
 	set_samplerate = init_static;
-	activate_plugin = 0;
+	activate_plugin = activate_static;
 	register_params = register_params_static;
 	load_ui = load_ui_f_static;
 	clear_state = clear_state_f_static;
@@ -150,10 +167,12 @@ Dsp::Dsp()
 }
 
 Dsp::~Dsp() {
+	mem_free();
 }
 
 inline void Dsp::clear_state_f()
 {
+	if (!mem_allocated) return;
 	for (int l0 = 0; l0 < 2; l0 = l0 + 1) iVec0[l0] = 0;
 	for (int l1 = 0; l1 < 524288; l1 = l1 + 1) fVec1[l1] = 0.0;
 	for (int l2 = 0; l2 < 2; l2 = l2 + 1) fRec18[l2] = 0.0;
@@ -217,12 +236,68 @@ inline void Dsp::init(unsigned int sample_rate)
 	iConst14 = int(0.08924431302711602 * fConst0);
 	iConst15 = int(0.10628003091293975 * fConst0);
 	IOTA0 = 0;
-	clear_state_f();
 }
 
 void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 {
-	static_cast<Dsp*>(p)->init(sample_rate);
+	Dsp *dsp = static_cast<Dsp*>(p);
+	dsp->pending_sample_rate = sample_rate;
+	if (dsp->mem_allocated) {
+		dsp->init(sample_rate);
+		dsp->clear_state_f();
+	}
+}
+
+void Dsp::mem_alloc()
+{
+	if (!fVec1) fVec1 = new double[524288];
+	if (!fVec6) fVec6 = new double[8192];
+	if (!fRec8) fRec8 = new double[32768];
+	if (!fVec8) fVec8 = new double[16384];
+	if (!fVec9) fVec9 = new double[32768];
+	if (!fVec10) fVec10 = new double[8192];
+	if (!fRec28) fRec28 = new double[32768];
+	if (!fVec11) fVec11 = new double[32768];
+	if (!fVec12) fVec12 = new double[32768];
+	mem_allocated = true;
+}
+
+void Dsp::mem_free()
+{
+	mem_allocated = false;
+	if (fVec1) { delete[] fVec1; fVec1 = 0; }
+	if (fVec6) { delete[] fVec6; fVec6 = 0; }
+	if (fRec8) { delete[] fRec8; fRec8 = 0; }
+	if (fVec8) { delete[] fVec8; fVec8 = 0; }
+	if (fVec9) { delete[] fVec9; fVec9 = 0; }
+	if (fVec10) { delete[] fVec10; fVec10 = 0; }
+	if (fRec28) { delete[] fRec28; fRec28 = 0; }
+	if (fVec11) { delete[] fVec11; fVec11 = 0; }
+	if (fVec12) { delete[] fVec12; fVec12 = 0; }
+}
+
+int Dsp::activate(bool start)
+{
+	if (start) {
+		if (!mem_allocated) {
+			try {
+				mem_alloc();
+				if (pending_sample_rate) init(pending_sample_rate);
+				clear_state_f();
+			} catch (...) {
+				mem_free();
+				return -1;
+			}
+		}
+	} else {
+		mem_free();
+	}
+	return 0;
+}
+
+int Dsp::activate_static(bool start, PluginDef *p)
+{
+	return static_cast<Dsp*>(p)->activate(start);
 }
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *input1, FAUSTFLOAT *output0, FAUSTFLOAT *output1)

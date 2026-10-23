@@ -104,8 +104,11 @@ def dsp_file(self, node):
 
 @Configure.conf
 def get_faust_args(bld):
-    arg = ['--no-version-header']
-    float_arg = arg + ["-s","40000","--float"]
+    # Delay histories must be allocated when entering the processing/resident
+    # chain, regardless of precision. Previously only float DSP used the
+    # threshold, so double DSP committed tens of MiB at catalogue startup.
+    arg = ['--no-version-header', '-s', '40000']
+    float_arg = arg + ["--float"]
     double_arg = arg + ["--double"]
     if bld.env['FAUST_DOUBLE']:
         arg.append("--double")

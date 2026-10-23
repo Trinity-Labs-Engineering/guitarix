@@ -481,7 +481,8 @@ bool GxJConvSettings::operator==(const GxJConvSettings& jcset) const {
     if (fGainCor != jcset.fGainCor) {
         return false;
     }
-    if (fGainCor && std::abs(fGain - jcset.fGain) > 1e-4 * (fGain + jcset.fGain)) {
+    if (fGainCor && !(std::abs(fGain - jcset.fGain) <=
+        1e-4 * (std::abs(fGain) + std::abs(jcset.fGain)))) {
         return false;
     }
     if (gainline != jcset.gainline) {

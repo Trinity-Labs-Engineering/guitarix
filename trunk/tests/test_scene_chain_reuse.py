@@ -25,7 +25,7 @@ class SceneChainReuseTests(unittest.TestCase):
         implementation = header.split("template <class F>\nThreadSafeChainPointer<F>::ThreadSafeChainPointer", 1)[1]
         implementation = implementation.split("/****************************************************************", 1)[0]
         staging = engine.split("bool lists_equal(", 1)[1]
-        staging = staging.split("void ProcessingChainBase::clear_module_states", 1)[0]
+        staging = staging.split("void ProcessingChainBase::release", 1)[0]
         production = (
             "template <class F>\nclass ThreadSafeChainPointer" + declaration
             + "template <class F>\nThreadSafeChainPointer<F>::ThreadSafeChainPointer"

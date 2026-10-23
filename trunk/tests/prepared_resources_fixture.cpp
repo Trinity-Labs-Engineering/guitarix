@@ -2,6 +2,8 @@
 #include <atomic>
 #include <cassert>
 #include <cmath>
+#include <cerrno>
+#include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -9,10 +11,15 @@
 #include <string>
 #include <vector>
 
-namespace Glib { using ustring = std::string; }
+namespace Glib {
+using ustring = std::string;
+std::string build_filename(const std::string& directory, const std::string& file) {
+    return directory.empty() ? file : directory + "/" + file;
+}
+}
 namespace boost { struct mutex : std::mutex { using scoped_lock = std::lock_guard<mutex>; }; }
 namespace nam { struct DSP { int identity; explicit DSP(int id) : identity(id) {} }; }
-constexpr std::size_t kNamModelCacheEntries = 8;
+#include "nam_cache_config_under_test.h"
 constexpr const char* kNamNone = "None";
 int model_loads = 0;
 std::unique_ptr<nam::DSP> load_nam_model(const std::string& path, int rate,
@@ -56,19 +63,66 @@ public:
     }
 };
 
-struct Convproc { enum { ST_STOP, ST_PROC }; };
-struct GxJConvSettings {
-    std::string path;
-    float gain = 1.0f;
-    bool operator==(const GxJConvSettings& other) const { return path == other.path && gain == other.gain; }
-    std::string getFullIRPath() const { return path; }
-    bool getGainCor() const { return true; }
-    float getGain() const { return gain; }
-    unsigned int getDelay() const { return 0; }
-    unsigned int getOffset() const { return 0; }
-    unsigned int getLength() const { return 0; }
-    std::vector<int> getGainline() const { return {}; }
+class NeuralAmpMulti {
+public:
+    struct CachedNamModel {
+        char slot;
+        Glib::ustring filename;
+        float size;
+        int sample_rate, host_sample_rate;
+        Glib::ustring pin_generation;
+        std::unique_ptr<nam::DSP> model;
+    };
+    nam::DSP* modela = nullptr;
+    nam::DSP* modelb = nullptr;
+    Glib::ustring current_afile, current_bfile, prepared_generation;
+    float current_model_sizea = 0.49f, current_model_sizeb = 0.49f;
+    int fSampleRate = 48000;
+    bool is_inited = true;
+    std::vector<CachedNamModel> model_cache;
+    std::vector<PreparedNamModelDescriptor> prepared_models;
+    ~NeuralAmpMulti() { delete modela; delete modelb; }
+    std::unique_ptr<nam::DSP> take_cached_model(char, const Glib::ustring&, float, int*);
+    void cache_model(nam::DSP*&, const Glib::ustring&, float, int, char);
+    bool prepared_key_matches(char, const Glib::ustring&, float) const;
+    PreparedNamModelResult prepare_song_models(const Glib::ustring&,
+        const std::vector<PreparedNamModelDescriptor>&);
+    int select(char slot, const std::string& name) {
+        int rate = 0;
+        auto next = take_cached_model(slot, name, .49f, &rate);
+        assert(next);
+        auto& active = slot == 'A' ? modela : modelb;
+        auto& current = slot == 'A' ? current_afile : current_bfile;
+        cache_model(active, current, .49f, rate, slot);
+        active = next.release(); current = name;
+        return active->identity;
+    }
 };
+
+struct Convproc { enum { ST_STOP, ST_PROC }; };
+// Use the real settings type and equality, including gainline points. Simplified
+// cache keys hid a production bug where zero-dB points were unequal to themselves.
+#define G_BEGIN_DECLS
+#define G_END_DECLS
+#include <gxwmm/gainline.h>
+#undef G_BEGIN_DECLS
+#undef G_END_DECLS
+using std::string;
+using guint = unsigned int;
+namespace gx_system { class JsonParser; class JsonWriter; }
+template <typename T> class ParameterV;
+#include "ir_settings_under_test.h"
+GxJConvSettings ir_settings(const std::string& path) {
+    GxJConvSettings settings;
+    settings.setIRFile(path);
+    settings.setGain(1.0f);
+    settings.setGainCor(true);
+    Gainline envelope;
+    envelope.push_back({0, 0.0});
+    envelope.push_back({-1, 0.0});
+    settings.setGainline(envelope);
+    return settings;
+}
 int ir_loads = 0;
 struct GxConvolver {
     unsigned int rate = 48000, buffer = 32;
@@ -80,7 +134,7 @@ struct GxConvolver {
     unsigned int get_buffersize() const { return buffer; }
     void set_sync(bool) {}
     bool configure(const std::string& path, float, float, unsigned int,
-        unsigned int, unsigned int, unsigned int, int, int, const std::vector<int>&) {
+        unsigned int, unsigned int, unsigned int, int, int, const Gainline&) {
         if (path == "missing") return false;
         id = ++ir_loads; return true;
     }
@@ -150,51 +204,115 @@ int main() {
 
     NeuralAmp full;
     std::vector<PreparedNamModelDescriptor> models;
-    for (int i = 0; i < 9; ++i) models.push_back({'N', std::to_string(i), .49f});
+    for (std::size_t i = 0; i <= kNamModelCacheEntries; ++i)
+        models.push_back({'N', std::to_string(i), .49f});
     prepared = full.prepare_song_models(models);
-    assert(!prepared.rapid_switch_ready && prepared.loaded == 8 && full.model_cache.size() == 8);
+    assert(!prepared.rapid_switch_ready && prepared.loaded == (int)kNamModelCacheEntries &&
+           full.model_cache.size() == kNamModelCacheEntries);
     // An unrelated outgoing model cannot displace any promised song resource.
     full.model = new nam::DSP(999); full.current_file = "adhoc";
     full.cache_current_model();
-    assert(full.model_cache.size() == 8 && full.select("0") != 999);
+    assert(full.model_cache.size() == kNamModelCacheEntries && full.select("0") != 999);
     models.erase(models.begin() + 1, models.end());
     full.prepare_song_models(models);
     assert(full.prepare_song_models({{'N', "replacement", .49f}}).rapid_switch_ready);
 
+    // Five dual-NAM presets plus next song's default must prepare from an empty
+    // amp wrapper and survive repeated complete bank changes without loading.
+    NeuralAmpMulti amp;
+    models.clear();
+    for (int i = 0; i < 6; ++i)
+        for (char slot : {'A', 'B'}) models.push_back({slot, std::to_string(i), .49f});
+    prepared = amp.prepare_song_models("song-and-next", models);
+    assert(prepared.rapid_switch_ready && prepared.loaded == 12);
+    assert(prepared.capacity == (int)kNamModelCacheEntries);
+    const int bank_loads = model_loads;
+    for (int pass = 0; pass < 4; ++pass) {
+        for (int i = 0; i < 6; ++i) {
+            const int a = amp.select('A', std::to_string(i));
+            const int b = amp.select('B', std::to_string(i));
+            assert(a != b); // each channel has independent recurrent state
+        }
+    }
+    assert(model_loads == bank_loads);
+    prepared = amp.prepare_song_models("song-and-next", models);
+    assert(prepared.rapid_switch_ready && prepared.active_hits == 2 && prepared.cache_hits == 10);
+    models.push_back({'A', "previous-song-default", .49f});
+    models.push_back({'B', "previous-song-default", .49f});
+    prepared = amp.prepare_song_models("both-song-neighbours", models);
+    assert(prepared.rapid_switch_ready); // 12 cached graphs plus two already active
+    NeuralAmpMulti from_empty;
+    prepared = from_empty.prepare_song_models("both-song-neighbours", models);
+    assert(prepared.rapid_switch_ready == (kNamModelCacheEntries >= 14));
+    assert(prepared.loaded == (int)std::min<std::size_t>(14, kNamModelCacheEntries));
+
+    auto flat = ir_settings("flat");
+    assert(flat == flat);
+    Gainline envelope;
+    envelope.push_back({0, -6.0});
+    envelope.push_back({-1, 0.0});
+    auto attenuated = flat;
+    attenuated.setGainline(envelope);
+    assert(attenuated == attenuated && !(attenuated == flat));
+    auto adjusted = attenuated;
+    envelope[0].g = -3.0;
+    adjusted.setGainline(envelope);
+    assert(!(adjusted == attenuated));
+    flat.setGain(-1.0f);
+    assert(flat == flat);
+    flat.setGain(0.0f);
+    assert(flat == flat);
+
+    // Match Houston's six-scene payload, including its zero-dB envelope.
+    ConvolverAdapter song;
+    std::vector<GxJConvSettings> six_configs;
+    for (int i = 0; i < 6; ++i) six_configs.push_back(ir_settings(std::to_string(i)));
+    prepared = song.prepare_song_irs(six_configs);
+    assert(prepared.loaded == 6 && prepared.rapid_switch_ready);
+    const int song_loads = ir_loads;
+    for (int pass = 0; pass < 3; ++pass) {
+        prepared = song.prepare_song_irs(six_configs);
+        assert(prepared.requested == 6 && prepared.cache_hits == 6 && prepared.loaded == 0);
+        assert(prepared.rapid_switch_ready && ir_loads == song_loads);
+    }
+    six_configs.push_back(six_configs.front());
+    prepared = song.prepare_song_irs(six_configs);
+    assert(prepared.requested == 6 && prepared.cache_hits == 6 && prepared.loaded == 0);
+
     ConvolverAdapter ir;
-    prepared = ir.prepare_song_irs({{"clean"}, {"lead"}});
+    prepared = ir.prepare_song_irs({ir_settings("clean"), ir_settings("lead")});
     assert(prepared.rapid_switch_ready && prepared.loaded == 2);
     assert(ir.audio_convolver.load() == nullptr && !ir.conv->is_runnable());
-    ir.jcset = {"clean"}; assert(ir.conv_start());
+    ir.jcset = ir_settings("clean"); assert(ir.conv_start());
     const int clean = ir.conv->id;
     const auto* audible = ir.audio_convolver.load();
-    prepared = ir.prepare_song_irs({{"clean"}, {"lead"}, {"third"}});
+    prepared = ir.prepare_song_irs({ir_settings("clean"), ir_settings("lead"), ir_settings("third")});
     assert(prepared.active_hits == 1 && prepared.cache_hits == 1 && prepared.loaded == 1);
     assert(ir.audio_convolver.load() == audible && ir.conv->is_runnable());
     const int loaded = ir_loads;
     for (int i = 0; i < 10; ++i) {
-        ir.jcset = {"lead"}; ir.suspend_convolver(); assert(ir.conv_start());
+        ir.jcset = ir_settings("lead"); ir.suspend_convolver(); assert(ir.conv_start());
         assert(ir.audio_convolver.load() == ir.conv.get());
-        ir.jcset = {"clean"}; ir.suspend_convolver(); assert(ir.conv_start());
+        ir.jcset = ir_settings("clean"); ir.suspend_convolver(); assert(ir.conv_start());
         assert(ir.conv->id == clean);
     }
     assert(ir_loads == loaded && ir.barriers == 20);
     ir.suspend_convolver(); assert(ir.conv_prepare()); assert(ir.conv_start());
     assert(ir_loads == loaded); // bypass -> enable reuses configuration
-    ir.jcset.gain = 0.5f; ir.suspend_convolver(); assert(ir.conv_start());
+    ir.jcset.setGain(0.5f); ir.suspend_convolver(); assert(ir.conv_start());
     assert(ir_loads == loaded + 1); // settings are part of the key
     ir.suspend_convolver(); ir.conv->set_samplerate(96000); assert(ir.conv_start());
     assert(ir_loads == loaded + 2);
     ir.suspend_convolver(); ir.conv->set_buffersize(64); assert(ir.conv_start());
     assert(ir_loads == loaded + 3);
-    assert(!ir.prepare_song_irs({{"missing"}}).rapid_switch_ready);
+    assert(!ir.prepare_song_irs({ir_settings("missing")}).rapid_switch_ready);
 
     ConvolverAdapter limited;
     std::vector<GxJConvSettings> settings;
-    for (int i = 0; i < 9; ++i) settings.push_back({std::to_string(i)});
+    for (int i = 0; i < 9; ++i) settings.push_back(ir_settings(std::to_string(i)));
     prepared = limited.prepare_song_irs(settings);
     assert(!prepared.rapid_switch_ready && prepared.loaded == 8 && limited.ir_cache.size() == 8);
-    prepared = limited.prepare_song_irs({{"replacement"}});
+    prepared = limited.prepare_song_irs({ir_settings("replacement")});
     assert(prepared.rapid_switch_ready && limited.ir_cache.size() == 8);
     std::cout << "prepared-resources-ok\n";
 }
