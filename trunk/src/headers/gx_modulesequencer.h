@@ -21,6 +21,7 @@
 #pragma once
 
 #include "gx_rt_cycle_latch.h"
+#include "gx_scene_input_history.h"
 
 namespace gx_engine {
 
@@ -291,9 +292,27 @@ bool ThreadSafeChainPointer<F>::commit(bool clear, ParamMap& pmap) {
  ** class MonoModuleChain, class StereoModuleChain
  */
 
+struct ScenePrefixPrerollStatus {
+    bool attempted = false;
+    unsigned int history_frames = 0;
+    unsigned int catchup_frames = 0;
+    const char* skip_reason = "";
+};
+
 class MonoModuleChain: public ThreadSafeChainPointer<monochain_data> {
+    SceneInputHistory scene_input_history;
+    std::uintptr_t history_upstream_signature = 0;
 public:
     MonoModuleChain(): ThreadSafeChainPointer<monochain_data>() {}
+    void set_samplerate(int samplerate) {
+        ProcessingChainBase::set_samplerate(samplerate);
+        scene_input_history.set_samplerate(samplerate);
+    }
+    void clear_module_states() {
+        ProcessingChainBase::clear_module_states();
+        scene_input_history.invalidate_control();
+    }
+    bool preroll_scene_prefix(bool externally_muted, ScenePrefixPrerollStatus& status);
     void process(int count, float *input, float *output);
     inline void print() { printlist("Mono", modules); }
 };

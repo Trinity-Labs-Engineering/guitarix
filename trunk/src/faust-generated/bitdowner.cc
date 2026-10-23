@@ -7,6 +7,7 @@ namespace bitdowner {
 class Dsp: public PluginDef {
 private:
 	int fSampleRate;
+	bool controls_need_seed;
 	FAUSTFLOAT fVslider0;
 	FAUSTFLOAT fVslider1;
 	double fRec0[2];
@@ -61,6 +62,7 @@ Dsp::~Dsp() {
 
 inline void Dsp::clear_state_f()
 {
+	controls_need_seed = true;
 	for (int l0 = 0; l0 < 2; l0 = l0 + 1) fRec0[l0] = 0.0;
 	for (int l1 = 0; l1 < 2; l1 = l1 + 1) iRec2[l1] = 0;
 	for (int l2 = 0; l2 < 2; l2 = l2 + 1) fRec1[l2] = 0.0;
@@ -85,6 +87,15 @@ void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0)
 {
+	// Equivalent to sceneSmooth's zero first-sample pole in the Faust source.
+	// The sample-hold value and downsampling counter remain cleared.
+	if (count > 0 && controls_need_seed) {
+		for (int i = 0; i < 2; ++i) {
+			fRec0[i] = std::pow(1e+01, 0.05 * double(fVslider1));
+			fRec3[i] = std::pow(1e+01, 0.05 * double(fVslider3));
+		}
+		controls_need_seed = false;
+	}
 	int iSlow0 = int(double(fVslider0));
 	int iSlow1 = iSlow0 > 1;
 	double fSlow2 = 0.0010000000000000009 * std::pow(1e+01, 0.05 * double(fVslider1));

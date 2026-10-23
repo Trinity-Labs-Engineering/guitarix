@@ -4,6 +4,8 @@ declare category "Tone Control";
 declare description "Graphic EQ";
 
 import("stdfaust.lib");
+// Seed current band controls on reset; retain smoothing for live edits.
+sceneSmooth = si.smooth(0.999 * (1 : mem));
 rd = library("reducemaps.lib");
 
 //geq = fi.filterbank(3, (31.25, 62.5, 125., 250., 500., 1000., 2000., 4000., 8000., 16000.));
@@ -12,17 +14,17 @@ geq = fi.filterbank(3, (44., 88., 177., 354., 707., 1414., 2828., 5657., 11384.,
 // Smooth in dB, where the smoother's zero state is already the neutral 0 dB
 // default. Smoothing after db2linear starts every band at zero gain and makes
 // a freshly enabled flat EQ fade in instead of passing audio unchanged.
-g1db = vslider("g1[tooltip:gain (dB) below 31.25 Hz]", 0, -30, 20, 0.1);  g1 = g1db : si.smooth(0.999) : ba.db2linear;
-g2db = vslider("g2 [tooltip:gain (dB) at 62.5 Hz]", 0, -30, 20, 0.1);     g2 = g2db : si.smooth(0.999) : ba.db2linear;
-g3db = vslider("g3  [tooltip:gain (dB) at 125 Hz]", 0, -30, 20, 0.1);     g3 = g3db : si.smooth(0.999) : ba.db2linear;
-g4db = vslider("g4  [tooltip:gain (dB) at 250 Hz]", 0, -30, 20, 0.1);     g4 = g4db : si.smooth(0.999) : ba.db2linear;
-g5db = vslider("g5  [tooltip:gain (dB) at 500 Hz]", 0, -30, 20, 0.1);     g5 = g5db : si.smooth(0.999) : ba.db2linear;
-g6db = vslider("g6   [tooltip:gain (dB) at 1 kHz]", 0, -30, 20, 0.1);     g6 = g6db : si.smooth(0.999) : ba.db2linear;
-g7db = vslider("g7   [tooltip:gain (dB) at 2 kHz]", 0, -30, 20, 0.1);     g7 = g7db : si.smooth(0.999) : ba.db2linear;
-g8db = vslider("g8   [tooltip:gain (dB) at 4 kHz]", 0, -30, 20, 0.1);     g8 = g8db : si.smooth(0.999) : ba.db2linear;
-g9db = vslider("g9   [tooltip:gain (dB) at 8 kHz]", 0, -30, 20, 0.1);     g9 = g9db : si.smooth(0.999) : ba.db2linear;
-g10db = vslider("g10  [tooltip:gain (dB) at 16 kHz]", 0, -30, 20, 0.1);  g10 = g10db : si.smooth(0.999) : ba.db2linear;
-g11db = vslider("g11  [tooltip:gain (dB) above 16 kHz]", 0, -30, 20, 0.1); g11 = g11db : si.smooth(0.999) : ba.db2linear;
+g1db = vslider("g1[tooltip:gain (dB) below 31.25 Hz]", 0, -30, 20, 0.1);  g1 = g1db : sceneSmooth : ba.db2linear;
+g2db = vslider("g2 [tooltip:gain (dB) at 62.5 Hz]", 0, -30, 20, 0.1);     g2 = g2db : sceneSmooth : ba.db2linear;
+g3db = vslider("g3  [tooltip:gain (dB) at 125 Hz]", 0, -30, 20, 0.1);     g3 = g3db : sceneSmooth : ba.db2linear;
+g4db = vslider("g4  [tooltip:gain (dB) at 250 Hz]", 0, -30, 20, 0.1);     g4 = g4db : sceneSmooth : ba.db2linear;
+g5db = vslider("g5  [tooltip:gain (dB) at 500 Hz]", 0, -30, 20, 0.1);     g5 = g5db : sceneSmooth : ba.db2linear;
+g6db = vslider("g6   [tooltip:gain (dB) at 1 kHz]", 0, -30, 20, 0.1);     g6 = g6db : sceneSmooth : ba.db2linear;
+g7db = vslider("g7   [tooltip:gain (dB) at 2 kHz]", 0, -30, 20, 0.1);     g7 = g7db : sceneSmooth : ba.db2linear;
+g8db = vslider("g8   [tooltip:gain (dB) at 4 kHz]", 0, -30, 20, 0.1);     g8 = g8db : sceneSmooth : ba.db2linear;
+g9db = vslider("g9   [tooltip:gain (dB) at 8 kHz]", 0, -30, 20, 0.1);     g9 = g9db : sceneSmooth : ba.db2linear;
+g10db = vslider("g10  [tooltip:gain (dB) at 16 kHz]", 0, -30, 20, 0.1);  g10 = g10db : sceneSmooth : ba.db2linear;
+g11db = vslider("g11  [tooltip:gain (dB) above 16 kHz]", 0, -30, 20, 0.1); g11 = g11db : sceneSmooth : ba.db2linear;
 
 v1(x)		= attach(x, envelop(x) : vbargraph("v1[nomidi][log]", -70, +5));
 v2(x)		= attach(x, envelop(x) : vbargraph("v2[nomidi][log]", -70, +5));

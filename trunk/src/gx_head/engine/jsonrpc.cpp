@@ -839,8 +839,15 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             output_gain_settled && nam_gain_settled &&
             snam_gain_settled && mnam_gain_settled;
 
+        gx_engine::ScenePrefixPrerollStatus scene_prefix_preroll;
+        const bool scene_prefix_preroll_ready =
+            !(commit_ok && chain_settled && gain_smoothers_settled && scene_audio_ready) ||
+            engine.mono_chain.preroll_scene_prefix(
+                externally_muted, scene_prefix_preroll);
+        const auto prefix_preroll_finished_at = SceneClock::now();
+
         if (!commit_ok || !chain_settled || !gain_smoothers_settled ||
-            !scene_audio_ready) {
+            !scene_audio_ready || !scene_prefix_preroll_ready) {
             // Callback entry is the scene-cutover predicate. Callback finish
             // is only a bounded wake-up aid for smoother work: a processor can
             // consume its snap and then exceed the finish wait while completing
@@ -869,6 +876,8 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                     << (scene_audio_status.stereo_finished ? "true" : "false")
                     << " sceneAudioReady="
                     << (scene_audio_ready ? "true" : "false")
+                    << " prefixPrerollReady="
+                    << (scene_prefix_preroll_ready ? "true" : "false")
                     << " waitBudgetUsecs=" << scene_audio_status.wait_budget_usecs
                     << " sceneControlBarrierRequested="
                     << (scene_control_barrier_requested ? "true" : "false")
@@ -926,6 +935,13 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                 snam_gain_preset || mnam_gain_preset);
         jw.write_bool_kv("gainSmoothersSettled", gain_smoothers_settled);
         jw.write_bool_kv("audioReady", scene_audio_ready);
+        jw.write_bool_kv("prefixPrerollAttempted", scene_prefix_preroll.attempted);
+        jw.write_bool_kv("prefixPrerollReady", scene_prefix_preroll_ready);
+        jw.write_kv("prefixPrerollFrames", static_cast<int>(
+            scene_prefix_preroll.history_frames + scene_prefix_preroll.catchup_frames));
+        jw.write_kv("prefixPrerollHistoryFrames", static_cast<int>(scene_prefix_preroll.history_frames));
+        jw.write_kv("prefixPrerollCatchupFrames", static_cast<int>(scene_prefix_preroll.catchup_frames));
+        jw.write_kv("prefixPrerollSkipReason", scene_prefix_preroll.skip_reason);
         // No crossfade/mature-DSP observation exists yet. Null explicitly
         // means unknown; neither callback entry nor gain snapping proves it.
         jw.write_key("steadyReady");
@@ -982,7 +998,8 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_kv("chainRampWait", elapsed_ms(module_commit_finished_at, chain_ramp_finished_at));
         jw.write_kv("smootherBarrier", elapsed_ms(chain_ramp_finished_at, smoother_barrier_finished_at));
         jw.write_kv("audioCycleWait", elapsed_ms(smoother_barrier_finished_at, audio_cycle_finished_at));
-        jw.write_kv("total", elapsed_ms(scene_started_at, audio_cycle_finished_at));
+        jw.write_kv("prefixPreroll", elapsed_ms(audio_cycle_finished_at, prefix_preroll_finished_at));
+        jw.write_kv("total", elapsed_ms(scene_started_at, prefix_preroll_finished_at));
         jw.end_object();
         jw.end_object();
     }

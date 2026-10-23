@@ -7,10 +7,14 @@ declare copyright "(c) Viacheslav Lotsmanov, 2015";
 
 import("stdfaust.lib"); 
 
+// Reset signal history without restarting unchanged controls at zero. Keep
+// the existing smoothing for knob changes after the first processed sample.
+sceneSmooth = si.smooth(0.999 * (1 : mem));
+
 gain =
 	vslider("input_gain[name:Input][tooltip:Gain (dB)]", 0, -40, 40, 0.1)
 	: ba.db2linear
-	: si.smooth(0.999)
+	: sceneSmooth
 	;
 
 bitLimit = 16;
@@ -30,7 +34,7 @@ downsampling =
 volume =
 	vslider("volume[name:Volume][tooltip:Volume (dB)]", 0, -90, 12, 0.1)
 	: ba.db2linear
-	: si.smooth(0.999)
+	: sceneSmooth
 	;
 
 // from 0 till x (ba.if x is 5 then [0,1,2,3,4])

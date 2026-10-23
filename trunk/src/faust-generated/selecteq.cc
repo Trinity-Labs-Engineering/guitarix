@@ -48,6 +48,7 @@ static inline double run_shelf(const ShelfBiquad& coefficients, double input,
 class Dsp: public PluginDef {
 private:
 	int fSampleRate;
+	bool controls_need_seed;
 	FAUSTFLOAT fVslider0;
 	double fRec0[2];
 	FAUSTFLOAT fVslider1;
@@ -149,6 +150,7 @@ Dsp::~Dsp() {
 
 inline void Dsp::clear_state_f()
 {
+	controls_need_seed = true;
 	for (int l0 = 0; l0 < 2; l0 = l0 + 1) fRec0[l0] = 0.0;
 	for (int l1 = 0; l1 < 2; l1 = l1 + 1) fRec2[l1] = 0.0;
 	for (int l2 = 0; l2 < 2; l2 = l2 + 1) fRec4[l2] = 0.0;
@@ -196,6 +198,23 @@ void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0)
 {
+	// Seed control smoothers only; all signal/filter histories stay cleared.
+	if (count > 0 && controls_need_seed) {
+		for (int i = 0; i < 2; ++i) {
+			fRec0[i] = std::pow(10.0, 0.025 * double(fVslider0));
+			fRec2[i] = double(fVslider3);
+			fRec4[i] = double(fVslider6);
+			fRec6[i] = double(fVslider9);
+			fRec8[i] = double(fVslider12);
+			fRec10[i] = double(fVslider15);
+			fRec12[i] = double(fVslider18);
+			fRec14[i] = double(fVslider21);
+			fRec16[i] = double(fVslider24);
+			fRec18[i] = std::pow(10.0, 0.025 * double(fVslider27));
+		}
+		controls_need_seed = false;
+	}
+
 	double fSlow0 = 0.0010000000000000009 * std::pow(10.0, 0.025 * double(fVslider0));
 	double fSlow1 = 1.0 / double(fVslider1);
 	double fSlow2 = std::tan(fConst0 * double(fVslider2));

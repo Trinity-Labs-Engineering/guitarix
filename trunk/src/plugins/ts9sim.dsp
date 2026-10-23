@@ -10,7 +10,8 @@ import("stdfaust.lib");
 ** a mathematical analysis published by Tamás Kenéz
 */
 
-smoothi(c) = *(1-c) : +~*(c);
+// A scene reset uses current controls immediately; live edits remain smooth.
+smoothi(c) = si.smooth(c * (1 : mem));
 
 process = ts9 : lowpass : *(gain) with {
    // ma.SR = component("math.lib").ma.SR;

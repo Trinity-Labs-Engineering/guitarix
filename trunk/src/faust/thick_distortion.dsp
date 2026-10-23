@@ -25,15 +25,20 @@ declare copyright "(c) 2018  Viacheslav Lotsmanov";
 
 import("stdfaust.lib");
 
+// A scene reset clears audio history, but controls already have their target
+// values. Seed the smoothers on the first sample instead of fading from zero;
+// subsequent live knob changes retain the ordinary si.smoo time constant.
+sceneSmooth = si.smooth((1 - 44.1 / min(192000, max(1, ma.SR))) * (1 : mem));
+
 gain
 	= vslider("input_gain[name:Input][tooltip:Gain (dB)]", 0, 0, 120, 0.1)
 	: ba.db2linear
-	: si.smoo
+	: sceneSmooth
 	;
 
 thickness
 	= vslider("thickness[name:Thickness]", 0.8, 0, 1, 0.01)
-	: si.smoo
+	: sceneSmooth
 	;
 
 // coefficient for pure signal (for current sample, not previous one)
@@ -42,7 +47,7 @@ pureness = 1 - thickness;
 volume
 	= vslider("volume[name:Volume][tooltip:Volume (dB)]", 0.0, -90.0, 40.0, 0.1)
 	: ba.db2linear
-	: si.smoo
+	: sceneSmooth
 	;
 
 hardLimit = min(1) : max(-1);

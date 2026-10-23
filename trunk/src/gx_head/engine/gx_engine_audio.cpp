@@ -349,9 +349,139 @@ void ProcessingChainBase::print_chain_state(const char *title) {
  ** MonoModuleChain, StereoModuleChain
  */
 
+namespace {
+// Only memoryless/small-filter processors belong in historical prefix replay.
+// In particular, never replay a delay/reverb, looper, external plugin, second
+// model wrapper, or the expensive amp/cabinet suffix by guessing its semantics.
+bool scene_prefix_filter(const char* id) {
+    static const char* const safe[] = {
+        "nam", "aclipper", "baxandall", "rangem", "cstbt1", "ts9sim", "eq",
+        "mole", "eldist", "bboom", "low_highpass", "hogsfoot", "thick_distortion",
+        "distortion2", "biquad", "highbooster", "bmp", "graphiceq",
+        "hfb", "astrofuzz", "mxrdis", "eqs", "lpbboost", "bitdowner", nullptr
+    };
+    for (const char* const* item = safe; *item; ++item)
+        if (std::strcmp(id, *item) == 0) return true;
+    return false;
+}
+bool scene_history_upstream(const char* id) {
+    // The DC blocker has no editable DSP parameters; these two input probes
+    // observe but do not alter audio. Parameterised shapers/gain stages and
+    // every changing rack processor deliberately make replay ineligible.
+    return std::strcmp(id, "dcblocker") == 0 ||
+        std::strcmp(id, "tuner") == 0 || std::strcmp(id, "noise_gate") == 0;
+}
+}
+
+bool MonoModuleChain::preroll_scene_prefix(
+    bool externally_muted, ScenePrefixPrerollStatus& status) {
+    status = ScenePrefixPrerollStatus();
+    if (!externally_muted) { status.skip_reason = "no-external-mute"; return true; }
+    if (is_stopped() || is_down_dead()) { status.skip_reason = "engine-stopped"; return true; }
+    if (scene_input_history.state() != SceneInputHistory::idle) {
+        status.skip_reason = "previous-ownership-pending";
+        return false;
+    }
+
+    monochain_data* selected[32];
+    unsigned int count = 0, last_filter = 0;
+    bool started = false;
+    for (monochain_data* node = get_rt_chain(); node->func; ++node) {
+        if (node->owner && !node->owner->get_rt_on_off()) continue;
+        const char* id = node->plugin->id;
+        if (!started) {
+            if (std::strcmp(id, "nam") == 0) started = true;
+            else {
+                // History was recorded after the fixed input stages. An
+                // arbitrary scene-varying processor before NAM invalidates it.
+                if (!scene_history_upstream(id)) {
+                    status.skip_reason = "scene-varies-before-nam";
+                    return true;
+                }
+                continue;
+            }
+        }
+        if (count == 32 || !scene_prefix_filter(id)) break;
+        selected[count++] = node;
+        if (std::strcmp(id, "hogsfoot") == 0 || std::strcmp(id, "mxrdis") == 0)
+            last_filter = count;
+    }
+    if (!last_filter) { status.skip_reason = "no-supported-slow-prefix"; return true; }
+    // Include the remaining supported small filters too: a slow input pole
+    // feeding a freshly-reset EQ/booster would merely move the startup tail
+    // into that suffix. The whitelist stops before the amp/convolver.
+    status.attempted = true;
+
+    timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_nsec += 100000000; // Bound ownership/replay/catch-up to 100 ms.
+    if (deadline.tv_nsec >= 1000000000) {
+        ++deadline.tv_sec;
+        deadline.tv_nsec -= 1000000000;
+    }
+    const auto expired = [&]() {
+        timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        return now.tv_sec > deadline.tv_sec ||
+            (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec);
+    };
+    const auto abort = [&]() {
+        scene_input_history.request_abort();
+        return false;
+    };
+    scene_input_history.request_pause();
+    while (scene_input_history.state() == SceneInputHistory::pause_requested) {
+        set_latch();
+        if (!wait_rt_finished_until(deadline)) return abort();
+    }
+
+    try {
+        std::array<float, SceneInputHistory::history_capacity> recent;
+        const unsigned int available = scene_input_history.copy_history(recent.data());
+        status.history_frames = available;
+        const auto render = [&](float* data, unsigned int size) {
+            for (unsigned int i = 0; i < count; ++i)
+                selected[i]->func(size, data, data, selected[i]->plugin);
+        };
+        // An actually cold input has no invented history. Preserve its ordinary
+        // first-note attack rather than seeding a signal filter from a tone/DC.
+        if (available) {
+            for (unsigned int i = 1; i < count; ++i)
+                if (selected[i]->plugin->clear_state)
+                    selected[i]->plugin->clear_state(selected[i]->plugin);
+            for (unsigned int offset = 0; offset < available; offset += 128) {
+                if (expired() || scene_input_history.failed()) return abort();
+                render(recent.data() + offset, (std::min)(128u, available - offset));
+            }
+        }
+        scene_input_history.request_resume();
+        while (scene_input_history.state() != SceneInputHistory::idle) {
+            if (expired() || scene_input_history.failed()) return abort();
+            const unsigned int consumed = scene_input_history.consume(render);
+            status.catchup_frames += consumed;
+            if (!consumed) {
+                set_latch();
+                if (!wait_rt_finished_until(deadline)) return abort();
+            }
+        }
+        // An unexpectedly oversized callback can overflow an otherwise empty
+        // queue just as it resumes. Never acknowledge that discontinuous replay.
+        if (scene_input_history.failed()) return abort();
+    } catch (...) {
+        scene_input_history.request_abort();
+        throw;
+    }
+    return true;
+}
+
 void __rt_func MonoModuleChain::process(int count, float *input, float *output) {
+    // Abort acknowledgement must work even if the next chain omits NAM or
+    // has an unsupported input stage. It cannot depend on reaching capture.
+    scene_input_history.acknowledge_abort_rt();
     RampMode rm = get_ramp_mode();
     if (rm == ramp_mode_down_dead) {
+	if (scene_input_history.state() == SceneInputHistory::idle)
+	    scene_input_history.invalidate_rt();
 	memset(output, 0, count*sizeof(float));
 	return;
     }
@@ -361,7 +491,30 @@ void __rt_func MonoModuleChain::process(int count, float *input, float *output) 
     // output is bypassed. Reuse one stack buffer for every such processor;
     // nothing from the background pass is published to the chain.
     float resident_bypass_output[count];
+    bool history_input_valid = true;
+    bool history_input_seen = false;
+    std::uintptr_t upstream_signature = 1;
     for (monochain_data *p = get_rt_chain(); p->func; ++p) {
+	if (std::strcmp(p->plugin->id, "nam") == 0) {
+	    history_input_seen = true;
+	    if (history_input_valid) {
+	        if (upstream_signature != history_upstream_signature &&
+	            (scene_input_history.state() == SceneInputHistory::idle ||
+	             scene_input_history.state() == SceneInputHistory::pause_requested))
+	            scene_input_history.invalidate_rt();
+	        history_upstream_signature = upstream_signature;
+	        if (scene_input_history.capture_rt(output, count)) {
+	            memset(output, 0, count * sizeof(float));
+	            return;
+	        }
+	    } else {
+	        scene_input_history.invalidate_rt();
+	    }
+	} else if (!history_input_seen && (!p->owner || p->owner->get_rt_on_off())) {
+	    history_input_valid = history_input_valid && scene_history_upstream(p->plugin->id);
+	    upstream_signature = upstream_signature * 131u +
+	        reinterpret_cast<std::uintptr_t>(p->plugin);
+	}
 	if (p->owner && !p->owner->get_rt_on_off()) {
 	    if (p->plugin->flags & PGNI_RESIDENT_TRACK_BYPASS) {
 		memcpy(resident_bypass_output, output, count*sizeof(float));
@@ -373,6 +526,8 @@ void __rt_func MonoModuleChain::process(int count, float *input, float *output) 
 	}
 	p->func(count, output, output, p->plugin);
     }
+    if (!history_input_seen && scene_input_history.state() == SceneInputHistory::idle)
+        scene_input_history.invalidate_rt();
     if (rm == ramp_mode_off) {
 	return;
     }

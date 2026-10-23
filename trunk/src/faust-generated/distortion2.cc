@@ -7,6 +7,7 @@ namespace distortion2 {
 class Dsp: public PluginDef {
 private:
 	int fSampleRate;
+	bool controls_need_seed;
 	FAUSTFLOAT fVslider0;
 	double fConst0;
 	double fConst1;
@@ -70,6 +71,7 @@ Dsp::~Dsp() {
 
 inline void Dsp::clear_state_f()
 {
+	controls_need_seed = true;
 	for (int l0 = 0; l0 < 2; l0 = l0 + 1) fRec2[l0] = 0.0;
 	for (int l1 = 0; l1 < 2; l1 = l1 + 1) fRec3[l1] = 0.0;
 	for (int l2 = 0; l2 < 3; l2 = l2 + 1) fRec5[l2] = 0.0;
@@ -102,6 +104,15 @@ void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0)
 {
+	// Seed control smoothers only; all signal/filter histories stay cleared.
+	if (count > 0 && controls_need_seed) {
+		for (int i = 0; i < 2; ++i) {
+			fRec2[i] = double(fVslider1);
+			fRec3[i] = std::pow(1e+01, 0.05 * double(fVslider2));
+		}
+		controls_need_seed = false;
+	}
+
 	double fSlow0 = std::tan(fConst1 * double(fVslider0));
 	double fSlow1 = 2.0 * (1.0 - 1.0 / mydsp_faustpower2_f(fSlow0));
 	double fSlow2 = 1.0 / fSlow0;

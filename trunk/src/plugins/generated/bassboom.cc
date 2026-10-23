@@ -10,6 +10,7 @@ namespace bassboom {
 class Dsp: public PluginDef {
 private:
 	int fSampleRate;
+	bool controls_need_seed;
 	int iVec0[2];
 	double fConst0;
 	double fConst1;
@@ -77,6 +78,7 @@ Dsp::~Dsp() {
 
 inline void Dsp::clear_state_f()
 {
+	controls_need_seed = true;
 	for (int l0 = 0; l0 < 2; l0 = l0 + 1) iVec0[l0] = 0;
 	for (int l1 = 0; l1 < 2; l1 = l1 + 1) fRec2[l1] = 0.0;
 	for (int l2 = 0; l2 < 2; l2 = l2 + 1) fVec1[l2] = 0.0;
@@ -116,6 +118,15 @@ void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0)
 {
+	// Seed control smoothers only; all signal/filter histories stay cleared.
+	if (count > 0 && controls_need_seed) {
+		for (int i = 0; i < 2; ++i) {
+			fRec3[i] = double(fHslider0);
+			fRec6[i] = std::pow(1e+01, 0.05 * double(fVslider0));
+		}
+		controls_need_seed = false;
+	}
+
 	double fSlow0 = 0.0010000000000000009 * double(fHslider0);
 	double fSlow1 = 0.0010000000000000009 * std::pow(1e+01, 0.05 * double(fVslider0));
 	for (int i0 = 0; i0 < count; i0 = i0 + 1) {
