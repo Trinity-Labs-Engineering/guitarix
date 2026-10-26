@@ -676,6 +676,11 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
 
         const auto validation_finished_at = SceneClock::now();
         gx_engine::GxEngine& engine = serv.jack.get_engine();
+        // Capture the outgoing dynamics state before any incoming controls or
+        // resident on/off state are published. Only bypassed re-entry is opted
+        // into the validated pitch/compressor historical prefix.
+        const bool allow_pitch_reentry = param.hasId("compressor.on_off") &&
+            !param["compressor.on_off"].getBool().get_value();
         // A model replacement already obtains exclusive ownership of its DSP
         // state via sync(). During an externally-muted scene, finish the gain
         // accumulators under that ownership rather than requiring a second RT
@@ -843,7 +848,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         const bool scene_prefix_preroll_ready =
             !(commit_ok && chain_settled && gain_smoothers_settled && scene_audio_ready) ||
             engine.mono_chain.preroll_scene_prefix(
-                externally_muted, scene_prefix_preroll);
+                externally_muted, scene_prefix_preroll, allow_pitch_reentry);
         const auto prefix_preroll_finished_at = SceneClock::now();
 
         if (!commit_ok || !chain_settled || !gain_smoothers_settled ||
@@ -878,6 +883,18 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                     << (scene_audio_ready ? "true" : "false")
                     << " prefixPrerollReady="
                     << (scene_prefix_preroll_ready ? "true" : "false")
+                    << " prefixHistoryFrames=" << scene_prefix_preroll.history_frames
+                    << " prefixCatchupFrames=" << scene_prefix_preroll.catchup_frames
+                    << " ampDiscardedFrames=" << scene_prefix_preroll.amp_discarded_frames
+                    << " discardBudgetDeferred=" << scene_prefix_preroll.discard_budget_deferred
+                    << " ampHistoryFrames=" << scene_prefix_preroll.amp_history_frames
+                    << " irHistoryFrames=" << scene_prefix_preroll.ir_history_frames
+                    << " prefixStageWallMs=" << scene_prefix_preroll.prefix_wall_ms
+                    << " prefixStageCpuMs=" << scene_prefix_preroll.prefix_cpu_ms
+                    << " ampStageWallMs=" << scene_prefix_preroll.amp_wall_ms
+                    << " ampStageCpuMs=" << scene_prefix_preroll.amp_cpu_ms
+                    << " irStageWallMs=" << scene_prefix_preroll.ir_wall_ms
+                    << " irStageCpuMs=" << scene_prefix_preroll.ir_cpu_ms
                     << " waitBudgetUsecs=" << scene_audio_status.wait_budget_usecs
                     << " sceneControlBarrierRequested="
                     << (scene_control_barrier_requested ? "true" : "false")
@@ -942,6 +959,23 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_kv("prefixPrerollHistoryFrames", static_cast<int>(scene_prefix_preroll.history_frames));
         jw.write_kv("prefixPrerollCatchupFrames", static_cast<int>(scene_prefix_preroll.catchup_frames));
         jw.write_kv("prefixPrerollSkipReason", scene_prefix_preroll.skip_reason);
+        jw.write_bool_kv("prefixPrerollPitchReentry", scene_prefix_preroll.pitch_reentry);
+        jw.write_bool_kv("suffixPrerollAttempted", scene_prefix_preroll.suffix_attempted);
+        jw.write_kv("suffixPrerollDiscardedFrames", static_cast<int>(scene_prefix_preroll.amp_discarded_frames));
+        jw.write_bool_kv("suffixPrerollBudgetDeferred", scene_prefix_preroll.discard_budget_deferred);
+        jw.write_kv("suffixPrerollAmpFrames", static_cast<int>(scene_prefix_preroll.amp_history_frames));
+        jw.write_kv("suffixPrerollIRFrames", static_cast<int>(scene_prefix_preroll.ir_history_frames));
+        jw.write_kv("suffixPrerollCatchupFrames", static_cast<int>(scene_prefix_preroll.suffix_catchup_frames));
+        jw.write_kv("suffixPrerollSkipReason", scene_prefix_preroll.suffix_skip_reason);
+        jw.write_key("replayStageTimingsMs");
+        jw.begin_object();
+        jw.write_kv("prefixWall", scene_prefix_preroll.prefix_wall_ms);
+        jw.write_kv("prefixControlCpu", scene_prefix_preroll.prefix_cpu_ms);
+        jw.write_kv("ampWall", scene_prefix_preroll.amp_wall_ms);
+        jw.write_kv("ampControlCpu", scene_prefix_preroll.amp_cpu_ms);
+        jw.write_kv("irWall", scene_prefix_preroll.ir_wall_ms);
+        jw.write_kv("irControlCpu", scene_prefix_preroll.ir_cpu_ms);
+        jw.end_object();
         // No crossfade/mature-DSP observation exists yet. Null explicitly
         // means unknown; neither callback entry nor gain snapping proves it.
         jw.write_key("steadyReady");
@@ -1392,6 +1426,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                 "containerClass",
                 runtime.dsp_info.is_container ? "ContainerModel" : "");
             jw.write_kv("activeSubmodelIndex", runtime.dsp_info.active_submodel_index);
+            jw.write_kv("receptiveFieldFrames", runtime.dsp_info.receptive_field_frames);
             jw.write_kv("generation", static_cast<double>(runtime.generation));
             jw.end_object();
         };

@@ -142,6 +142,10 @@ public:
 		   unsigned int length, unsigned int size, unsigned int bufsize,
 		   const Gainline& gainline);
     bool compute(int count, float* input, float *output);
+    // Caller owns this engine outside the callback. A replay quantum must
+    // exactly match the configured host block; wait for its required output.
+    // Later partition jobs retain the convolver's normal asynchronous pipeline.
+    bool compute_synchronous(int count, float* input, float* output);
     static void compute_interpolation(double& fct, double& gp, unsigned int& idx,
 				      const Gainline& points, int offset);
 };

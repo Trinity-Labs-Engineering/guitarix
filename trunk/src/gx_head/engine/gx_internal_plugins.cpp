@@ -1037,6 +1037,26 @@ ConvolverMonoAdapter::ConvolverMonoAdapter(
 ConvolverMonoAdapter::~ConvolverMonoAdapter() {
 }
 
+bool ConvolverMonoAdapter::scene_replay_dimensions(
+    PluginDef* plugin, unsigned int& block_frames, unsigned int& sample_rate) {
+    auto& self = *static_cast<ConvolverMonoAdapter*>(plugin);
+    GxConvolver* current = self.audio_convolver.load(std::memory_order_acquire);
+    if (!current || !current->is_runnable()) return false;
+    block_frames = current->get_buffersize();
+    sample_rate = current->get_samplerate();
+    return block_frames && sample_rate;
+}
+
+bool ConvolverMonoAdapter::replay_scene_block(int count, float* buffer, PluginDef* plugin) {
+    auto& self = *static_cast<ConvolverMonoAdapter*>(plugin);
+    GxConvolver* current = self.audio_convolver.load(std::memory_order_acquire);
+    if (!current) return false;
+    float wet[count];
+    if (!current->compute_synchronous(count, buffer, wet)) return false;
+    self.jc_post_mono.compute(count, buffer, wet, buffer);
+    return true;
+}
+
 void ConvolverMonoAdapter::convolver(int count, float *input, float *output, PluginDef* plugin) {
     ConvolverMonoAdapter& self = *static_cast<ConvolverMonoAdapter*>(plugin);
     GxConvolver* current = self.audio_convolver.load(std::memory_order_acquire);

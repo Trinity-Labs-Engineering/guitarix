@@ -227,50 +227,37 @@ void __rt_func ProcessingChainBase::try_set_ramp_mode(RampMode oldmode, RampMode
 
 bool lists_equal(const list<Plugin*>& p1, const list<Plugin*>& p2, bool *need_ramp)
 {
-    list<Plugin*>::const_iterator i1 = p1.begin();
-    list<Plugin*>::const_iterator i2 = p2.begin(); 
-    bool ret = true;
-    bool nr = false;
+    // The immutable processing list also contains bypassed song residents.
+    // Publishing additions/removals of those nodes cannot change the audible
+    // path. Compare the desired path against the still-published RT on/off
+    // snapshot; using the desired flags for both lists would miss a bypass
+    // change when the physical list is unchanged.
+    const auto participates = [](Plugin* plugin, bool desired) {
+        const unsigned int flags = plugin->get_pdef()->flags;
+        if (flags & PGN_SNOOP) return false;
+        // Tracking processors observe upstream input while bypassed. Keep
+        // their graph changes on the conservative guarded/ramped path.
+        return (flags & PGNI_RESIDENT_TRACK_BYPASS) ||
+            (desired ? plugin->get_on_off() : plugin->get_rt_on_off());
+    };
+    auto desired = p1.begin();
+    auto published = p2.begin();
     while (true) {
-	if (i1 == p1.end()) {
-	    if (i2 != p2.end()) {
-		ret = false;
-		nr = true;
-	    }
-	    break;
-	}
-	if (i2 == p2.end()) {
-	    ret = false;
-	    nr = true;
-	    break;
-	}
-	if (*i1 != *i2) {
-	    ret = false;
-	    while ((*i1)->get_pdef()->flags & PGN_SNOOP) {
-		++i1;
-		if (i1 == p1.end()) {
-		    break;
-		}
-	    }
-	    while ((*i2)->get_pdef()->flags & PGN_SNOOP) {
-		++i2;
-		if (i2 == p2.end()) {
-		    break;
-		}
-	    }
-	    if (*i1 != *i2) {
-		nr = true;
-		break;
-	    }
-	}
-	++i1;
-	++i2;
+        while (desired != p1.end() && !participates(*desired, true)) ++desired;
+        while (published != p2.end() && !participates(*published, false)) ++published;
+        if (desired == p1.end() || published == p2.end()) {
+            *need_ramp = desired != p1.end() || published != p2.end();
+            break;
+        }
+        if (*desired != *published ||
+            (*desired)->get_on_off() != (*published)->get_rt_on_off()) {
+            *need_ramp = true;
+            break;
+        }
+        ++desired;
+        ++published;
     }
-    if (ret) {
-	nr = false;
-    }
-    *need_ramp = nr;
-    return ret;
+    return p1 == p2;
 }
 
 bool ProcessingChainBase::set_plugin_list(const list<Plugin*> &p) {
@@ -352,10 +339,12 @@ void ProcessingChainBase::print_chain_state(const char *title) {
 namespace {
 // Only memoryless/small-filter processors belong in historical prefix replay.
 // In particular, never replay a delay/reverb, looper, external plugin, second
-// model wrapper, or the expensive amp/cabinet suffix by guessing its semantics.
+// model wrapper. The amp/IR suffix has a separate explicit replay contract.
+// A-Clipper also stays live: its multi-second signal state cannot be restored
+// by clearing it and replaying this bounded input-history window.
 bool scene_prefix_filter(const char* id) {
     static const char* const safe[] = {
-        "nam", "aclipper", "baxandall", "rangem", "cstbt1", "ts9sim", "eq",
+        "nam", "baxandall", "rangem", "cstbt1", "ts9sim", "eq",
         "mole", "eldist", "bboom", "low_highpass", "hogsfoot", "thick_distortion",
         "distortion2", "biquad", "highbooster", "bmp", "graphiceq",
         "hfb", "astrofuzz", "mxrdis", "eqs", "lpbboost", "bitdowner", nullptr
@@ -364,6 +353,29 @@ bool scene_prefix_filter(const char* id) {
         if (std::strcmp(id, *item) == 0) return true;
     return false;
 }
+// This timer is used only while the control thread owns scene DSP. Scope
+// destruction also records work completed before a replay exception/abort.
+class SceneReplayStageTimer {
+    double& wall_ms;
+    double& cpu_ms;
+    timespec wall_start, cpu_start;
+    static double elapsed(const timespec& start, const timespec& end) {
+        return (end.tv_sec - start.tv_sec) * 1000.0 +
+            (end.tv_nsec - start.tv_nsec) / 1000000.0;
+    }
+public:
+    SceneReplayStageTimer(double& wall, double& cpu): wall_ms(wall), cpu_ms(cpu) {
+        clock_gettime(CLOCK_MONOTONIC, &wall_start);
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_start);
+    }
+    ~SceneReplayStageTimer() {
+        timespec wall_end, cpu_end;
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_end);
+        clock_gettime(CLOCK_MONOTONIC, &wall_end);
+        cpu_ms += elapsed(cpu_start, cpu_end);
+        wall_ms += elapsed(wall_start, wall_end);
+    }
+};
 bool scene_history_upstream(const char* id) {
     // The DC blocker has no editable DSP parameters; these two input probes
     // observe but do not alter audio. Parameterised shapers/gain stages and
@@ -374,7 +386,7 @@ bool scene_history_upstream(const char* id) {
 }
 
 bool MonoModuleChain::preroll_scene_prefix(
-    bool externally_muted, ScenePrefixPrerollStatus& status) {
+    bool externally_muted, ScenePrefixPrerollStatus& status, bool allow_pitch_reentry) {
     status = ScenePrefixPrerollStatus();
     if (!externally_muted) { status.skip_reason = "no-external-mute"; return true; }
     if (is_stopped() || is_down_dead()) { status.skip_reason = "engine-stopped"; return true; }
@@ -384,6 +396,7 @@ bool MonoModuleChain::preroll_scene_prefix(
     }
 
     monochain_data* selected[32];
+    monochain_data* tail = nullptr;
     unsigned int count = 0, last_filter = 0;
     bool started = false;
     for (monochain_data* node = get_rt_chain(); node->func; ++node) {
@@ -401,12 +414,64 @@ bool MonoModuleChain::preroll_scene_prefix(
                 continue;
             }
         }
-        if (count == 32 || !scene_prefix_filter(id)) break;
+        // This exact pitch/dynamics chain has an actual-DSP replay contract.
+        // Restrict it to bypassed->active compressor re-entry: resetting a
+        // continuously audible detector would change ordinary playing dynamics.
+        if (allow_pitch_reentry && count == 1 && std::strcmp(id, "smbPitchShift") == 0) {
+            const char* const expected[] = {"smbPitchShift", "compressor", "axface", "GCB_95"};
+            monochain_data* pitch_nodes[4];
+            auto* cursor = node;
+            bool exact = true;
+            for (unsigned int i = 0; i < 4; ++i) {
+                while (cursor->func && cursor->owner && !cursor->owner->get_rt_on_off()) ++cursor;
+                if (!cursor->func || std::strcmp(cursor->plugin->id, expected[i]) != 0) {
+                    exact = false; break;
+                }
+                pitch_nodes[i] = cursor++;
+            }
+            while (cursor->func && cursor->owner && !cursor->owner->get_rt_on_off()) ++cursor;
+            if (exact && cursor->func && std::strcmp(cursor->plugin->id, "mnam") == 0) {
+                for (auto* pitch_node : pitch_nodes) selected[count++] = pitch_node;
+                last_filter = count; // retain the full512ms prefix window
+                status.pitch_reentry = true;
+                tail = cursor;
+                break;
+            }
+        }
+        if (count == 32 || !scene_prefix_filter(id)) { tail = node; break; }
         selected[count++] = node;
         if (std::strcmp(id, "hogsfoot") == 0 || std::strcmp(id, "mxrdis") == 0)
             last_filter = count;
     }
-    if (!last_filter) { status.skip_reason = "no-supported-slow-prefix"; return true; }
+    monochain_data* amp = nullptr;
+    monochain_data* ir = nullptr;
+    unsigned int block_frames = 0, sample_rate = 0;
+    unsigned int pedal_history = 0, amp_history = 0, ir_warm_frames = 0;
+    if (count && tail && std::strcmp(tail->plugin->id, "mnam") == 0) {
+        amp = tail;
+        for (auto* node = tail + 1; node->func; ++node) {
+            if (node->owner && !node->owner->get_rt_on_off()) continue;
+            if (std::strcmp(node->plugin->id, "jconv_mono") == 0) ir = node;
+            break;
+        }
+    }
+    bool suffix_enabled = amp && ir &&
+        ConvolverMonoAdapter::scene_replay_dimensions(ir->plugin, block_frames, sample_rate) &&
+        block_frames <= 128 && 128 % block_frames == 0;
+    if (suffix_enabled) {
+        pedal_history = static_cast<NeuralAmp*>(selected[0]->plugin)->scene_history_frames();
+        amp_history = static_cast<NeuralAmpMulti*>(amp->plugin)->scene_history_frames();
+        suffix_enabled = pedal_history && amp_history;
+        // This bounded IR window is a measured startup optimization, not a
+        // claim that an arbitrary long IR's entire old history is replaced.
+        ir_warm_frames = ((sample_rate * 64u / 1000u + block_frames - 1) /
+                          block_frames) * block_frames;
+    }
+    if (!suffix_enabled) status.suffix_skip_reason = "unsupported-suffix-or-history";
+    if (!last_filter && !suffix_enabled) {
+        status.skip_reason = "no-supported-slow-prefix";
+        return true;
+    }
     // Include the remaining supported small filters too: a slow input pole
     // feeding a freshly-reset EQ/booster would merely move the startup tail
     // into that suffix. The whitelist stops before the amp/convolver.
@@ -414,7 +479,9 @@ bool MonoModuleChain::preroll_scene_prefix(
 
     timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_nsec += 100000000; // Bound ownership/replay/catch-up to 100 ms.
+    // Check a 100 ms budget between blocks. Required NAM/convolver worker
+    // rendezvous must still complete before their storage can change owners.
+    deadline.tv_nsec += 100000000;
     if (deadline.tv_nsec >= 1000000000) {
         ++deadline.tv_sec;
         deadline.tv_nsec -= 1000000000;
@@ -435,23 +502,79 @@ bool MonoModuleChain::preroll_scene_prefix(
         if (!wait_rt_finished_until(deadline)) return abort();
     }
 
+    bool discard_incomplete = false;
     try {
         std::array<float, SceneInputHistory::history_capacity> recent;
-        const unsigned int available = scene_input_history.copy_history(recent.data());
-        status.history_frames = available;
-        const auto render = [&](float* data, unsigned int size) {
+        const unsigned int copied = scene_input_history.copy_history(recent.data());
+        const unsigned int trim = suffix_enabled ? copied % block_frames : 0;
+        const unsigned int available = copied - trim;
+        float* history = recent.data() + trim;
+        const unsigned int amp_warm_frames = suffix_enabled
+            ? ((amp_history + ir_warm_frames + block_frames - 1) / block_frames) * block_frames : 0;
+        const bool warm_suffix = suffix_enabled && available >= pedal_history + amp_warm_frames;
+        status.suffix_attempted = warm_suffix;
+        if (suffix_enabled && !warm_suffix) status.suffix_skip_reason = "insufficient-input-history";
+        const unsigned int amp_start = warm_suffix ? available - amp_warm_frames : available;
+        const unsigned int ir_start = warm_suffix ? available - ir_warm_frames : available;
+        const bool discard_enabled = warm_suffix &&
+            static_cast<NeuralAmpMulti*>(amp->plugin)->scene_supports_discarded_prefix();
+        const auto render_prefix = [&](float* data, unsigned int size) {
+            SceneReplayStageTimer timing(status.prefix_wall_ms, status.prefix_cpu_ms);
             for (unsigned int i = 0; i < count; ++i)
                 selected[i]->func(size, data, data, selected[i]->plugin);
         };
+        const auto render_suffix = [&](float* data, unsigned int size, unsigned int position) {
+            if (!suffix_enabled) return;
+            if (position + size > amp_start) {
+                SceneReplayStageTimer timing(status.amp_wall_ms, status.amp_cpu_ms);
+                const unsigned int begin = amp_start > position ? amp_start - position : 0;
+                const unsigned int discard = discard_enabled && position + begin < ir_start
+                    ? ir_start - (position + begin) : 0;
+                // Deeper A2 rings are intentionally incomplete while the
+                // discarded dependency cone is being primed. Never return
+                // them to the callback/cache before the interval is finished.
+                discard_incomplete = discard > 0;
+                static_cast<NeuralAmpMulti*>(amp->plugin)->replay_scene_block(
+                    size - begin, data + begin, discard);
+                status.amp_discarded_frames += (std::min)(discard, size - begin);
+                discard_incomplete = discard > size - begin;
+                if (position < available) status.amp_history_frames += size - begin;
+            }
+            if (position + size > ir_start) {
+                SceneReplayStageTimer timing(status.ir_wall_ms, status.ir_cpu_ms);
+                const unsigned int begin = ir_start > position ? ir_start - position : 0;
+                if ((size - begin) % block_frames) throw std::runtime_error("Unaligned scene IR replay");
+                for (unsigned int offset = begin; offset < size; offset += block_frames) {
+                    if (!ConvolverMonoAdapter::replay_scene_block(
+                            block_frames, data + offset, ir->plugin))
+                        throw std::runtime_error("Scene IR replay failed");
+                }
+                if (position < available) status.ir_history_frames += size - begin;
+            }
+        };
+        const auto render = [&](float* data, unsigned int size) {
+            render_prefix(data, size);
+            render_suffix(data, size, available);
+            if (suffix_enabled) status.suffix_catchup_frames += size;
+        };
         // An actually cold input has no invented history. Preserve its ordinary
         // first-note attack rather than seeding a signal filter from a tone/DC.
-        if (available) {
+        if (available && (last_filter || warm_suffix)) {
             for (unsigned int i = 1; i < count; ++i)
                 if (selected[i]->plugin->clear_state)
                     selected[i]->plugin->clear_state(selected[i]->plugin);
-            for (unsigned int offset = 0; offset < available; offset += 128) {
-                if (expired() || scene_input_history.failed()) return abort();
-                render(recent.data() + offset, (std::min)(128u, available - offset));
+            for (unsigned int offset = 0; offset < available; offset += 256) {
+                if (expired() || scene_input_history.failed()) {
+                    if (!discard_incomplete) return abort();
+                    // Finite work, bounded by the admitted NAM receptive field.
+                    // This cooperative deadline cannot cut model ownership in
+                    // the middle of a discarded dependency cone.
+                    status.discard_budget_deferred = true;
+                }
+                const unsigned int size = (std::min)(256u, available - offset);
+                render_prefix(history + offset, size);
+                render_suffix(history + offset, size, offset);
+                status.history_frames += size;
             }
         }
         scene_input_history.request_resume();
@@ -468,6 +591,8 @@ bool MonoModuleChain::preroll_scene_prefix(
         // queue just as it resumes. Never acknowledge that discontinuous replay.
         if (scene_input_history.failed()) return abort();
     } catch (...) {
+        if (discard_incomplete)
+            static_cast<NeuralAmpMulti*>(amp->plugin)->reset_scene_discard_history();
         scene_input_history.request_abort();
         throw;
     }
@@ -1131,14 +1256,18 @@ bool ModuleSequencer::prepare_module_lists() {
 }
 
 bool ModuleSequencer::commit_module_lists(bool externally_muted) {
-    const bool rt_state_changed = pluginlist.rt_scene_state_changed();
+    // set_plugin_list compares desired audible order/on-off with the previous
+    // RT snapshot even when the resident list is identical. A resident-bit
+    // change alone still needs publication, but must not mute both outputs.
+    const bool audible_path_changed = mono_chain.next_commit_needs_ramp ||
+        stereo_chain.next_commit_needs_ramp;
     bool already_down =
         mono_chain.get_ramp_mode() == ProcessingChainBase::ramp_mode_down_dead;
-    bool monoramp = (mono_chain.next_commit_needs_ramp || rt_state_changed) &&
+    bool monoramp = audible_path_changed &&
         !already_down && !externally_muted;
     already_down =
         stereo_chain.get_ramp_mode() == ProcessingChainBase::ramp_mode_down_dead;
-    bool stereoramp = (stereo_chain.next_commit_needs_ramp || rt_state_changed) &&
+    bool stereoramp = audible_path_changed &&
         !already_down && !externally_muted;
 
     // Both chains must be quiet before publishing the shared per-plugin RT

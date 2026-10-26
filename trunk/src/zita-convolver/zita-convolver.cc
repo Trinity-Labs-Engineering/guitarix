@@ -638,7 +638,16 @@ void Convlevel::start (int abspri, int policy)
     pthread_attr_setscope (&attr, PTHREAD_SCOPE_SYSTEM);
     pthread_attr_setinheritsched (&attr, PTHREAD_EXPLICIT_SCHED);
     pthread_attr_setstacksize (&attr, 0x10000);
-    pthread_create (&_pthr, &attr, static_main, this);
+    // Publish worker ownership before it can be scheduled. Otherwise a caller
+    // can run the inline fallback while a newly created worker starts, or a
+    // late worker can overwrite ST_TERM after stop() has already requested it.
+    _stat = ST_PROC;
+    if (pthread_create (&_pthr, &attr, static_main, this))
+    {
+        // Run this level synchronously with the same partition chronology
+        // when no worker exists. ST_IDLE is reserved for the zero-delay level.
+        _pthr = 0;
+    }
     pthread_attr_destroy (&attr);
 }
 
@@ -647,6 +656,11 @@ void Convlevel::stop (void)
 {
     if (_stat != ST_IDLE)
     {
+        if (_stat == ST_PROC && !_pthr)
+        {
+            _stat = ST_IDLE;
+            return;
+        }
         _stat = ST_TERM;
 	_trig.post ();
     }
@@ -718,7 +732,6 @@ void *Convlevel::static_main (void *arg)
 
 void Convlevel::main (void)
 {
-    _stat = ST_PROC;
     while (true)
     {
 	_trig.wait ();
@@ -863,8 +876,17 @@ int Convlevel::readout (bool sync, unsigned int skipcnt)
   	        _wait--;
 	    }
 	    if (++_opind == 3) _opind = 0;
-            _trig.post ();
-	    _wait++;
+            if (_pthr)
+            {
+                _trig.post ();
+                _wait++;
+            }
+            else
+            {
+                // Match worker pipelining on thread-creation failure: rotate
+                // before processing, unlike the intentional zero-delay level.
+                process (skipcnt >= 2 * _parsize);
+            }
 	}
         else
 	{
@@ -969,5 +991,3 @@ void Convlevel::fftswap (fftwf_complex *p)
 }
 
 #endif
-
-

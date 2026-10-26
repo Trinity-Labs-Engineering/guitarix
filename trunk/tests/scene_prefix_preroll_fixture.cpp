@@ -5,6 +5,7 @@
 #include <cstring>
 #include <ctime>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 #include "gx_scene_input_history.h"
 
@@ -18,6 +19,51 @@ struct PluginDef {
     void (*clear_state)(PluginDef*) = nullptr;
     unsigned int calls = 0, resets = 0;
     std::vector<float> observed;
+    unsigned int history_frames = 0, block_frames = 0, sample_rate = 0;
+    bool replay_fail = false;
+    unsigned int discard_pending = 0;
+    bool throw_when_cone_pending = false;
+};
+struct NeuralAmp : PluginDef {
+    unsigned int scene_history_frames() const { return history_frames; }
+};
+static bool scene_test_clock_expired = false;
+static int scene_test_clock_gettime(clockid_t clock, timespec* time) {
+    const int result = ::clock_gettime(clock, time);
+    if (clock == CLOCK_REALTIME && scene_test_clock_expired) ++time->tv_sec;
+    return result;
+}
+struct NeuralAmpMulti : PluginDef {
+    bool discard_supported = true, expire_on_discard = false, throw_on_discard = false;
+    SceneInputHistory* overflow_on_discard = nullptr;
+    unsigned int discard_resets = 0;
+    void reset_scene_discard_history() noexcept { discard_pending = 0; ++discard_resets; }
+    unsigned int scene_history_frames() const { return history_frames; }
+    bool scene_supports_discarded_prefix() const { return discard_supported; }
+    void replay_scene_block(int count, float* data, unsigned int discarded = 0) {
+        discard_pending = discarded > static_cast<unsigned int>(count) ? discarded - count : 0;
+        if (expire_on_discard && discarded) scene_test_clock_expired = true;
+        if (throw_on_discard && discard_pending) throw std::runtime_error("injected model failure");
+        if (overflow_on_discard && discard_pending) {
+            float ignored = 0;
+            overflow_on_discard->capture_rt(&ignored, SceneInputHistory::pending_capacity + 1);
+        }
+        ++calls;
+        observed.insert(observed.end(), data, data + count);
+    }
+};
+struct ConvolverMonoAdapter {
+    static bool scene_replay_dimensions(PluginDef* plugin, unsigned int& block, unsigned int& rate) {
+        block = plugin->block_frames; rate = plugin->sample_rate;
+        return block && rate;
+    }
+    static bool replay_scene_block(int count, float* data, PluginDef* plugin) {
+        assert(static_cast<unsigned int>(count) == plugin->block_frames);
+        if (plugin->replay_fail) return false;
+        ++plugin->calls;
+        plugin->observed.insert(plugin->observed.end(), data, data + count);
+        return true;
+    }
 };
 struct Plugin { bool on = true; bool get_rt_on_off() const { return on; } };
 struct monochain_data {
@@ -55,13 +101,16 @@ public:
         if (std::all_of(output, output + 32, [](float value) { return value == 0; }))
             ++silent_callbacks;
     }
-    bool preroll_scene_prefix(bool, ScenePrefixPrerollStatus&);
+    bool preroll_scene_prefix(bool, ScenePrefixPrerollStatus&, bool allow_pitch_reentry = false);
     void process(int count, float* input, float* output);
 };
+#define clock_gettime scene_test_clock_gettime
 #include "scene_prefix_under_test.h"
+#undef clock_gettime
 
 static void reset(PluginDef* plugin) { ++plugin->resets; }
 static void render(int count, float* input, float* output, PluginDef* plugin) {
+    assert(plugin->discard_pending == 0); // callback must never see an unfinished cone
     ++plugin->calls;
     plugin->observed.insert(plugin->observed.end(), input, input + count);
     for (int i = 0; i < count; ++i)

@@ -564,6 +564,15 @@ bool GxConvolver::configure(string fname, float gain, unsigned int delay, unsign
     return read_sndfile(audio, 1, samplerate, gain_a, delay_a, offset, length, points);
 }
 
+bool GxConvolver::compute_synchronous(int count, float* input, float* output) {
+    if (count <= 0 || static_cast<unsigned int>(count) != buffersize ||
+        state() != Convproc::ST_PROC || !is_runnable()) return false;
+    memcpy(inpdata(0), input, count * sizeof(float));
+    const int flags = process(true);
+    memcpy(output, outdata(0), count * sizeof(float));
+    return flags == 0;
+}
+
 bool __rt_func GxConvolver::compute(int count, float* input, float *output) {
     if (state() != Convproc::ST_PROC) {
         if (input != output) {

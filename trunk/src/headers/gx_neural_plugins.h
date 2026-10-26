@@ -179,6 +179,9 @@ public:
     bool is_scene_smoother_snap_pending();
     bool finish_scene_smoother_snap();
     RuntimeStatus get_runtime_status() const;
+    // Control-thread query after a scene commit. Unknown or resampled model
+    // histories are deliberately ineligible for staged scene replay.
+    unsigned int scene_history_frames() const;
 };
 
 /****************************************************************
@@ -274,7 +277,9 @@ private:
     void preset_scene_smoother_targets();
     int load_ui_f(const UiBuilder& b, int form);
     void init(unsigned int sample_rate);
-    void compute(int count, float *input0, float *output0);
+    unsigned int scene_discard_prefix_frames = 0;
+    void compute(int count, float *input0, float *output0, bool parallel = true,
+                 unsigned int discarded_prefix_frames = 0);
     void processDelay(int count, float *buf);
     void processModelA(int count, float *buf);
     void processModelB();
@@ -319,6 +324,14 @@ public:
         const Glib::ustring& generation,
         const std::vector<PreparedNamModelDescriptor>& descriptors);
     NeuralAmp::RuntimeStatus get_runtime_status(bool slot_b) const;
+    unsigned int scene_history_frames() const;
+    bool scene_supports_discarded_prefix() const;
+    void reset_scene_discard_history() noexcept;
+    // Requires exclusive scene-replay ownership. Complete the declared discard
+    // interval before callback ownership or model-cache ownership can resume.
+    void replay_scene_block(int count, float* data,
+                            unsigned int discarded_prefix_frames = 0,
+                            bool parallel = true);
 };
 
 /****************************************************************

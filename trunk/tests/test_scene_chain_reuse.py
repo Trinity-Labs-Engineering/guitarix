@@ -26,6 +26,8 @@ class SceneChainReuseTests(unittest.TestCase):
         implementation = implementation.split("/****************************************************************", 1)[0]
         staging = engine.split("bool lists_equal(", 1)[1]
         staging = staging.split("void ProcessingChainBase::release", 1)[0]
+        commit = engine.split("bool ModuleSequencer::commit_module_lists(", 1)[1]
+        commit = commit.split("int ModuleSequencer::sporadic_interval", 1)[0]
         production = (
             "template <class F>\nclass ThreadSafeChainPointer" + declaration
             + "template <class F>\nThreadSafeChainPointer<F>::ThreadSafeChainPointer"
@@ -36,6 +38,9 @@ class SceneChainReuseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="gx-scene-chain-reuse-") as directory:
             path = Path(directory)
             (path / "scene_chain_under_test.h").write_text(production)
+            (path / "scene_commit_under_test.h").write_text(
+                "bool ModuleSequencer::commit_module_lists(" + commit
+            )
             executable = path / "scene-chain-reuse"
             subprocess.run(
                 [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",

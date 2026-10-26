@@ -489,6 +489,9 @@ private:
 public:
     ConvolverMonoAdapter(EngineControl& engine, sigc::slot<void> sync);
     ~ConvolverMonoAdapter();
+    static bool scene_replay_dimensions(PluginDef*, unsigned int& block_frames,
+                                        unsigned int& sample_rate);
+    static bool replay_scene_block(int count, float* buffer, PluginDef*);
 };
 
 

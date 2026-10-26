@@ -356,6 +356,18 @@ inline void process_nam_mono(nam::DSP* model, float* input, float* output, int f
     process_nam_mono_bounded(model, input, output, frames);
 }
 
+inline void process_nam_mono_discarded(nam::DSP* model, float* input, float* output,
+                                       int frames, unsigned int discarded) {
+    AVOIDDENORMALS();
+    for (int offset = 0; offset < frames; offset += kNamModelBlockFrames) {
+        const int size = std::min<int>(kNamModelBlockFrames, frames - offset);
+        float* inputs[] = {input + offset};
+        float* outputs[] = {output + offset};
+        model->process_with_discarded_prefix(inputs, outputs, size,
+            discarded > static_cast<unsigned int>(offset) ? discarded - offset : 0);
+    }
+}
+
 } // namespace
 
 
@@ -501,6 +513,12 @@ void NeuralAmp::publish_runtime_status(const nam::DSP* current_model,
         ? current_model->GetRuntimeDSPInfo()
         : nam::RuntimeDSPInfo{nam::RuntimeDSPClass::None, -1, false};
     runtime_model_path = current_model ? model_path : Glib::ustring();
+}
+
+unsigned int NeuralAmp::scene_history_frames() const {
+    if (!model || !g_atomic_int_get(&ready) || mSampleRate != fSampleRate)
+        return 0;
+    return static_cast<unsigned int>((std::max)(0, runtime_dsp_info.receptive_field_frames));
 }
 
 NeuralAmp::RuntimeStatus NeuralAmp::get_runtime_status() const {
@@ -1023,6 +1041,40 @@ void NeuralAmpMulti::publish_runtime_status(
     path = current_model ? model_path : Glib::ustring();
 }
 
+unsigned int NeuralAmpMulti::scene_history_frames() const {
+    // The optional alignment delay has its own changing history. Keep that
+    // configuration on the ordinary live path until it has a replay contract.
+    if (!g_atomic_int_get(&ready) || (!modela && !modelb) || fVslider02 != 0.0f)
+        return 0;
+    const int a = modela ? runtime_dsp_info_a.receptive_field_frames : 0;
+    const int b = modelb ? runtime_dsp_info_b.receptive_field_frames : 0;
+    if ((modela && (a <= 0 || maSampleRate != fSampleRate)) ||
+        (modelb && (b <= 0 || mbSampleRate != fSampleRate))) return 0;
+    return static_cast<unsigned int>((std::max)(a, b));
+}
+
+bool NeuralAmpMulti::scene_supports_discarded_prefix() const {
+    return scene_history_frames() &&
+        (!modela || runtime_dsp_info_a.supports_discarded_prefix) &&
+        (!modelb || runtime_dsp_info_b.supports_discarded_prefix);
+}
+
+void NeuralAmpMulti::reset_scene_discard_history() noexcept {
+    // Exceptional recovery only: the caller still exclusively owns both DSPs
+    // and all dispatched B work has completed. Never cache a partial cone.
+    try {
+        if (modela) modela->Reset(maSampleRate, kNamModelBlockFrames);
+        if (modelb) modelb->Reset(mbSampleRate, kNamModelBlockFrames);
+    } catch (...) {
+        // Keep failed storage out of callback/cache ownership. A subsequent
+        // authoritative model load can reconstruct these selected graphs.
+        delete modela; modela = nullptr;
+        delete modelb; modelb = nullptr;
+        gx_system::atomic_set(&ready, 0);
+    }
+    scene_discard_prefix_frames = 0;
+}
+
 NeuralAmp::RuntimeStatus NeuralAmpMulti::get_runtime_status(bool slot_b) const {
     std::lock_guard<std::mutex> lock(runtime_status_mutex);
     return NeuralAmp::RuntimeStatus{
@@ -1340,7 +1392,9 @@ void always_inline NeuralAmpMulti::processModelA(int count, float *bufa) {
                 }
             }
         } else {
-            process_nam_mono(modela, bufa, bufa, count);
+            if (scene_discard_prefix_frames)
+                process_nam_mono_discarded(modela, bufa, bufa, count, scene_discard_prefix_frames);
+            else process_nam_mono(modela, bufa, bufa, count);
         }
         const double calibration_gain =
             std::pow(1e+01, 0.05 * double(nam_output_trim_dba));
@@ -1392,7 +1446,9 @@ void always_inline NeuralAmpMulti::processModelB() {
                 }
             }
         } else {
-            process_nam_mono(modelb, buf, buf, nframes);
+            if (scene_discard_prefix_frames)
+                process_nam_mono_discarded(modelb, buf, buf, nframes, scene_discard_prefix_frames);
+            else process_nam_mono(modelb, buf, buf, nframes);
         }
         const double calibration_gain =
             std::pow(1e+01, 0.05 * double(nam_output_trim_dbb));
@@ -1405,8 +1461,10 @@ void always_inline NeuralAmpMulti::processModelB() {
 }
 
 
-void always_inline NeuralAmpMulti::compute(int count, float *input0, float *output0)
+void always_inline NeuralAmpMulti::compute(int count, float *input0, float *output0,
+                                         bool parallel, unsigned int discarded_prefix_frames)
 {
+    scene_discard_prefix_frames = discarded_prefix_frames;
     if (output0 != input0)
         memcpy(output0, input0, count*sizeof(float));
     const bool processing_ready = gx_system::atomic_get(ready);
@@ -1480,16 +1538,24 @@ void always_inline NeuralAmpMulti::compute(int count, float *input0, float *outp
         nframes = count;
         buf = bufb;
 
-        if (pro->getProcess()) {
+        const bool dispatched = parallel && pro->getProcess();
+        if (dispatched) {
             pro->setProcessor(1);
             pro->runProcess();
         } else {
             processModelB();
         }
 
-        processModelA(count, bufa);
+        try {
+            processModelA(count, bufa);
+        } catch (...) {
+            // Model ownership cannot unwind while B still uses its scratch or
+            // history. This also protects exceptional discarded-cone recovery.
+            if (dispatched) pro->processWait();
+            throw;
+        }
 
-        pro->processWait();
+        if (dispatched) pro->processWait();
 
         if (modela && modelb && gx_system::atomic_get(ready)) {
             for (int i0 = 0; i0 < count; i0 = i0 + 1) {
@@ -1516,6 +1582,19 @@ void NeuralAmpMulti::compute_static(int count, float *input0, float *output0, Pl
     for (int offset = 0; offset < count; offset += kMaxNamHostBlockFrames) {
         static_cast<NeuralAmpMulti*>(p)->compute(
             std::min<int>(kMaxNamHostBlockFrames, count - offset), input0 + offset, output0 + offset);
+    }
+}
+
+void NeuralAmpMulti::replay_scene_block(int count, float* data,
+                                       unsigned int discarded_prefix_frames, bool parallel)
+{
+    // Keep ordinary parallel A/B execution. The prepared core's256-frame bound
+    // is also the control replay bound; do not resize/reset its rings here.
+    for (int offset = 0; offset < count; offset += kNamModelBlockFrames) {
+        compute(std::min<int>(kNamModelBlockFrames, count - offset),
+                data + offset, data + offset, parallel,
+                discarded_prefix_frames > static_cast<unsigned int>(offset)
+                    ? discarded_prefix_frames - offset : 0);
     }
 }
 

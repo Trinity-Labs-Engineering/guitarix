@@ -296,6 +296,19 @@ struct ScenePrefixPrerollStatus {
     bool attempted = false;
     unsigned int history_frames = 0;
     unsigned int catchup_frames = 0;
+    bool suffix_attempted = false;
+    bool pitch_reentry = false;
+    unsigned int amp_discarded_frames = 0;
+    bool discard_budget_deferred = false;
+    unsigned int amp_history_frames = 0;
+    unsigned int ir_history_frames = 0;
+    unsigned int suffix_catchup_frames = 0;
+    // Control-thread timing includes both historical replay and live catch-up.
+    // Worker CPU is deliberately excluded from the thread CPU counters.
+    double prefix_wall_ms = 0, prefix_cpu_ms = 0;
+    double amp_wall_ms = 0, amp_cpu_ms = 0;
+    double ir_wall_ms = 0, ir_cpu_ms = 0;
+    const char* suffix_skip_reason = "";
     const char* skip_reason = "";
 };
 
@@ -312,7 +325,8 @@ public:
         ProcessingChainBase::clear_module_states();
         scene_input_history.invalidate_control();
     }
-    bool preroll_scene_prefix(bool externally_muted, ScenePrefixPrerollStatus& status);
+    bool preroll_scene_prefix(bool externally_muted, ScenePrefixPrerollStatus& status,
+                              bool allow_pitch_reentry = false);
     void process(int count, float *input, float *output);
     inline void print() { printlist("Mono", modules); }
 };
