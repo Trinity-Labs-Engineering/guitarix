@@ -20,6 +20,8 @@ namespace effects {
 #include "faust-generated/plate_reverb.cc"
 #include "faust-generated/hall_reverb.cc"
 #include "faust-generated/ambient_reverb.cc"
+#include "faust-generated/greyhole.cc"
+#include "faust-generated/granular_cloud.cc"
 }
 namespace amps {
 #include "faust-generated/gxamp6.cc"
@@ -156,6 +158,8 @@ int main() {
     check(effects::plate_reverb::plugin);
     check(effects::hall_reverb::plugin);
     check(effects::ambient_reverb::plugin);
+    check(effects::greyhole::plugin);
+    check(effects::granular_cloud::plugin);
     check(pluginlib::mbdel::plugin);
     check(pluginlib::mbe::plugin);
     check(pluginlib::mbchor::plugin);

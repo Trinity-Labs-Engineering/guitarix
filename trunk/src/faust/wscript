@@ -72,6 +72,10 @@ def build(bld):
         'hall_reverb.dsp',
         'ambient_reverb.dsp',
         'phase90.dsp',
+        'greyhole.dsp',
+        'granular_cloud.dsp',
+        'wavefolder_synth.dsp',
+        'tape_saturation.dsp',
         'selecteq.dsp',
 
         # tone stacks

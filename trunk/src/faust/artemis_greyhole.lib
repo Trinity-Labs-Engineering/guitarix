@@ -1,0 +1,56 @@
+// Vendored from grame-cncm/faustlibraries at 4b8961b03ff90f5457724d987d14703d960ec30b.
+// Julian Parker; bug fixes and interface changes by Till Bovermann. MIT.
+// Artemis: retain 1.5 s delay at 192 kHz and use a sample-rate-scaled 50 ms crossfade.
+import("stdfaust.lib");
+
+jp_gh_rev = environment {
+
+    diffuser_aux(angle, g, scale1, scale2, size, block) = si.bus(2) <: ((si.bus(2):par(i,2,*(c_norm))
+        : ((si.bus(4) :> si.bus(2)
+            : block
+            : rotator(angle)
+            : (de.fdelay1a(8192, ma.primes(size*scale1):smooth_init(0.9999,ma.primes(size*scale1)) -1),
+               de.fdelay1a(8192, ma.primes(size*scale2):smooth_init(0.9999,ma.primes(size*scale2)) -1)))
+        ~ par(i,2,*(-s_norm))) : par(i,2,mem:*(c_norm)))
+        ,
+        par(i,2,*(s_norm)))
+        :> si.bus(2)
+        with {
+            rotator(angle) = si.bus(2) <: (*(c),*(-s),*(s),*(c)) :(+,+) : si.bus(2)
+            with {
+                c = cos(angle);
+                s = sin(angle);
+            };
+            c_norm = cos(g);
+            s_norm = sin(g);
+        };
+
+    diffuser(angle, g, scale1, scale2, size) = diffuser_aux(angle,g,scale1,scale2,size,si.bus(2));
+
+    // Nested version
+    diffuser_nested(1, angle, g, scale, size) = diffuser_aux(angle,g,scale,scale+10,size,si.bus(2));
+    diffuser_nested(N, angle, g, scale, size) = diffuser_aux(angle,g,scale,scale+10,size,diffuser_nested(N-1,angle,g,scale+13,size));
+
+    smooth_init(s,default) = *(1.0 - s) : + ~ (+(default*init(1)):*(s)) with { init(value) = value - value'; };
+
+    greyhole(dt, damp, size, early_diff, feedback, mod_depth, mod_freq)
+        = (si.bus(4) :> seq(i,3,diffuser_nested(4,ma.PI/2,(-1^i)*diff,10+19*i,size))
+            : par(i,2,si.smooth(damp_interp)))
+        ~((de.fdelay4(512, 10 + depth + depth*os.oscrc(freq)),de.fdelay4(512, 10 + depth + depth*os.oscrs(freq)))
+            : (de.sdelay(524288,int(0.05*ma.SR),floor(dt_constrained)),de.sdelay(524288,int(0.05*ma.SR),floor(dt_constrained)))
+            : par(i,2,*(fb)))
+        with {
+            fb = feedback:linear_interp;
+            depth = ((ma.SR/44100)*50*mod_depth):linear_interp;
+            freq = mod_freq:linear_interp;
+            diff = early_diff:linear_interp;
+            dt_constrained = min(524285,ma.SR*dt);
+            damp_interp = damp:linear_interp;
+            linear_interp(x) = (x+x')/2;
+        };
+
+};
+
+declare greyhole author "Julian Parker; Till Bovermann";
+declare greyhole license "MIT";
+greyhole = jp_gh_rev.greyhole;

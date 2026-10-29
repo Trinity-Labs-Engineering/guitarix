@@ -1,0 +1,43 @@
+// Artemis mono granular capture, inspired by Faust ef.granular's overlapping
+// Hann-windowed voices (MIT, faustlibraries revision 4b8961b03ff90f5457724d987d14703d960ec30b).
+// The capture table, held write head and absolute read positions implement freeze.
+// Copyright (C) 2026 Artemis contributors. MIT.
+import("stdfaust.lib");
+
+granular(dur, ratio, position, scatter, freeze, input) = sum(i, 4, voice(i)) * 0.5
+with {
+    // 2.73 s at 192 kHz. Readers use only [0, N-1]; N is a scratch write slot.
+    // While frozen, new input goes to that unread slot and the capture head holds.
+    N = 524288;
+    frozen = int(freeze >= 0.5);
+    head = (+(1-frozen) : &(N-1)) ~ _;
+    recorded = (+(1-frozen) : min(N)) ~ _;
+    writeIndex = select2(frozen, head, N);
+    wrap(x) = int(x) & (N-1);
+    read(x) = a*(1-frac) + b*frac with {
+        base = floor(x);
+        frac = x-base;
+        // Faust resets counters but not rwtable contents on instanceClear.
+        // Validity by age prevents old scene audio or unwritten history leaking
+        // after reset, including a preset loaded with Freeze already enabled.
+        valid(index) = ((head-index) & (N-1)) < recorded;
+        a = rwtable(N+1, 0.0, writeIndex, input, wrap(base)) * valid(wrap(base));
+        b = rwtable(N+1, 0.0, writeIndex, input, wrap(base+1)) * valid(wrap(base+1));
+    };
+    phase = os.phasor(1, 1/max(0.04, dur));
+    phi(i) = ma.frac(phase + float(i)/4);
+    trigger(i) = phi(i) < phi(i)';
+    // Bounded floating-point LCG: deterministic after reset, without the signed
+    // integer overflow used by older Faust noise generators. Double precision
+    // represents every intermediate integer exactly here.
+    random = ((+(1.0) : *(48271.0) : fmod(_, 2147483647.0)) ~ _) / 2147483647.0;
+    span(i) = ba.sAndH(trigger(i), dur*ma.SR);
+    speed(i) = ba.sAndH(trigger(i), ratio);
+    // Reserve a complete grain behind the head even at +12 semitones. All
+    // positions remain inside the captured past; no reads chase unwritten audio.
+    start(i) = ba.sAndH(trigger(i), float(head)
+        - (position + scatter*random)*ma.SR
+        - max(1, ratio)*dur*ma.SR - 2);
+    voice(i) = read(start(i) + speed(i)*span(i)*phi(i))
+        * (0.5 - 0.5*cos(2*ma.PI*phi(i)));
+};

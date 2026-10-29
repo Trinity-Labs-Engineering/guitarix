@@ -41,7 +41,7 @@ class FaustEffectsTests(unittest.TestCase):
             registered[key] = list(map(float, values))
         processors = {key.split(".")[0] for key in registered}
         exposed = {}
-        for name in ("Reverb", "Modulation", "Drive"):
+        for name in ("Reverb", "Modulation", "Drive", "Delay", "Synth"):
             for pedal in json.loads((catalog / f"{name}.json").read_text()):
                 if pedal.get("id") in processors:
                     for pot in pedal["pots"]:

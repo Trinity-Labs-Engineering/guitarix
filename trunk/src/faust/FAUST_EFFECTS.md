@@ -1,7 +1,7 @@
 # Mono Faust audition effects
 
-These six processors are registered as Guitarix mono rack plugins. Houston exposes
-them in Reverb, Modulation and Drive using its existing generic pedal renderer.
+These ten processors are registered as Guitarix mono rack plugins. Houston exposes
+them in Reverb, Modulation, Delay, Synth and Drive using its existing generic pedal renderer.
 Existing effects and their identities remain available. This is an audition set;
 listening tests and CM5 realtime load measurements are still needed before release.
 
@@ -13,6 +13,10 @@ listening tests and CM5 realtime load measurements are still needed before relea
 | JP Ambient | Julian Parker / Till Bovermann `jpverb`: modulated diffuse tails for ambient playing | Decay (s), Damping, Size, Mod Depth, Mod Rate (Hz), Mix |
 | Phase 90 | David Braun's four-stage JFET circuit model of the 1974 script-logo pedal, signal-dependent rather than a generic phaser | Rate (Hz), Level (dB) |
 | Klon Centaur | David Braun's port of Jatin Chowdhury's ChowCentaur Traditional circuit model, with WDF gain stages and 2x diode-stage oversampling | Gain, Treble, Level |
+| Greyhole | Julian Parker / Till Bovermann's modulated diffuse feedback delay; mono sum of its two internal channels | Delay (ms), Feedback, Size, Damping, Modulation, Mix |
+| Granular Cloud | Four overlapping Hann-windowed grains with pitch, scatter and held capture; inspired by Faust `ef.granular` | Grain Size (ms), Pitch (semitones), Position (ms), Scatter (ms), Freeze, Mix |
+| Wavefolder Synth | David Braun's antialiased triangle wavefolder followed by an envelope-controlled resonant filter; audio input only | Fold (dB), Cutoff (Hz), Resonance, Envelope, Mix, Level (dB) |
+| Tape Colour | Thomas Mandolini's Jiles–Atherton magnetic hysteresis core with tone shaping, wow and flutter | Drive (dB), Tone (Hz), Wow, Flutter, Level (dB) |
 
 ## Sources and candidate review
 
@@ -35,9 +39,35 @@ spring simulation. Phase 90 and Klon are circuit models; neither has been compar
 to physical hardware here. Faust's Fulltone OCD is an interesting later candidate,
 but its documented ideal-op-amp model omits supply-rail clipping, has substantial
 level boost, and adds 11 samples of latency. It needs a separate gain/latency review.
-Greyhole is another useful ambient-delay candidate, but overlaps more with the
-existing delay category. Vital's reverb and Supermassive-style algorithms are
+Greyhole is now included as a diffuse delay for audition. Vital's reverb and Supermassive-style algorithms are
 possible follow-ups after evaluating this smaller set's CPU and sound.
+
+The second batch vendors Greyhole's diffuser/feedback core, the triangle wavefolder
+and the magnetic hysteresis core from the same pinned Faust revision. Attribution
+is retained in `artemis_greyhole.lib`, `artemis_wavefold.lib` and
+`artemis_hysteresis.lib`. `artemis_granular.lib` is a new capture implementation
+inspired by the upstream overlapping-grain approach, extended with held recording
+and absolute read positions. No MIDI or pitch tracking is involved.
+
+## Auditioning the second batch
+
+- **Greyhole** is in Delay. Start with the defaults, then increase Feedback for
+  longer washes and Size/Modulation for diffusion and movement. Delay reaches
+  1500 ms at every tested sample rate. Feedback stops at 0.92; this is not a freeze.
+- **Granular Cloud** is in Delay. Play for a second, then enable **Freeze** to hold
+  the recorded material. New playing remains audible through the dry part of Mix;
+  the frozen wet signal ignores it. Pitch, Position and Scatter can explore the
+  captured buffer while frozen. Disable Freeze to resume recording. Freeze is a
+  toggle and Pitch moves in semitones. Captured audio is not stored in presets;
+  a cleared/new scene with Freeze already enabled has an empty, silent wet buffer.
+- **Wavefolder Synth** starts Houston's Synth category. Fold increases harmonic
+  complexity; Cutoff and Resonance shape it. Positive Envelope opens the filter
+  with harder picking, negative values close it, and zero disables the sweep.
+  It accepts chords and needs no MIDI or note tracking.
+- **Tape Colour** is in Drive. Drive controls magnetic saturation, Tone rolls off
+  highs, and Wow/Flutter add slow/fast pitch movement. Both modulation controls can
+  be zero. This is tape-inspired coloration using a physical magnetic core, not a
+  calibrated model of a specific tape machine, bias oscillator or head assembly.
 
 ## Integration details
 
@@ -66,6 +96,25 @@ possible follow-ups after evaluating this smaller set's CPU and sound.
   histories allocate on activation and release on deactivation, and state clearing
   supports resident-scene reuse. Houston defaults, ranges, steps and IDs are tested
   against the actual generated C++ registrations.
+- Greyhole retains its internal stereo diffusion but has a single mono callback.
+  Its two main delay buffers are enlarged from 65536 to 524288 samples, preventing
+  the original time clamp at high rates. Delay changes use a 50 ms crossfade scaled
+  to sample rate. Size retains the upstream internal delay interpolation.
+- Granular uses one shared 524289-double table (4 MiB plus one scratch sample).
+  Freeze stops the capture head and directs writes to the unread scratch slot.
+  A recorded-sample counter invalidates stale table contents on scene reset,
+  because Faust's `instanceClear` does not clear `rwtable` contents. Readers wrap
+  inside the capture region; all supported grain/pitch/position/scatter combinations
+  fit within its history at 192 kHz. The bounded double-precision scatter generator
+  avoids the signed overflow in older Faust noise implementations.
+- Wavefolder uses first-order antiderivative antialiasing in double precision.
+  Its half-sample group delay is matched in the parallel dry branch. The envelope
+  comes from the original guitar input, before folding, and cutoff is limited below
+  Nyquist. Antialiasing reduces aliasing; extreme Fold settings still need audition.
+- Tape Colour keeps fixed magnetic material parameters and bounds the field entering
+  the core. It uses four internal integration substeps, not a complete oversampled
+  tape transport. Wow/flutter use a 2 ms centre delay with at most 1.65 ms excursion;
+  the effect has no parallel dry blend or host latency compensation.
 
 ## Regeneration and validation
 
@@ -75,6 +124,11 @@ Checked-in C++ was generated with Faust 2.81.10. From `trunk/build`:
 for effect in spring_reverb plate_reverb hall_reverb ambient_reverb phase90 klon_centaur; do
     ../tools/dsp2cc --double -s 40000 --init-type=plugin-instance --no-version-header \
         --add='-t 600' -o ../src/faust-generated/$effect.cc ../src/faust/$effect.dsp
+done
+# The additional processors use the same flags, without the extended Klon timeout:
+for effect in greyhole granular_cloud wavefolder_synth tape_saturation; do
+    ../tools/dsp2cc --double -s 40000 --init-type=plugin-instance --no-version-header \
+        -o ../src/faust-generated/$effect.cc ../src/faust/$effect.dsp
 done
 ```
 
@@ -99,7 +153,11 @@ The audio fixture uses ASan/UBSan and exercises 44.1, 48, 96 and 192 kHz, in-pla
 processing, uneven block sizes, dry/wet endpoints, decaying impulse responses,
 control extremes, effective decay controls, and clearing history. The existing
 `test_lazy_dsp.py` also exercises allocation failures and resident reuse for all
-four new reverbs. It also compares Houston's catalog to
+four new reverbs plus Greyhole and Granular Cloud. Granular tests fill past a full
+buffer wrap, verify sustained frozen output is independent of new input, resume
+recording, and check that a frozen scene cannot leak previously captured audio.
+Greyhole tests exercise the long feedback delay at every sample rate. The fixture
+also compares Houston's catalog to
 registered DSP controls. This does not replace listening or a CM5 xrun test.
 
 ## Licences
@@ -111,3 +169,8 @@ underlying WDF helpers use the MIT-style STK-4.3 licence. The Klon port identifi
 BSD-3-Clause and Chowdhury-DSP copyright. See `FAUST_EFFECTS_LICENSES.txt`, retained
 source declarations, and Guitarix's existing `COPYING` for notices. Generated DSP
 and wrappers remain part of Guitarix's GPL distribution.
+
+Greyhole and the triangle wavefolder are MIT (including the existing MIT ADAA1
+helper); the new granular capture/wrappers are MIT. The magnetic library retains
+Thomas Mandolini's copyright, LGPL notice and Faust generated-code exception.
+The LGPL 2.1 text is included in `FAUST_HYSTERESIS_LICENSE.txt`.

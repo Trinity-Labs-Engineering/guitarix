@@ -2,7 +2,15 @@ Attribution for the mono Faust additions
 
 Spring: Daniel Leonov (Faust springreverb_demo declares MIT).
 Phase 90: David Braun (MIT).
-JPverb: Julian Parker; bug fixes and minor interface changes by Till Bovermann (MIT).
+JPverb / Greyhole: Julian Parker; bug fixes and minor interface changes by Till Bovermann (MIT).
+
+Triangle wavefolder: Copyright (C) 2026 David Braun (MIT).
+ADAA1: Copyright (C) 2021 Dario Sanfilippo <sanfilippo.dario@gmail.com> (MIT).
+Granular capture and second-batch wrappers: Copyright (C) 2026 Artemis contributors (MIT).
+
+Magnetic hysteresis: Copyright (C) 2025 Thomas Mandolini, contributor Bart Brouns.
+The original LGPL notice and generated-code exception are retained in
+artemis_hysteresis.lib; see FAUST_HYSTERESIS_LICENSE.txt for the LGPL 2.1 text.
 
 MIT licence
 

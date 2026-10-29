@@ -14,6 +14,10 @@ namespace effects {
 #include "faust-generated/ambient_reverb.cc"
 #include "faust-generated/phase90.cc"
 #include "faust-generated/klon_centaur.cc"
+#include "faust-generated/greyhole.cc"
+#include "faust-generated/granular_cloud.cc"
+#include "faust-generated/wavefolder_synth.cc"
+#include "faust-generated/tape_saturation.cc"
 }
 #undef min
 #undef max
@@ -138,12 +142,87 @@ void check_decay_control(PluginDef* p) {
     assert(ratio[1] > 10 * std::max(ratio[0], 1e-6));
 }
 
+void check_delay_mix(PluginDef* p, int rate) {
+    prepare(p, rate);
+    set(std::string(p->id) + ".mix", 0);
+    settle(p, rate);
+    const auto input = guitar(rate, rate / 4);
+    const auto dry = render(p, input);
+    for (size_t i = 0; i < input.size(); ++i) assert(std::abs(dry[i] - input[i]) < 1e-6);
+}
+
+void check_freeze(PluginDef* p, int rate) {
+    std::vector<float> held[2];
+    for (int live_input = 0; live_input < 2; ++live_input) {
+        prepare(p, rate);
+        set("granular_cloud.mix", 100);
+        set("granular_cloud.pitch", 7);
+        // Fill past a complete ring-buffer wrap, at every supported sample rate.
+        render(p, guitar(rate, 524288 + rate * 2));
+        set("granular_cloud.freeze", 1);
+        held[live_input] = render(p, live_input ? guitar(rate, rate * 3)
+                                               : std::vector<float>(rate * 3));
+        assert(energy(held[live_input], rate * 2) > 1e-4);
+        set("granular_cloud.freeze", 0);
+        auto released = render(p, std::vector<float>(rate * 3));
+        assert(energy(released, rate * 2) < 1e-12);
+
+        // Scene reuse invalidates captured audio even with Freeze stored on.
+        render(p, guitar(rate, rate * 2));
+        set("granular_cloud.freeze", 1);
+        p->clear_state(p);
+        settle(p, rate);
+        assert(energy(render(p, guitar(rate, rate))) < 1e-15);
+    }
+    // Frozen wet audio must be independent of newly played input.
+    for (size_t i = 0; i < held[0].size(); ++i)
+        assert(std::abs(held[0][i] - held[1][i]) < 1e-6);
+}
+
+void check_greyhole_feedback(PluginDef* p, int rate) {
+    double late[2];
+    for (int high = 0; high < 2; ++high) {
+        prepare(p, rate);
+        set("greyhole.mix", 100);
+        set("greyhole.delay", 1500);
+        set("greyhole.feedback", high ? 0.8 : 0);
+        settle(p, rate);
+        std::vector<float> impulse(rate * 5);
+        impulse[0] = 0.25;
+        auto tail = render(p, impulse);
+        late[high] = energy(tail, rate, rate * 5);
+        if (high) {
+            // The long feedback delay must still work at 192 kHz.
+            assert(energy(tail, int(rate * 1.45), int(rate * 1.9)) > 1e-8);
+        }
+    }
+    assert(late[1] > std::max(1e-8, late[0] * 100));
+}
+
+void check_colour_controls(PluginDef* p, int rate) {
+    const bool tape = std::string(p->id) == "tape_saturation";
+    const std::string control = std::string(p->id) + (tape ? ".drive" : ".fold");
+    std::vector<float> output[2];
+    for (int high = 0; high < 2; ++high) {
+        prepare(p, rate);
+        set(control, high ? controls.at(control).high : controls.at(control).low);
+        settle(p, rate);
+        output[high] = render(p, guitar(rate, rate));
+    }
+    double difference = 0;
+    for (size_t i = rate / 2; i < output[0].size(); ++i)
+        difference += std::pow(output[0][i] - output[1][i], 2);
+    assert(difference > 0.01);
+}
+
 int main(int argc, char**) {
     using Factory = PluginDef* (*)();
     const std::vector<Factory> factories = {
         effects::spring_reverb::plugin, effects::plate_reverb::plugin,
         effects::hall_reverb::plugin, effects::ambient_reverb::plugin,
         effects::phase90::plugin, effects::klon_centaur::plugin,
+        effects::greyhole::plugin, effects::granular_cloud::plugin,
+        effects::wavefolder_synth::plugin, effects::tape_saturation::plugin,
     };
     for (auto factory : factories) {
         auto* p = factory();
@@ -157,6 +236,11 @@ int main(int argc, char**) {
                 check_processing(p, rate);
                 prepare(p, rate);
                 if (std::string(p->category) == "Reverb") check_reverb(p, rate);
+                const std::string id = p->id;
+                if (id == "greyhole" || id == "granular_cloud") check_delay_mix(p, rate);
+                if (id == "granular_cloud") check_freeze(p, rate);
+                if (id == "greyhole") check_greyhole_feedback(p, rate);
+                if (id == "wavefolder_synth" || id == "tape_saturation") check_colour_controls(p, rate);
                 std::cout << p->id << " " << rate << " Hz passed" << std::endl;
             }
             if (std::string(p->category) == "Reverb") check_decay_control(p);

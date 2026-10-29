@@ -503,6 +503,10 @@ void GxEngine::load_static_plugins() {
     pl.add(gx_effects::ambient_reverb::plugin(),PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::phase90::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::klon_centaur::plugin(),  PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(gx_effects::greyhole::plugin(), PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(gx_effects::granular_cloud::plugin(), PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(gx_effects::wavefolder_synth::plugin(), PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(gx_effects::tape_saturation::plugin(), PLUGIN_POS_RACK, PGN_GUI);
 #ifndef GUITARIX_AS_PLUGIN
     pl.add(&oscilloscope.plugin,                  PLUGIN_POS_RACK, PGN_GUI);
 #endif
