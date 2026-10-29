@@ -11,3 +11,6 @@
 [submodule "artemis-ui-assets"]
 	path = artemis-ui-assets
 	url = https://github.com/Trinity-Labs-Engineering/artemis-ui-assets.git
+[submodule "blocks"]
+	path = blocks
+	url = https://github.com/Trinity-Labs-Engineering/blocks.git
