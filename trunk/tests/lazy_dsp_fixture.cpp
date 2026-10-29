@@ -16,6 +16,10 @@ namespace effects {
 #include "faust-generated/duck_delay.cc"
 #include "faust-generated/duck_delay_st.cc"
 #include "faust-generated/panoram_enhancer.cc"
+#include "faust-generated/spring_reverb.cc"
+#include "faust-generated/plate_reverb.cc"
+#include "faust-generated/hall_reverb.cc"
+#include "faust-generated/ambient_reverb.cc"
 }
 namespace amps {
 #include "faust-generated/gxamp6.cc"
@@ -148,6 +152,10 @@ int main() {
     check(effects::duck_delay::plugin);
     check(effects::duck_delay_st::plugin);
     check(effects::panoram_enhancer::plugin);
+    check(effects::spring_reverb::plugin);
+    check(effects::plate_reverb::plugin);
+    check(effects::hall_reverb::plugin);
+    check(effects::ambient_reverb::plugin);
     check(pluginlib::mbdel::plugin);
     check(pluginlib::mbe::plugin);
     check(pluginlib::mbchor::plugin);
