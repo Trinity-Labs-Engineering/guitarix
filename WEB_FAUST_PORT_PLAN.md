@@ -4,6 +4,9 @@ Use fausst to convert the Artemis effects used by Guitarix into a browser by com
 ## Informative context
 General plan - RESEARCH.md
 
+## NOTE
+Feel free to radically change this fork of guitarix to achieve this goal.
+
 # Milestone 0: Bringup
 The nam-a2-support branch of Guitarix has had at least one push since this branch was created - please bring in the new effects added by these pushes
 
@@ -13,4 +16,4 @@ Then, convert / compile each such effect to run from a new browser app (placed i
 To test this, I will use my audio interface to run the effects by routing the audio to the app through Jack.
 
 # Goal
-Implement Milestone 1 end to end
+Implement Milestone 1 end to end on this machine
