@@ -67,6 +67,11 @@ def build(bld):
         ]
 
     sources_plugin_double = [
+        'spring_reverb.dsp',
+        'plate_reverb.dsp',
+        'hall_reverb.dsp',
+        'ambient_reverb.dsp',
+        'phase90.dsp',
         'selecteq.dsp',
 
         # tone stacks
@@ -98,6 +103,10 @@ def build(bld):
         'tonestack_gibsen.dsp',
         'tonestack_engl.dsp',
         ]
+
+    # Expanding the Klon's wave-digital trees exceeds Faust's default 120 s
+    # compiler timeout on some build hosts. Runtime code remains ordinary DSP.
+    sources_plugin_circuit = ['klon_centaur.dsp']
 
     sources_plugin = [
         'low_high_pass.dsp',
@@ -222,10 +231,17 @@ def build(bld):
             proc = "../tools/dsp2cc",
             proc_args = double_arg+["--init-type=plugin-instance"]
             )
+        circuit_args = [a for a in double_arg if not a.startswith('--add=')]
+        circuit_options = '-t 600 ' + (bld.env['FAUST_OPTIONS'] or '')
+        bld(
+            source = sources_plugin_circuit,
+            proc = "../tools/dsp2cc",
+            proc_args = circuit_args+["--init-type=plugin-instance", "--add="+circuit_options]
+            )
     else:
         gdir = "../faust-generated/"
         for s in (sources + sources_static + sources_float +
-                  sources_plugin_float + sources_plugin_double + sources_plugin):
+                  sources_plugin_float + sources_plugin_double + sources_plugin_circuit + sources_plugin):
             s = s.replace(".dsp",".cc")
             bld(name = "copy-faust-cc",
                 rule = "cp ${SRC} ${TGT}",

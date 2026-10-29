@@ -41,7 +41,7 @@ class FaustScanner(object):
 
     scan_re = "|".join([
         r'\bimport\s*\(\s*"(?P<I>[^"]+)"\s*\)\s*;',
-        r'\bcomponent\s*\(\s*"(?P<C>[^"]+)"\s*\)',
+        r'\b(?:component|library)\s*\(\s*"(?P<C>[^"]+)"\s*\)',
         ])
 
     def scan_file(self, task, node):
