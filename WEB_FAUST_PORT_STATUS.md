@@ -1,7 +1,7 @@
 # Web Faust port: Milestone 1 implementation
 
 The audition app is in the **blocks Git submodule**, with its own npm project.
-See [blocks/README.md](blocks/README.md) for setup, XR18 routing, architecture,
+See [blocks/README.md](blocks/README.md) for setup, interface configuration, optional XR18 routing, architecture,
 source provenance, licences and validation commands. The original plan and
 RESEARCH.md are unchanged.
 
@@ -26,14 +26,37 @@ npm ci
 npm run live
 ```
 
-The live runner builds and opens the production app at <http://127.0.0.1:4173>,
-with named routes from XR18 hardware input 1 to the browser and browser playback
-to XR18 USB 1/2. It requests 256-frame Chromium buffers to match the user's current
-QjackCtl setting, without changing system settings. See the README for overrides
-and routing-only commands. Device choices persist and remain stable when devices
-reorder or disappear; capture loss stops audio with a useful error.
+The live runner builds and opens the production app at <http://127.0.0.1:4173>
+in a dedicated Chromium window. It works with browser-visible audio interfaces;
+XR18 hardware, `pactl` and predefined system routes are **not required**. It
+requests 256-frame Chromium buffers without changing system audio settings.
+Set `CHROMIUM_PATH` for another Chromium executable. To use your regular browser,
+run `npm run dev` instead, then open <http://127.0.0.1:5173>.
 
-Validation on 2026-10-29:
+The initial **Audio configuration** page lets you enable device access, select
+input/output devices, **Check channels**, and choose input and output channels
+before starting playback. Click **Start audio**, then **Continue to effects**.
+Use **Test tone** to check playback without an input. The header's **Audio setup**
+button reopens configuration at any time; stop audio to change devices/source.
+Choices persist, missing devices stay marked unavailable, and invalid saved
+channels produce a clear error. Channel numbers reflect what the browser exposes;
+use your interface mixer or system patchbay for physical ports hidden by the
+browser. The XR18 routing commands remain available as an explicit optional helper;
+see the README.
+
+Validation of general audio configuration on 2026-11-02:
+
+- Production build, TypeScript checks and formatting checks pass.
+- All 19 DSP/output-guard tests pass.
+- 17 Chromium tests cover the effects and audio lifecycle plus initial setup,
+  reopening setup during playback, generic device discovery, channel probing and
+  capture release, saved selections, unavailable channels, output channel signal
+  isolation, system-output fallback, output disconnection and mobile layout.
+- The real `npm run live` launcher opens Audio configuration in Chromium without
+  invoking XR18 setup. Verified in a virtual display without starting playback.
+- Physical interface playback and listening remain manual acceptance checks.
+
+Earlier XR18 validation on 2026-10-29:
 
 - Production build and TypeScript checks pass.
 - 18 WASM tests cover all 12 effects at 44.1/48/96 kHz, parameter extremes,
