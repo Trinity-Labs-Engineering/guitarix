@@ -1,9 +1,39 @@
-# Web Faust port: Milestone 1 implementation
+# Web Faust port: Milestones 1 and 2
 
 The audition app is in the **blocks Git submodule**, with its own npm project.
 See [blocks/README.md](blocks/README.md) for setup, interface configuration, optional XR18 routing, architecture,
-source provenance, licences and validation commands. The original plan and
-RESEARCH.md are unchanged.
+source provenance, licences and validation commands. The milestone plan now includes the complete candidate catalogue; RESEARCH.md
+is unchanged.
+
+Milestone 2 is implemented and validated (2026-11-02). It compiles all
+**361 Candidate rows** found in this checkout
+(the request named 341), alongside the original 12: **373 source entries**.
+See [Milestone 2 implementation and validation](blocks/docs/MILESTONE_2.md).
+
+- The candidate baseline is frozen in `blocks/scripts/milestone2-candidates.json`.
+  Canonical Faust sources, LV2 copies, plugins, helpers and generators have distinct
+  IDs and names; a successful build requires every entry to compile.
+- The UI offers 13 effect types plus combined type/search filtering. **74 entries**
+  use **50 matching Artemis designs** from asset revision `1f2975e`, including the
+  five newer effects. Unmatched processors retain generic controls.
+- Mono/stereo, zero-input and four-input channel contracts are supported. The
+  selected mono source feeds all processor inputs; stereo output is preserved on
+  playback pairs and downmixed when one output channel is selected.
+- Recorded browser adaptations cover legacy syntax, native tube/circuit lookup
+  tables, beat conversion and numerical repairs. Original source files remain
+  intact; original and exact adapted sources accompany the static build.
+- Production build and TypeScript checks pass. All **394 DSP/catalogue/native
+  lookup/output-guard tests** pass, including every entry at 44.1/48/96 kHz and
+  direct comparisons against the original C++ lookup implementations.
+- All **29 Chromium tests** pass, including every AudioWorklet, all 1,760 named
+  parameters in the desktop sweep, seven viewport sizes, category/search behavior,
+  enum/default preservation, device/capture lifecycle and stereo/mono routing.
+  Formatting and Git whitespace checks pass.
+- Physical interface listening and comparative tonal/performance checks remain
+  manual acceptance work. Native/host-dependent inventory rows outside the frozen
+  candidate set remain separate work; this does not add NAM or convolution.
+
+The following records the earlier Milestone 1 implementation and hardware checks.
 
 - Milestone 0: merged `origin/nam-a2-support` at `c804468b` into this branch
   (merge `2f355a7b`). All six new native effects are present.
