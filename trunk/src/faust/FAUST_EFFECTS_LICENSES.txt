@@ -2,6 +2,8 @@ Attribution for the mono Faust additions
 
 Spring: Daniel Leonov (Faust springreverb_demo declares MIT).
 Phase 90: David Braun (MIT).
+Fulltone OCD: David Braun (MIT); artemis_ocd.lib retains the upstream
+model notes and attribution to Giampiccolo et al., DAFx-26 (CC BY 4.0).
 JPverb / Greyhole: Julian Parker; bug fixes and minor interface changes by Till Bovermann (MIT).
 
 Triangle wavefolder: Copyright (C) 2026 David Braun (MIT).

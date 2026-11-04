@@ -73,6 +73,7 @@ def build(bld):
         'ambient_reverb.dsp',
         'phase90.dsp',
         'greyhole.dsp',
+        'audition_ocd.dsp',
         'granular_cloud.dsp',
         'wavefolder_synth.dsp',
         'tape_saturation.dsp',

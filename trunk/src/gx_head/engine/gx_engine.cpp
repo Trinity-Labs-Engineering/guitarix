@@ -503,6 +503,7 @@ void GxEngine::load_static_plugins() {
     pl.add(gx_effects::ambient_reverb::plugin(),PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::phase90::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::klon_centaur::plugin(),  PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(gx_effects::audition_ocd::plugin(), PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::greyhole::plugin(), PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::granular_cloud::plugin(), PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::wavefolder_synth::plugin(), PLUGIN_POS_RACK, PGN_GUI);
@@ -548,6 +549,17 @@ void GxEngine::load_static_plugins() {
 	pl.add(gx_effects::duck_delay::plugin(),      PLUGIN_POS_RACK, PGN_GUI);
 	pl.add(pluginlib::reversedelay::plugin(),     PLUGIN_POS_RACK, PGN_GUI);
 	pl.add(pluginlib::dual_pitch::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(pluginlib::audition_effects::tone_machine(), PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(pluginlib::audition_effects::super_fuzz(), PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(pluginlib::audition_effects::muff(), PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(pluginlib::audition_effects::fuzz_machine(), PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(pluginlib::audition_effects::percolator(), PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(pluginlib::audition_effects::bias_fuzz(), PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(pluginlib::audition_effects::mouse(), PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(pluginlib::audition_effects::tone_king(), PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(pluginlib::audition_effects::flapjack(), PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(pluginlib::audition_effects::yen(), PLUGIN_POS_RACK, PGN_GUI);
+
 	pl.add(pluginlib::harmoniser::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
 	pl.add(pluginlib::dual_harmoniser::plugin(),  PLUGIN_POS_RACK, PGN_GUI);
 	pl.add(gx_effects::baxandall::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
