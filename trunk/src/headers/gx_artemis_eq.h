@@ -27,11 +27,12 @@ struct Coefficients {
 // Keep this contract in sync with waveforms/src/artemisEq.ts.
 inline Coefficients coefficients(const Settings& s, double sample_rate) {
     const double gain = bounded(s.gain, -24, 24, 0);
-    if (!std::isfinite(s.enabled) || s.enabled < 0.5f || gain == 0) return {};
+    const int shape = int(std::round(bounded(s.shape, 0, 4, 0)));
+    // Cuts have no gain control: zero dB must not bypass a high/low-pass.
+    if (!std::isfinite(s.enabled) || s.enabled < 0.5f || (gain == 0 && shape < 3)) return {};
     const double rate = bounded(sample_rate, 8000, 384000, 48000);
     const double frequency = bounded(s.frequency, 20, std::min(20000.0, rate * 0.49), 1000);
     const double q = bounded(s.q, 0.1, 18, 1);
-    const int shape = int(std::round(bounded(s.shape, 0, 2, 0)));
     const double w = 6.283185307179586 * frequency / rate;
     const double c = std::cos(w), a = std::pow(10, gain / 40);
     double alpha = std::sin(w) / (2 * q);
@@ -39,6 +40,11 @@ inline Coefficients coefficients(const Settings& s, double sample_rate) {
     if (shape == 0) {
         b0 = 1 + alpha * a; b1 = -2 * c; b2 = 1 - alpha * a;
         a0 = 1 + alpha / a; a1 = -2 * c; a2 = 1 - alpha / a;
+    } else if (shape >= 3) {
+        // Two-pole (12 dB/octave) cuts. Q controls the cutoff resonance.
+        b0 = b2 = (shape == 3 ? 1 + c : 1 - c) / 2;
+        b1 = (shape == 3 ? -2 : 2) * b0;
+        a0 = 1 + alpha; a1 = -2 * c; a2 = 1 - alpha;
     } else {
         // Q controls shelf steepness, without resonant overshoot. S stays
         // strictly positive and below one even at the control limits.
@@ -129,7 +135,7 @@ class ArtemisEq : public PluginDef {
     }
     static int parameters(const ParamReg& reg) {
         auto& self = *static_cast<ArtemisEq*>(reg.plugin);
-        static const value_pair shapes[] = {{"Bell", "Bell"}, {"Low shelf", "Low shelf"}, {"High shelf", "High shelf"}, {nullptr, nullptr}};
+        static const value_pair shapes[] = {{"Bell", "Bell"}, {"Low shelf", "Low shelf"}, {"High shelf", "High shelf"}, {"Low cut", "Low cut"}, {"High cut", "High cut"}, {nullptr, nullptr}};
         for (unsigned i = 0; i < self.settings.size(); ++i) {
             auto& s = self.settings[i];
             const std::string prefix = "artemis_eq.b" + std::to_string(i + 1) + "_";
@@ -140,7 +146,7 @@ class ArtemisEq : public PluginDef {
             add("frequency", &s.frequency, 1000, 20, 20000, 1);
             add("gain", &s.gain, 0, -24, 24, 0.1f);
             add("q", &s.q, 1, 0.1f, 18, 0.01f);
-            add("shape", &s.shape, 0, 0, 2, 1, shapes);
+            add("shape", &s.shape, 0, 0, 4, 1, shapes);
         }
         return 0;
     }
@@ -161,7 +167,7 @@ class ArtemisEq : public PluginDef {
 public:
     ArtemisEq() : PluginDef() {
         version = PLUGINDEF_VERSION; id = "artemis_eq"; name = "Artemis EQ";
-        category = "EQ"; description = "16 freely placed bell and directional shelf bands";
+        category = "EQ"; description = "16 freely placed bell, shelf and high/low cut bands";
         mono_audio = process; set_samplerate = init; clear_state = reset;
         activate_plugin = activate; register_params = parameters; load_ui = ui; delete_instance = destroy;
     }

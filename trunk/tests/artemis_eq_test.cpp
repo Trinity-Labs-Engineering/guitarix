@@ -8,8 +8,13 @@
 #include <vector>
 
 std::map<std::string, float*> params;
-float* reg_float(const char* id, const char*, const char* type, const char*, float* value, float initial, float, float, float, const value_pair*) {
+float* reg_float(const char* id, const char*, const char* type, const char*, float* value, float initial, float, float high, float, const value_pair* labels) {
     assert(type[0] == 'S' || type[0] == 'B');
+    if (std::string(id).find("_shape") != std::string::npos) {
+        assert(high == 4 && labels);
+        assert(std::string(labels[3].value_id) == "Low cut");
+        assert(std::string(labels[4].value_id) == "High cut");
+    }
     *value = initial; params[id] = value; return value;
 }
 int* reg_int(const char*, const char*, const char*, const char*, int* v, int initial, int, int, const value_pair*) { *v = initial; return v; }
@@ -46,14 +51,37 @@ int main() {
             const double actual = 20 * std::log10(rms(tone,rate/2) / before);
             assert(std::abs(actual - (shape ? gain/2 : gain)) < .015);
         }
+        const auto measure = [&](double frequency) {
+            eq.clear_state(&eq);
+            std::vector<float> tone(rate);
+            for (unsigned i = 0; i < rate; ++i) tone[i] = .01f * std::sin(6.283185307179586 * frequency * i / rate);
+            const double before = rms(tone, rate/2); process(eq, tone);
+            return 20 * std::log10(rms(tone,rate/2) / before);
+        };
+        for (int shape : {3,4}) {
+            set(1,"shape",float(shape)); set(1,"gain",0); set(1,"frequency",1000);
+            set(1,"q",float(std::sqrt(.5)));
+            // Low cut rejects bass, high cut rejects treble, even at zero gain.
+            assert(measure(shape == 3 ? 100 : 3000) < -18);
+            assert(std::abs(measure(shape == 3 ? 3000 : 100)) < .1);
+            assert(std::abs(measure(1000) + 3.0103) < .015);
+            // Q controls the corner response; the retained gain is irrelevant.
+            for (float q : {.1f,1.f,18.f}) for (float gain : {-24.f,0.f,24.f}) {
+                set(1,"q",q); set(1,"gain",gain);
+                assert(std::abs(measure(1000) - 20 * std::log10(q)) < .015);
+            }
+            set(1,"enabled",0); eq.clear_state(&eq);
+            output = original; process(eq,output); assert(output == original);
+            set(1,"enabled",1);
+        }
         // Live extremes and repeated flat/shape/rate transitions remain finite.
         for (int turn = 0; turn < 300; ++turn) {
             set(1,"q",turn % 2 ? .1f : 18.f); set(1,"frequency",turn % 2 ? 20.f : 20000.f);
-            set(1,"gain",turn % 3 ? 24.f : -24.f); set(1,"shape",float(turn % 3));
+            set(1,"gain",turn % 3 ? 24.f : -24.f); set(1,"shape",float(turn % 5));
             output.assign(original.begin(), original.begin()+256); process(eq,output);
             for (float v : output) assert(std::isfinite(v) && std::abs(v) < 100);
         }
-        set(1,"gain",0); output = original; process(eq,output);
+        set(1,"shape",0); set(1,"gain",0); output = original; process(eq,output);
         output = original; process(eq,output); assert(output == original);
         eq.clear_state(&eq); output = original; process(eq,output); assert(output == original);
     }
