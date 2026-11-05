@@ -28,8 +28,9 @@ class LegacyFuzzGainTests(unittest.TestCase):
         for source in SOURCES:
             wrapper = directory / source.name
             support = '#include "gx_plugin.h"\n#include "gx_faust_support.h"\n' if source.stem == "fuzzface" else ""
-            wrapper.write_text('#include <cstring>\n' + support +
-                               f'#include "{source}"\n')
+            # Supply support only for the embedded fuzzface fragment. Standalone
+            # plugins must compile with their own includes, just as in Waf.
+            wrapper.write_text(support + f'#include "{source}"\n')
             wrappers.append(str(wrapper))
         resampler = directory / "gx_resampler.cpp"
         resampler.write_text((TRUNK / "src/gx_head/engine/gx_resampler.cpp").read_text().replace(

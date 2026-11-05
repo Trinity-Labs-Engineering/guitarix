@@ -5,6 +5,7 @@
 #include "gx_plugin.h"
 
 #include "trany.h"
+#include <string.h>
 
 namespace pluginlib {
 namespace bfuzz {
