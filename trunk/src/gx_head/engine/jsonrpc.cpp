@@ -2602,6 +2602,8 @@ GxService::GxService(gx_preset::GxSettings& settings_, gx_jack::GxJack& jack_,
     } else {
         add_inet_port(*port);
     }
+    // Dedicated optional telemetry; never part of preset transactions.
+    if (*port > 0 && *port <= 55535) jack.spectrum.start(*port + 10000);
     if (host.compare(0, 3, "BT:") == 0) {
         create_bluetooth_sockets(host.substr(3));
     }

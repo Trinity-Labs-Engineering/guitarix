@@ -28,6 +28,7 @@
 #include "valve.h"
 
 #include "gx_faust_plugins.h"
+#include "gx_artemis_eq.h"
 #ifndef GUITARIX_AS_PLUGIN
 #include "../plugins/pluginlib.h"
 #else
@@ -467,6 +468,7 @@ void GxEngine::load_static_plugins() {
     pl.add(gx_effects::gain::plugin(),            PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::low_high_pass::plugin(),   PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::highbooster::plugin(),     PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(new ArtemisEq(),                    PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::selecteq::plugin(),        PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&crybaby.plugin,                       PLUGIN_POS_RACK, PGN_GUI);
     pl.add(&poweramps.plugin,                     PLUGIN_POS_RACK, PGN_GUI);

@@ -29,6 +29,8 @@
 
 #ifndef GUITARIX_AS_PLUGIN
 
+#include "gx_spectrum.h"
+
 #include <jack/jack.h>          // NOLINT
 #include <jack/midiport.h>
 #include <jack/ringbuffer.h>
@@ -194,6 +196,9 @@ inline void MidiCC::fill(unsigned char *midi_send, int i) {
 }
 
 class GxJack: public sigc::trackable {
+public:
+    gx_spectrum::Server spectrum;
+private:
  private:
     GxRtCheck           rtc;
     bool                IS_RT;

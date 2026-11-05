@@ -1213,6 +1213,8 @@ int __rt_func GxJack::gx_jack_insert_process(jack_nframes_t nframes, void *arg) 
 	    nframes, ibuf, ibuf,
 	    get_float_buf(self.ports.output1.port, nframes),
 	    get_float_buf(self.ports.output2.port, nframes));
+    self.spectrum.push(nframes, get_float_buf(self.ports.output1.port, nframes),
+        get_float_buf(self.ports.output2.port, nframes), self.jack_sr.load(std::memory_order_relaxed));
     }
     gx_system::measure_stop();
     self.engine.stereo_chain.post_rt_finished();
