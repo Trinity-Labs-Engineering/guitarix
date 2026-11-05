@@ -245,6 +245,11 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 	}
 	smpCl.down(bufCl, output0);
 
+	// Compensate the fixed input boost after clipping.
+	for (int i = 0; i < count; ++i) {
+		output0[i] *= FAUSTFLOAT(0.1);
+	}
+
 }
 
 void __rt_func Dsp::compute_static(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0, PluginDef *p)

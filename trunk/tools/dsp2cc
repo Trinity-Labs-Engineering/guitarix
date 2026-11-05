@@ -467,6 +467,8 @@ class Parser(object):
                     self.drywetbox = value
                 elif key == "volume_p":
                     self.volume_p = value
+                elif key == "output_gain":
+                    self.output_gain = float(value)
 
     def readIncludes(self, stop_expr):
         stop = re.compile(stop_expr).match
@@ -590,6 +592,7 @@ class Parser(object):
         self.has_drywetbox = False
         self.volume_p = None
         self.has_volume_p = False
+        self.output_gain = 1.0
         self.groups = OrderedDict()
         self.memlist = []
         self.staticlist = []
@@ -1376,6 +1379,7 @@ void always_inline Dsp::compute(int %(countname)s%(compute_args)s)
 #if %(has_insert_p)s
 %(insert_p_compute)s
 #endif
+%(output_gain_post)s\
 #if %(has_volume_p)s
 %(volume_post)s
 #endif
@@ -1785,6 +1789,7 @@ void always_inline Dsp::compute(int %(countname)s%(compute_args)s)
 #if %(has_insert_p)s
 %(insert_p_compute)s
 #endif
+%(output_gain_post)s\
 #if %(has_volume_p)s
 %(volume_post)s
 #undef fsliderV0 
@@ -2174,6 +2179,17 @@ class Output(object):
             Volume_Name = ""
             
             
+        # Apply fixed compensation after nonlinear inserts, before level/mix.
+        # Putting this in the Faust graph would attenuate the insert's input.
+        output_gain_post = ""
+        if self.parser.output_gain != 1.0:
+            output_gain_post = "\t// Compensate the fixed input boost after clipping.\n"
+            output_gain_post += "\tfor (int i = 0; i < count; ++i) {\n"
+            for channel in range(self.parser.numOutputs):
+                output = ("outputX%d" if self.parser.has_vector else "output%d") % channel
+                output_gain_post += "\t\t%s[i] *= FAUSTFLOAT(%s);\n" % (output, self.parser.output_gain)
+            output_gain_post += "\t}\n"
+
         s = StringIO()
         s.write(template % dict(
             has_fixedrate = self.parser.has_fixedrate,
@@ -2207,6 +2223,7 @@ class Output(object):
             insert_p_clearstate = insert_p_clearstate,
             insert_p_init = insert_p_init,
             insert_p_compute = insert_p_compute,
+            output_gain_post = output_gain_post,
             insert_p_incl = insert_p_incl,
             dry_wetbox_mono_pre = dry_wetbox_mono_pre,
             dry_wetbox_mono_post = dry_wetbox_mono_post,

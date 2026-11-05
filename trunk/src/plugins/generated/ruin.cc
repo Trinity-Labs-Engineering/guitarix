@@ -176,6 +176,11 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 		}
 	}
 	smp.down(buf, output0);
+	// Compensate the fixed input boost after clipping.
+	for (int i = 0; i < count; ++i) {
+		output0[i] *= FAUSTFLOAT(0.1);
+	}
+
 	for (int i=0; i<count; i++) {
 		output0[i] = ((fSlowdw1 * (double)dryinput[i]) + (fSlowdw0 * (double)output0[i]));
 	}

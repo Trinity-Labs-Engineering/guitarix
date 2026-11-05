@@ -90,4 +90,5 @@ dist = fi.iir((b0/a0,b1/a0,b2/a0,b3/a0),(a1/a0,a2/a0,a3/a0))  with {
     asymclip = ffunction(float asymhardclip2(float), "clipping.h", "");
     aclip = asymclip(X3);
 
-process = _<:*(dry),(*(wet) : *(10.0) : aclip :*(gain) ):>_;
+// Compensate the x10 drive after clipping, leaving the dry path at unity.
+process = _<:*(dry),(*(10.0) : aclip : *(0.1) : *(gain) : *(wet) ):>_;

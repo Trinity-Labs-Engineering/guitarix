@@ -152,14 +152,16 @@ void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0)
 {
-	double fSlow0 = 0.01 * double(fVslider0);
+	double fSlowdw0 = 0.01 * double(fVslider0);
+	double fSlowdw1 = 1.0 - fSlowdw0;
+	FAUSTFLOAT dryinput[count];
+	memcpy(dryinput, input0, count * sizeof(float));
 	double fSlow1 = 0.007000000000000006 * double(fVslider1);
-	double fSlow2 = 1.0 - fSlow0;
 	for (int i0 = 0; i0 < count; i0 = i0 + 1) {
 		double fTemp0 = double(input0[i0]);
-		fRec0[0] = 10.0 * fSlow0 * fTemp0 - fConst7 * (fConst5 * fRec0[1] + fConst4 * fRec0[2] + fConst2 * fRec0[3]);
+		fRec0[0] = 10.0 * fTemp0 - fConst7 * (fConst5 * fRec0[1] + fConst4 * fRec0[2] + fConst2 * fRec0[3]);
 		fRec1[0] = fSlow1 + 0.993 * fRec1[1];
-		output0[i0] = FAUSTFLOAT(fSlow2 * fTemp0 + fConst8 * fRec1[0] * (3.81347663375185e-13 * fRec0[0] - 1.14404299012556e-12 * fRec0[1] + 1.14404299012556e-12 * fRec0[2] - 3.81347663375185e-13 * fRec0[3]));
+		output0[i0] = FAUSTFLOAT(fConst8 * fRec1[0] * (3.81347663375185e-13 * fRec0[0] - 1.14404299012556e-12 * fRec0[1] + 1.14404299012556e-12 * fRec0[2] - 3.81347663375185e-13 * fRec0[3]));
 		for (int j0 = 3; j0 > 0; j0 = j0 - 1) {
 			fRec0[j0] = fRec0[j0 - 1];
 		}
@@ -199,6 +201,11 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 		fRecCl0[1] = fRecCl0[0];
 	}
 	smpCl.down(bufCl, output0);
+
+	// Compensate the fixed input boost after clipping, then mix with dry audio.
+	for (int i = 0; i < count; ++i) {
+		output0[i] = FAUSTFLOAT(fSlowdw1 * dryinput[i] + fSlowdw0 * (0.1 * output0[i]));
+	}
 
 }
 

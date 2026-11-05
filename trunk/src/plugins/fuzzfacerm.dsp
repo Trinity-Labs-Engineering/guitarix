@@ -1,6 +1,8 @@
 /// generated automatically
 // DO NOT MODIFY!
 declare id "fuzzfacerm";
+// Keep the x10 drive into the circuit; compensate after the final clipper.
+declare output_gain "0.1";
 declare name "Fuzz Face Mayer";
 declare category "Fuzz";
 declare shortname "FF Mayer";

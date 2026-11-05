@@ -1,6 +1,8 @@
 // generated automatically
 // DO NOT MODIFY!
 declare id "ffreak";
+// Keep the x10 drive into the circuit; compensate after the final clipper.
+declare output_gain "0.1";
 declare name "Fat Furry Freak";
 declare category "Fuzz";
 declare shortname "Fat FFreak";

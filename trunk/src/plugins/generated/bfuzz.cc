@@ -210,23 +210,25 @@ void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0)
 {
+	double fSlowdw0 = 0.01 * double(fVslider2);
+	double fSlowdw1 = 1.0 - fSlowdw0;
+	FAUSTFLOAT dryinput[count];
+	memcpy(dryinput, input0, count * sizeof(float));
 	double fSlow0 = 0.007000000000000006 * double(fVslider0);
 	double fSlow1 = 0.007000000000000006 * double(fVslider1);
-	double fSlow2 = 0.01 * double(fVslider2);
 	double fSlow3 = 0.007000000000000006 * double(fVslider3);
-	double fSlow4 = 1.0 - fSlow2;
 	for (int i0 = 0; i0 < count; i0 = i0 + 1) {
 		fRec0[0] = fSlow0 + 0.993 * fRec0[1];
 		fRec1[0] = fSlow1 + 0.993 * fRec1[1];
 		double fTemp0 = fConst6 * fRec0[0] + fConst0 * (fConst5 + fRec1[0] * (fConst4 + fConst2 * fRec0[0])) + 1.07025933546545e-08;
 		double fTemp1 = 1.65780932898435e-16 * fRec0[0];
 		double fTemp2 = double(input0[i0]);
-		fRec2[0] = 10.0 * fSlow2 * fTemp2 - (fRec2[1] * (fConst32 * fRec0[0] + fConst0 * (fConst31 + fRec1[0] * (fConst30 + fConst29 * fRec0[0])) + 4.2810373418618e-08) + fRec2[2] * (fConst28 * fRec0[0] + fConst12 * (fConst27 + fRec1[0] * (fConst26 + fConst24 * fRec0[0])) + 6.4215560127927e-08) + fRec2[3] * (fConst22 * fRec0[0] + fConst0 * (fConst21 + fRec1[0] * (fConst20 + fConst18 * fRec0[0])) + 4.2810373418618e-08) + fRec2[4] * (fConst16 * fRec0[0] + fConst0 * (fConst15 + fRec1[0] * (fConst14 + fConst13 * fRec0[0])) + 1.07025933546545e-08)) / fTemp0;
+		fRec2[0] = 10.0 * fTemp2 - (fRec2[1] * (fConst32 * fRec0[0] + fConst0 * (fConst31 + fRec1[0] * (fConst30 + fConst29 * fRec0[0])) + 4.2810373418618e-08) + fRec2[2] * (fConst28 * fRec0[0] + fConst12 * (fConst27 + fRec1[0] * (fConst26 + fConst24 * fRec0[0])) + 6.4215560127927e-08) + fRec2[3] * (fConst22 * fRec0[0] + fConst0 * (fConst21 + fRec1[0] * (fConst20 + fConst18 * fRec0[0])) + 4.2810373418618e-08) + fRec2[4] * (fConst16 * fRec0[0] + fConst0 * (fConst15 + fRec1[0] * (fConst14 + fConst13 * fRec0[0])) + 1.07025933546545e-08)) / fTemp0;
 		double fTemp3 = 3.3156186579687e-16 * fRec0[0];
 		double fTemp4 = fTemp3 + 1.55382382721868e-13;
 		double fTemp5 = -1.55382382721868e-13 - fTemp3;
 		fRec3[0] = fSlow3 + 0.993 * fRec3[1];
-		output0[i0] = FAUSTFLOAT(fSlow4 * fTemp2 + fRec3[0] * (fRec2[0] * (fConst12 * (fConst34 + fConst33 * fRec0[0]) + fConst7 * fRec1[0] * (fTemp1 + 7.76911913609341e-14)) + fConst7 * fRec2[1] * (fTemp4 + fRec1[0] * fTemp5) + fConst12 * fRec2[2] * (1.65856287867935e-12 * fRec0[0] + 7.77265055388254e-10) + fConst7 * fRec2[3] * (fTemp5 + fRec1[0] * fTemp4) + fRec2[4] * (fConst12 * (fConst11 + fConst9 * fRec0[0]) + fConst7 * fRec1[0] * (-7.76911913609341e-14 - fTemp1))) / fTemp0);
+		output0[i0] = FAUSTFLOAT(fRec3[0] * (fRec2[0] * (fConst12 * (fConst34 + fConst33 * fRec0[0]) + fConst7 * fRec1[0] * (fTemp1 + 7.76911913609341e-14)) + fConst7 * fRec2[1] * (fTemp4 + fRec1[0] * fTemp5) + fConst12 * fRec2[2] * (1.65856287867935e-12 * fRec0[0] + 7.77265055388254e-10) + fConst7 * fRec2[3] * (fTemp5 + fRec1[0] * fTemp4) + fRec2[4] * (fConst12 * (fConst11 + fConst9 * fRec0[0]) + fConst7 * fRec1[0] * (-7.76911913609341e-14 - fTemp1))) / fTemp0);
 		fRec0[1] = fRec0[0];
 		fRec1[1] = fRec1[0];
 		for (int j0 = 4; j0 > 0; j0 = j0 - 1) {
@@ -268,6 +270,11 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 		fRecCl0[1] = fRecCl0[0];
 	}
 	smpCl.down(bufCl, output0);
+
+	// Compensate the fixed input boost after clipping, then mix with dry audio.
+	for (int i = 0; i < count; ++i) {
+		output0[i] = FAUSTFLOAT(fSlowdw1 * dryinput[i] + fSlowdw0 * (0.1 * output0[i]));
+	}
 
 }
 

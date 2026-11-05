@@ -1,6 +1,8 @@
 // generated automatically
 // DO NOT MODIFY!
 declare id "ruin";
+// Keep the x10 drive into the circuit; compensate after the final clipper.
+declare output_gain "0.1";
 declare name "Ruiner";
 declare category "Fuzz";
 declare shortname "Ruiner";
