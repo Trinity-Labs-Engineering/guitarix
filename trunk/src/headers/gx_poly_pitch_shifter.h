@@ -185,6 +185,7 @@ struct State {
   double rA = 0.0, rB = 0.0;
   bool fading = false;
   double fade = 0.0, fadeInc = 0.0, fadeNcc = 1.0;
+  std::array<float, 2049> fadeCurve{};
 
   // Lag search, incremental. The reference is the tap's recent waveform,
   // copied when the search starts; candidates are buffer positions scored
@@ -210,6 +211,7 @@ struct State {
   double smoothA = 0.0, eHf = 0.0;
   std::array<float, kHistoryCells> minHist{}, maxHist{};
   double minAcc = 1e9, maxAcc = 0.0;
+  double recentMin = 1e9, recentMax = 0.0;
   int64_t lastOnset = 0;
 
   // The longest drift fade and the search lead this ratio and window
@@ -280,6 +282,8 @@ struct State {
     maxHist.fill(0.0f);
     minAcc = 1e9;
     maxAcc = 0.0;
+    recentMin = 1e9;
+    recentMax = 0.0;
     lastOnset = -(1 << 30);
   }
 
@@ -436,15 +440,18 @@ struct State {
       maxHist[prev] = static_cast<float>(maxAcc);
       minAcc = 1e9;
       maxAcc = 0.0;
+      // The history window changes only at a cell boundary. Keep its extrema
+      // until the next boundary instead of scanning 45 cells every sample.
+      recentMin = 1e9;
+      recentMax = 0.0;
+      for (int back = kHistorySkipCells; back < kHistoryCells; ++back) {
+        const auto c = static_cast<size_t>((cellNow - back + 4 * kHistoryCells) % kHistoryCells);
+        recentMin = std::min(recentMin, static_cast<double>(minHist[c]));
+        recentMax = std::max(recentMax, static_cast<double>(maxHist[c]));
+      }
     }
     minAcc = std::min(minAcc, eHf);
     maxAcc = std::max(maxAcc, eHf);
-    double recentMin = 1e9, recentMax = 0.0;
-    for (int back = kHistorySkipCells; back < kHistoryCells; ++back) {
-      const auto c = static_cast<size_t>((cellNow - back + 4 * kHistoryCells) % kHistoryCells);
-      recentMin = std::min(recentMin, static_cast<double>(minHist[c]));
-      recentMax = std::max(recentMax, static_cast<double>(maxHist[c]));
-    }
     return eHf > 1e-7 && eHf > recentMin * kOnsetOverMin && eHf > recentMax * kOnsetOverMax;
   }
 };
@@ -523,6 +530,8 @@ public:
         s.cellLen = std::max(1, static_cast<int>(sampleRate * 0.001));
         // Match JUCE roundToInt's ties-to-even rounding at rates such as 30 kHz.
         s.coarseStep = std::max(1, static_cast<int>(std::lrint(sampleRate / kCoarseStepRate)));
+        for (int i = 0; i <= 2048; ++i)
+            s.fadeCurve[i] = static_cast<float>(0.5 - 0.5 * std::cos(kPi * i / 2048.0));
         s.hpA = std::exp(-2.0 * kPi * kDetectorHpfHz / sampleRate);
         s.smoothA = std::exp(-1.0 / (sampleRate * kDetectorSmoothMs * 0.001));
         // Rings hold the largest window plus the correlation reach behind the
@@ -613,6 +622,7 @@ public:
               s.minHist.fill(static_cast<float>(s.eHf));
               s.maxHist.fill(static_cast<float>(s.eHf));
               s.minAcc = s.maxAcc = s.eHf;
+              s.recentMin = s.recentMax = static_cast<float>(s.eHf);
             } else if (ratio < 1.0) {
               // Drift splice, downshift: the tap falls back toward dMax. The
               // search is planned a lead early; a candidate that will have delay
@@ -649,7 +659,10 @@ public:
           // equal-power one), and the level holds through the fade either way.
           float gainA = 1.0f, gainB = 0.0f;
           if (s.fading) {
-            gainB = static_cast<float>(0.5 - 0.5 * std::cos(kPi * s.fade));
+            const double phase = std::max(0.0, std::min(2048.0, s.fade * 2048.0));
+            const int index = std::min(2047, static_cast<int>(phase));
+            gainB = s.fadeCurve[index] + static_cast<float>(phase - index)
+                * (s.fadeCurve[index + 1] - s.fadeCurve[index]);
             gainA = 1.0f - gainB;
             const float r = static_cast<float>(s.fadeNcc);
             const float norm = std::sqrt(gainA * gainA + gainB * gainB + 2.0f * gainA * gainB * r);
