@@ -102,10 +102,17 @@ public:
         c.fs=2*rate;c.supply=8.7;c.count=0;
         c.capacitor(0,-1,100e-12);c.capacitor(0,1,47e-9);c.capacitor(3,-1,47e-6);
         c.capacitor(4,2,2.2e-6);c.capacitor(2,-1,1.5e-9);c.capacitor(5,6,100e-9);
-        configure(p);c.v={0,0.2,0.2,0.5,1.1,3,0,0};c.input=0;c.solve([this]{stamp();},true);c.save();
+        configure(p);
         dc.highpass(20,c.fs);bridge.prepare(rate,c.fs);reset();
     }
-    void reset() {c.reset();dc.reset();bridge.reset();}
+    void reset() {
+        // Scene controls may differ from prepare(): seed the capacitor voltages
+        // from this circuit's current DC operating point, not the factory one.
+        // Use the same bounded solve/initial guess as a fresh configured model.
+        c.v={0,0.2,0.2,0.5,1.1,3,0,0};c.input=0;
+        c.solve([this]{stamp();},true);c.save();c.reset();
+        dc.reset();bridge.reset();
+    }
     double tick(double x) {
         return level*bridge.tick(x,[this](double v){c.input=v*harmonics;c.solve([this]{stamp();});return dc.tick(c.v[6]);});
     }
@@ -135,10 +142,14 @@ public:
         c.capacitor(-2,0,2.2e-6);c.capacitor(3,4,22e-6);c.capacitor(2,5,10e-9);
         // Small junction capacitances provide finite transistor bandwidth.
         c.capacitor(0,1,100e-12);c.capacitor(1,2,100e-12);
-        configure(p);c.v={0.2,0.8,4.5,0.5,0,0.2};c.input=0;c.solve([this]{stamp();},true);c.save();
+        configure(p);
         bridge.prepare(rate,c.fs);dc.highpass(25,c.fs);reset();
     }
-    void reset() {c.reset();dc.reset();dc.z[0]=-dc.b[0]*c.v[2];bridge.reset();}
+    void reset() {
+        c.v={0.2,0.8,4.5,0.5,0,0.2};c.input=0;
+        c.solve([this]{stamp();},true);c.save();c.reset();
+        dc.reset();dc.z[0]=-dc.b[0]*c.v[2];bridge.reset();
+    }
     double tick(double x) {
         return 0.1*level*bridge.tick(x,[this](double v){
             c.input=v*(0.25+1.75*drive);c.solve([this]{stamp();});return dc.tick(c.v[2]);

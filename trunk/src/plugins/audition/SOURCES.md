@@ -113,6 +113,9 @@ There is no added audio-block buffer and no dry parallel blend to misalign.
 
 Sample-rate setup preconditions circuit/neural state and saves a baseline.
 Scene clearing restores state without allocation or a long silent preroll.
+Percolator and Bias Fuzz recompute their bounded DC operating-point solve at
+reset using the current circuit controls, so a scene cannot restore capacitor
+voltages from the factory settings after changing its component values.
 WDF snapshots restore capacitor state and cached scattering waves without copying
 topology references. Instances do not share mutable histories. Native continuous
 controls use a 15 ms ramp; mode changes in Tone Machine, Muff, Tone King and Fuzz
