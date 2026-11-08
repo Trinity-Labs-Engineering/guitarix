@@ -210,6 +210,7 @@ struct State {
   double smoothA = 0.0, eHf = 0.0;
   std::array<float, kHistoryCells> minHist{}, maxHist{};
   double minAcc = 1e9, maxAcc = 0.0;
+  double recentMin = 0.0, recentMax = 0.0;
   int64_t lastOnset = 0;
 
   // The longest drift fade and the search lead this ratio and window
@@ -280,6 +281,8 @@ struct State {
     maxHist.fill(0.0f);
     minAcc = 1e9;
     maxAcc = 0.0;
+    recentMin = 0.0;
+    recentMax = 0.0;
     lastOnset = -(1 << 30);
   }
 
@@ -436,15 +439,18 @@ struct State {
       maxHist[prev] = static_cast<float>(maxAcc);
       minAcc = 1e9;
       maxAcc = 0.0;
+      // The history window changes only at a cell boundary. Keep its extrema
+      // until the next boundary instead of scanning 45 cells every sample.
+      recentMin = 1e9;
+      recentMax = 0.0;
+      for (int back = kHistorySkipCells; back < kHistoryCells; ++back) {
+        const auto c = static_cast<size_t>((cellNow - back + 4 * kHistoryCells) % kHistoryCells);
+        recentMin = std::min(recentMin, static_cast<double>(minHist[c]));
+        recentMax = std::max(recentMax, static_cast<double>(maxHist[c]));
+      }
     }
     minAcc = std::min(minAcc, eHf);
     maxAcc = std::max(maxAcc, eHf);
-    double recentMin = 1e9, recentMax = 0.0;
-    for (int back = kHistorySkipCells; back < kHistoryCells; ++back) {
-      const auto c = static_cast<size_t>((cellNow - back + 4 * kHistoryCells) % kHistoryCells);
-      recentMin = std::min(recentMin, static_cast<double>(minHist[c]));
-      recentMax = std::max(recentMax, static_cast<double>(maxHist[c]));
-    }
     return eHf > 1e-7 && eHf > recentMin * kOnsetOverMin && eHf > recentMax * kOnsetOverMax;
   }
 };
@@ -613,6 +619,7 @@ public:
               s.minHist.fill(static_cast<float>(s.eHf));
               s.maxHist.fill(static_cast<float>(s.eHf));
               s.minAcc = s.maxAcc = s.eHf;
+              s.recentMin = s.recentMax = static_cast<float>(s.eHf);
             } else if (ratio < 1.0) {
               // Drift splice, downshift: the tap falls back toward dMax. The
               // search is planned a lead early; a candidate that will have delay

@@ -182,10 +182,9 @@ public:
     inline bool getProcess() noexcept {
         if (isRunning() && !getState()) {
             int maxDuration = 0;
+            pthread_mutex_lock(&pWaitProc);
             while (!getState()) {
-                pthread_mutex_lock(&pWaitProc);
                 if (pthread_cond_timedwait(&pProcCond, &pWaitProc, getTimeOut()) == ETIMEDOUT) {
-                    pthread_mutex_unlock(&pWaitProc);
                     maxDuration +=1;
                     //fprintf(stderr, "%s wait for process %i\n", threadName.c_str(), maxDuration);
                     if (maxDuration > 2) {
@@ -193,10 +192,9 @@ public:
                             1, std::memory_order_relaxed);
                         break;
                     }
-                } else {
-                    pthread_mutex_unlock(&pWaitProc);;
                 }
             }
+            pthread_mutex_unlock(&pWaitProc);
         }
         if (getState()) pWait.store(true, std::memory_order_release);
         return getState();
@@ -219,10 +217,9 @@ public:
         if (isRunning()) {
             int maxDuration = 0;
             bool deadlineMissRecorded = false;
+            pthread_mutex_lock(&pWaitProc);
             while (pWait.load(std::memory_order_acquire)) {
-                pthread_mutex_lock(&pWaitProc);
                 if (pthread_cond_timedwait(&pProcCond, &pWaitProc, getTimeOut()) == ETIMEDOUT) {
-                    pthread_mutex_unlock(&pWaitProc);
                     maxDuration +=1;
                     //fprintf(stderr, "%s wait for data %i\n", threadName.c_str(), maxDuration);
                     if (maxDuration > 5 && !deadlineMissRecorded) {
@@ -230,10 +227,9 @@ public:
                             1, std::memory_order_relaxed);
                         deadlineMissRecorded = true;
                     }
-                } else {
-                    pthread_mutex_unlock(&pWaitProc);;
                 }
             }
+            pthread_mutex_unlock(&pWaitProc);
             //fprintf(stderr, "%s processed data %i\n", threadName.c_str(), maxDuration);
         }
     }
@@ -309,8 +305,13 @@ private:
             std::unique_lock<std::mutex> lk(pWaitWork);
             #endif
             while (pRun.load(std::memory_order_acquire)) {
+                // Pair publication with the waiter's predicate check under
+                // the same mutex: a completion must not be lost between the
+                // check and pthread_cond_timedwait (a 400 us penalty).
+                pthread_mutex_lock(&pWaitProc);
                 isWaiting.store(true, std::memory_order_release);
                 pthread_cond_broadcast(&pProcCond);
+                pthread_mutex_unlock(&pWaitProc);
                 // wait for signal from parent thread that work is to do
                 #if __cplusplus > 201703L
                 pWorkCond.wait(false);

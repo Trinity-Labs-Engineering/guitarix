@@ -73,6 +73,38 @@ class PolyPitchShifterTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stdout.strip(), expected_stdout)
 
+    def test_cached_onset_history_matches_samplewise_scan(self) -> None:
+        self.run_cpp_fixture(r"""
+            #include <cassert>
+            #include <cmath>
+            #include <iostream>
+            #include "gx_poly_pitch_shifter.h"
+            int main() {
+                using namespace gx_engine::tone3000_pitch;
+                for (int cellLen : {1, 30, 44, 48, 96}) {
+                    State s;
+                    s.cellLen = cellLen;
+                    s.hpA = 0.97;
+                    s.smoothA = 0.96;
+                    for (int i = 0; i < 30000; ++i) {
+                        s.written = i + 1;
+                        double x = std::sin(i * 0.13) * ((i / 713) % 3);
+                        bool actual = s.detectOnset(x);
+                        double lo = 1e9, hi = 0.0;
+                        auto cell = i / cellLen;
+                        for (int back = kHistorySkipCells; back < kHistoryCells; ++back) {
+                            auto c = (cell - back + 4 * kHistoryCells) % kHistoryCells;
+                            lo = std::min(lo, static_cast<double>(s.minHist[c]));
+                            hi = std::max(hi, static_cast<double>(s.maxHist[c]));
+                        }
+                        assert(actual == (s.eHf > 1e-7 && s.eHf > lo * kOnsetOverMin
+                                          && s.eHf > hi * kOnsetOverMax));
+                    }
+                }
+                std::cout << "cached-onset-ok\n";
+            }
+        """, "cached-onset-ok")
+
     def test_tone3000_pitch_audio_and_realtime_contract(self) -> None:
         self.run_cpp_fixture(FIXTURE, "poly-pitch-shifter-ok")
 
