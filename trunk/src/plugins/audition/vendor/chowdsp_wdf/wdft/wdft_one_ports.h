@@ -421,6 +421,13 @@ namespace wdft
             wdf.b = (T) 0;
         }
 
+        // Artemis: initialise a charged capacitor at DC (zero series current).
+        void resetToVoltage (T voltage)
+        {
+            z = -voltage;
+            wdf.a = wdf.b = voltage;
+        }
+
         /** Sets the resistance value of the WDF resistor, in Ohms. */
         void setResistanceValue (T newR)
         {
@@ -509,6 +516,14 @@ namespace wdft
             z = (T) 0.0;
             wdf.a = (T) 0;
             wdf.b = (T) 0;
+        }
+
+        // Artemis: DC capacitor voltage, including the parallel resistor current.
+        void resetToVoltage (T voltage)
+        {
+            z = voltage;
+            wdf.b = twoRC_over_twoRC_plus_T * voltage;
+            wdf.a = (T) 2 * voltage - wdf.b;
         }
 
         /** Sets the resistance value of the WDF resistor, in Ohms. */

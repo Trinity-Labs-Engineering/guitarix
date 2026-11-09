@@ -318,6 +318,13 @@ namespace wdft
             z = 0.0f;
         }
 
+        // Artemis: seed the terminal voltage at zero DC series current.
+        void resetToVoltage (T voltage)
+        {
+            z = -(voltage + Vs);
+            wdf.a = wdf.b = voltage;
+        }
+
         /** Sets the resistance value of the WDF resistor, in Ohms. */
         void setResistanceValue (T newR)
         {

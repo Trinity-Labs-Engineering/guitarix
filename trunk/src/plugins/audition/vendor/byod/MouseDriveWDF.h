@@ -31,12 +31,49 @@ public:
         return y;
     }
 
+    // Initialise the zero-input DC operating point directly. A finite warm-up
+    // leaves the AC-coupling capacitors charging for seconds, and saving those
+    // waves also ties subsequent resets to the preparation-time drive control.
+    // At DC the capacitors are open: the bias/feedback path carries current I,
+    // Vout = (Ag * Ri - Ro) * I, and the output coupling capacitor isolates the
+    // diode pair (zero diode voltage/current). Series WDF ports reverse polarity.
+    void reset (double distortionResistance)
+    {
+        Rd_C4.setResistanceValue (distortionResistance);
+        const double current = 4.5 / (biasResistance + inputSeriesResistance
+            + (opAmpGain + 1) * opAmpInputResistance + distortionResistance - opAmpOutputResistance);
+        const double output = (opAmpGain * opAmpInputResistance - opAmpOutputResistance) * current;
+        const double input = 4.5 - (biasResistance + inputSeriesResistance) * current;
+        const double feedback = output + distortionResistance * current;
+        const double acrossDrive = distortionResistance * current;
+        Vin_C1.reset();
+        Vin_C1.setVoltage (0);
+        Vin_C1.incident (4.5 - biasResistance * current);
+        C2.incident (-input);
+        R4_C5.resetToVoltage (-feedback);
+        R5_C6.resetToVoltage (-feedback);
+        Rd_C4.resetToVoltage (acrossDrive);
+        R6_C7.resetToVoltage (-output);
+        const auto impedances = R.getPortImpedances();
+        R.restoreWaves ({-input - impedances[0] * current, -feedback,
+                        acrossDrive - impedances[2] * current, output,
+                        -input + impedances[0] * current, -feedback,
+                        acrossDrive + impedances[2] * current, output});
+        diodes.wdf.a = diodes.wdf.b = 0;
+    }
+
+    static constexpr double biasResistance = 1.0e6;
+    static constexpr double inputSeriesResistance = 1.0e3;
+    static constexpr double opAmpGain = 100.0;
+    static constexpr double opAmpInputResistance = 10.0e6;
+    static constexpr double opAmpOutputResistance = double(1.0e-1f);
+
     // Port A
     wdft::CapacitiveVoltageSourceT<double> Vin_C1 { 22.0e-9f };
-    wdft::ResistiveVoltageSourceT<double> R2 { 1.0e6f };
+    wdft::ResistiveVoltageSourceT<double> R2 { biasResistance };
     wdft::WDFParallelT<double, decltype (Vin_C1), decltype (R2)> P1 { Vin_C1, R2 };
 
-    wdft::ResistorT<double> R3 { 1.0e3f };
+    wdft::ResistorT<double> R3 { inputSeriesResistance };
     wdft::WDFSeriesT<double, decltype (P1), decltype (R3)> S2 { P1, R3 };
 
     wdft::CapacitorT<double> C2 { 1.0e-9f };
@@ -57,9 +94,9 @@ public:
         template <typename RType>
         static double calcImpedance (RType& R)
         {
-            constexpr double Ag = 100.0f; // op-amp gain
-            constexpr double Ri = 10.0e6f; // op-amp input impedance
-            constexpr double Ro = 1.0e-1f; // op-amp output impedance
+            constexpr double Ag = opAmpGain;
+            constexpr double Ri = opAmpInputResistance;
+            constexpr double Ro = opAmpOutputResistance;
 
             const auto [Ra, Rb, Rc] = R.getPortImpedances();
             const auto Rd = -(((Ra * (Rb + Rc) + Rc * Ri + Rb * (Rc + Ri)) * Ro) / (Ra * Rb + Ra * Rc + Rb * Rc + Rb * Ri + Ag * Rb * Ri + Rc * Ri - (Ra + Rb + Ri) * Ro));

@@ -707,6 +707,7 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         }
         const auto parameters_finished_at = SceneClock::now();
 
+
         // Do not arm a bypassed NAM wrapper: it cannot consume an RT request,
         // and carrying the request into a later unmuted activation would turn
         // a scene-only snap into an interactive one.
@@ -728,6 +729,18 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             externally_muted, &commit_ok,
             &processing_topology_changed, &rt_state_changed);
         const auto module_commit_finished_at = SceneClock::now();
+        // Built-in cabinets use a periodic updater for interactive edits.
+        // A guarded scene must install its IR before acknowledging readiness,
+        // rather than allowing that timer to reload it after output reopens.
+        if (externally_muted) {
+            const bool mono_cab_ready = engine.cabinet.settle_muted_scene();
+            const bool stereo_cab_ready = engine.cabinet_st.settle_muted_scene();
+            if (!mono_cab_ready || !stereo_cab_ready) {
+                throw RpcError(-32000, "Scene cabinet did not become ready");
+            }
+        }
+        const auto cabinets_finished_at = SceneClock::now();
+
         bool chain_settled = !topology_changed ||
             engine.wait_ramp_up_finished();
         const auto chain_ramp_finished_at = SceneClock::now();
@@ -994,8 +1007,9 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.begin_object();
         jw.write_kv("validation", elapsed_ms(scene_started_at, validation_finished_at));
         jw.write_kv("parameterApply", elapsed_ms(validation_finished_at, parameters_finished_at));
+        jw.write_kv("cabinetPrepare", elapsed_ms(module_commit_finished_at, cabinets_finished_at));
         jw.write_kv("moduleCommit", elapsed_ms(parameters_finished_at, module_commit_finished_at));
-        jw.write_kv("chainRampWait", elapsed_ms(module_commit_finished_at, chain_ramp_finished_at));
+        jw.write_kv("chainRampWait", elapsed_ms(cabinets_finished_at, chain_ramp_finished_at));
         jw.write_kv("smootherBarrier", elapsed_ms(chain_ramp_finished_at, smoother_barrier_finished_at));
         jw.write_kv("audioCycleWait", elapsed_ms(smoother_barrier_finished_at, audio_cycle_finished_at));
         jw.write_kv("prefixPreroll", elapsed_ms(audio_cycle_finished_at, prefix_preroll_finished_at));

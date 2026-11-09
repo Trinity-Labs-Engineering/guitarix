@@ -103,7 +103,45 @@ void check_character() {
         assert(difference(a,b)<2e-5 && energy(a)>1e-4);p->delete_instance(p);
     }
 }
+void check_mouse_startup() {
+    // CAT must not generate audio from its 4.5 V circuit bias. Exercise the
+    // production callbacks, including controls changed after sample-rate setup
+    // and reuse after a sustained note, without extending the activation fade.
+    for (int rate : {44100,48000,96000,192000}) {
+        auto* p = pluginlib::audition_effects::mouse();
+        prepare(p, rate);
+        for (float drive : {0.0f,0.1f,0.5f,0.9f,1.0f}) {
+            *controls.at("audition_mouse.distortion").value = drive;
+            *controls.at("audition_mouse.level").value = 12;
+            for (float filter : {0.0f,0.4f,1.0f}) {
+                *controls.at("audition_mouse.filter").value = filter;
+                for (int repeat = 0; repeat < 2; ++repeat) {
+                    realtime = true;
+                    p->activate_plugin(false, p);
+                    p->activate_plugin(true, p);
+                    realtime = false;
+                    auto silence = render(p, std::vector<float>(rate / 4));
+                    double peak = 0;
+                    for (float sample : silence) peak = std::max(peak, std::abs(double(sample)));
+                    if (peak > 1e-7) {
+                        std::cerr << "CAT zero-input startup: rate=" << rate
+                                  << " drive=" << drive << " filter=" << filter
+                                  << " repeat=" << repeat << " peak=" << peak << '\n';
+                        p->delete_instance(p);
+                        std::exit(1);
+                    }
+                    render(p, input(rate, rate / 10));
+                }
+            }
+        }
+        p->delete_instance(p);
+    }
+}
 int main(int argc,char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "--mouse-startup") {
+        check_mouse_startup();
+        return 0;
+    }
     bool metadata=argc>1 && std::string(argv[1])=="--metadata";
     bool probe=argc>1 && std::string(argv[1])=="--probe";
     for(auto factory:factories) {

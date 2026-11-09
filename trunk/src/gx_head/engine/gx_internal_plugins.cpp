@@ -1308,6 +1308,28 @@ bool FixedBaseConvolver::check_update_timeout() {
     return true;
 }
 
+bool FixedBaseConvolver::settle_muted_scene(bool pending) {
+    boost::mutex::scoped_lock lock(activate_mutex);
+    // First activation loads its selection during chain commit. An already
+    // active cabinet otherwise waits for the 200 ms UI update timer, which
+    // can replace its IR after the scene's hardware mute has been released.
+    if (!pending || !activated || !plugin.get_on_off()) {
+        return true;
+    }
+    // Exclude the complete cabinet callback, including its resamplers and
+    // tone filters, while the control thread replaces convolution state.
+    scene_update_suspended.store(true, std::memory_order_release);
+    try {
+        sync();
+        const bool ready = start();
+        scene_update_suspended.store(false, std::memory_order_release);
+        return ready;
+    } catch (...) {
+        scene_update_suspended.store(false, std::memory_order_release);
+        throw;
+    }
+}
+
 int FixedBaseConvolver::activate(bool start, PluginDef *p) {
     FixedBaseConvolver& self = *static_cast<FixedBaseConvolver*>(p);
     boost::mutex::scoped_lock lock(self.activate_mutex);
@@ -1478,15 +1500,21 @@ bool CabinetConvolver::do_update() {
     while (!conv.checkstate());
     if (configure) {
         if (!conv.configure(cab.ir_count, cab.ir_data, cab.ir_sr)) {
+            current_cab = -1;
             return false;
         }
     } else {
         if (!conv.update(cab.ir_count, cab.ir_data, cab.ir_sr)) {
+            current_cab = -1;
             return false;
         }
     }
+    if (!conv_start()) {
+        current_cab = -1;
+        return false;
+    }
     update_cabinet();
-    return conv_start();
+    return true;
 }
 
 bool CabinetConvolver::start(bool force) {
@@ -1512,6 +1540,10 @@ void CabinetConvolver::check_update() {
 
 void CabinetConvolver::run_cab_conf(int count, float *input0, float *output0, PluginDef *p) {
     CabinetConvolver& self = *static_cast<CabinetConvolver*>(p);
+    if (self.scene_update_suspended.load(std::memory_order_acquire)) {
+        if (input0 != output0) std::copy(input0, input0 + count, output0);
+        return;
+    }
     FAUSTFLOAT buf[self.smp.max_out_count(count)];
     int ReCount = self.smp.up(count, output0, buf);
     if (!self.conv.compute(ReCount,buf)) {
@@ -1618,15 +1650,21 @@ bool CabinetStereoConvolver::do_update() {
     while (!conv.checkstate());
     if (configure) {
         if (!conv.configure_stereo(cab.ir_count, cab.ir_data, cab.ir_sr)) {
+            current_cab = -1;
             return false;
         }
     } else {
         if (!conv.update_stereo(cab.ir_count, cab.ir_data, cab.ir_sr)) {
+            current_cab = -1;
             return false;
         }
     }
+    if (!conv_start()) {
+        current_cab = -1;
+        return false;
+    }
     update_cabinet();
-    return conv_start();
+    return true;
 }
 
 bool CabinetStereoConvolver::start(bool force) {
@@ -1652,6 +1690,11 @@ void CabinetStereoConvolver::check_update() {
 
 void CabinetStereoConvolver::run_cab_conf(int count, float *input0, float *input1, float *output0, float *output1, PluginDef *p) {
     CabinetStereoConvolver& self = *static_cast<CabinetStereoConvolver*>(p);
+    if (self.scene_update_suspended.load(std::memory_order_acquire)) {
+        if (input0 != output0) std::copy(input0, input0 + count, output0);
+        if (input1 != output1) std::copy(input1, input1 + count, output1);
+        return;
+    }
     FAUSTFLOAT buf[self.smp.max_out_count(count)];
     FAUSTFLOAT buf1[self.smps.max_out_count(count)];
     int ReCount = self.smp.up(count, output0, buf);

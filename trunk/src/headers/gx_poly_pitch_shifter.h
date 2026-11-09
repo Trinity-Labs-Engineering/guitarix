@@ -204,6 +204,20 @@ struct State {
   std::vector<float> ref;
   double refXX = 0.0;
 
+  float readWet(double position) const {
+    float sample = ring.read(position);
+    // Empty history meets a held note at source time zero. A moving tap can
+    // reach that edge after the output startup fade has finished. Taper the
+    // first source span when reading wet audio, without delaying the tap or
+    // modifying the raw history used by dry compensation and correlation.
+    // Unity reaches the edge inside the existing output fade.
+    if (position < blendLength && ratio != 1.0) {
+      const float t = static_cast<float>(std::max(0.0, position)) / blendLength;
+      sample *= t * t * (3.0f - 2.0f * t);
+    }
+    return sample;
+  }
+
   // Onset detector: first-order HPF, 2 ms energy smoother, 1 ms min/max
   // history cells.
   double hpA = 0.0, hpZ1 = 0.0, hpZ2 = 0.0;
@@ -669,8 +683,8 @@ public:
             if (--s.blendLeft > 0) s.startupGain += s.blendStep;
             else s.startupGain = 1.0f;
           }
-          float shifted = s.ring.read(s.rA);
-          if (s.fading) shifted = shifted * gainA + gainB * s.ring.read(s.rB);
+          float shifted = s.readWet(s.rA);
+          if (s.fading) shifted = shifted * gainA + gainB * s.readWet(s.rB);
           // TONE3000 blends from dry on power-up. Here Wet and Dry are
           // independent levels, so prime/fade only the shifted contribution.
           shifted *= s.startupGain;

@@ -41,7 +41,10 @@ also recorded in `sources.json`.
 - [chowdsp_wdf](https://github.com/Chowdhury-DSP/chowdsp_wdf/tree/7a3c85e47346af7765c23c8855b032f6c0bcdedb),
   Copyright (c) 2022 Chowdhury-DSP, BSD-3-Clause; full notice in
   `vendor/chowdsp_wdf/LICENSE`. The R-type adapter adds explicit cached-wave
-  save/restore methods for scene reuse; other library headers are unmodified.
+  save/restore methods for scene reuse. Series/parallel RC one-ports also expose
+  DC-voltage reset methods used by Mouse Drive's analytical operating-point reset.
+  The series RC voltage source exposes the same operation for Yen Drive's
+  bounded DC feedback solve. Tone King's DC filters use its saved overdrive bias.
 - [GxToneMachine](https://github.com/brummer10/GxToneMachine.lv2/tree/2eba371285d130eb82a116db0bd2a6f8e6a72eab)
   and [GxSuperFuzz](https://github.com/brummer10/GxSuperFuzz.lv2/tree/eda1d498e71605d398781153c71ef2b373d72814),
   Guitarix/MOD project (Hermann Meyer and contributors). Upstream repositories

@@ -532,6 +532,8 @@ protected:
     EngineControl& engine;
     sigc::slot<void> sync;
     bool activated;
+    std::atomic<bool> scene_update_suspended{false};
+    bool settle_muted_scene(bool pending);
     unsigned int SamplingFreq;
     unsigned int buffersize;
     unsigned int bz;
@@ -583,6 +585,9 @@ public:
     CabinetConvolver(EngineControl& engine, sigc::slot<void> sync,
        gx_resample::BufferResampler& resamp);
     ~CabinetConvolver();
+    bool settle_muted_scene() {
+        return FixedBaseConvolver::settle_muted_scene(cabinet_changed());
+    }
 #ifdef GUITARIX_AS_PLUGIN
     void pl_check_update() { return check_update();}
 #endif
@@ -616,6 +621,9 @@ public:
     CabinetStereoConvolver(EngineControl& engine, sigc::slot<void> sync,
        gx_resample::BufferResampler& resamp);
     ~CabinetStereoConvolver();
+    bool settle_muted_scene() {
+        return FixedBaseConvolver::settle_muted_scene(cabinet_changed());
+    }
 #ifdef GUITARIX_AS_PLUGIN
     void pl_check_update() { return check_update();}
 #endif

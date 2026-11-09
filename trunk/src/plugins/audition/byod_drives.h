@@ -26,9 +26,6 @@ struct OmegaProvider {
 
 class Mouse {
     MouseDriveWDF wdf;
-    std::array<double,8> initialWaves{};
-    decltype(wdf.diodes.wdf) initialDiode{};
-    decltype(std::make_tuple(wdf.Vin_C1,wdf.C2,wdf.Rd_C4,wdf.R4_C5,wdf.R5_C6,wdf.R6_C7)) initial{wdf.Vin_C1,wdf.C2,wdf.Rd_C4,wdf.R4_C5,wdf.R5_C6,wdf.R6_C7};
     RateBridge bridge;
     OnePole tone, dc;
     double fs=96000, level=1, lastDrive=-1;
@@ -45,15 +42,11 @@ public:
     void prepare(double rate,const Params& p) {
         fs=2*rate; bridge.prepare(rate,fs); lastDrive=-1;
         wdf.prepare(fs); configure(p); dc.highpass(20,fs);
-        for(int i=0;i<12000;++i) raw(0);
-        initial=std::make_tuple(wdf.Vin_C1,wdf.C2,wdf.Rd_C4,wdf.R4_C5,wdf.R5_C6,wdf.R6_C7);
-        initialWaves=wdf.R.saveWaves();initialDiode=wdf.diodes.wdf;
         reset();
     }
     void reset() {
-        std::tie(wdf.Vin_C1,wdf.C2,wdf.Rd_C4,wdf.R4_C5,wdf.R5_C6,wdf.R6_C7)=initial;
-        wdf.R.restoreWaves(initialWaves);wdf.diodes.wdf=initialDiode;
-        bridge.reset(); tone.reset(); dc.reset(); lastDrive=-1;
+        wdf.reset(std::max(1.0, 100000*logPot(lastDrive)));
+        bridge.reset(); tone.reset(); dc.reset();
     }
     double raw(double x) { return dc.tick(tone.tick(wdf.process(x))); }
     double tick(double x) { return level*bridge.tick(x,[this](double v){return raw(v);}); }
@@ -61,9 +54,6 @@ public:
 
 class Yen {
     ZenDriveWDF wdf;
-    std::array<double,8> initialWaves{};
-    decltype(wdf.diodes.wdf) initialDiode{};
-    decltype(std::make_tuple(wdf.Vin_C3,wdf.Rv9_C4,wdf.R5_R6_C5)) initial{wdf.Vin_C3,wdf.Rv9_C4,wdf.R5_R6_C5};
     RateBridge bridge;
     OnePole tone, dc;
     double fs=96000, level=1, offset=0, lastGain=-1, lastVoice=-1;
@@ -77,14 +67,11 @@ public:
     void prepare(double rate,const Params& p) {
         fs=rate*2; bridge.prepare(rate,fs); lastGain=lastVoice=-1;
         wdf.prepare(fs); configure(p); dc.highpass(20,fs);
-        for(int i=0;i<20000;++i) offset=wdf.processSample(0);
-        initial=std::make_tuple(wdf.Vin_C3,wdf.Rv9_C4,wdf.R5_R6_C5);
-        initialWaves=wdf.R.saveWaves();initialDiode=wdf.diodes.wdf;reset();
+        reset();
     }
     void reset() {
-        std::tie(wdf.Vin_C3,wdf.Rv9_C4,wdf.R5_R6_C5)=initial;
-        wdf.R.restoreWaves(initialWaves);wdf.diodes.wdf=initialDiode;
-        bridge.reset(); tone.reset(); dc.reset(); lastGain=lastVoice=-1;
+        offset=wdf.reset(ZenDriveWDF::R9*std::max(logPot(lastGain),0.001));
+        bridge.reset(); tone.reset(); dc.reset();
     }
     double tick(double x) {
         return level*bridge.tick(x,[this](double v){return tone.tick(dc.tick((wdf.processSample(v*0.5)-offset)*db(-10)));});
@@ -102,7 +89,7 @@ class ToneKing {
     Filter<3> gain;
     Filter<1> bypass;
     std::array<OnePole,3> dc;
-    double fs=96000, level=1, lastDrive=-1;
+    double fs=96000, level=1, lastDrive=-1, initialOutput=0;
     std::array<double,3> mix{0,1,0};
     int mode=1;
 public:
@@ -137,6 +124,7 @@ public:
         for(auto& f:dc)f.highpass(20,fs);
         od.prepare(fs); configure(p);
         for(int i=0;i<20000;++i)raw(0);
+        initialOutput=0;od.processBlock(&initialOutput,1);
         initial=od.R9_C7_Vin;initialWaves=od.R.saveWaves();initialDiode=od.dp.wdf;reset();
     }
     void reset() {
@@ -145,8 +133,10 @@ public:
         for(auto& f:dc)f.reset();
         lastDrive=-1; mix={0,0,0}; mix[mode]=1;
         for(int i=0;i<3;++i) {
-            double zero=i==1?4.5*db(-12):0;
-            if(i!=1) {zero=4.5;clip.processBlock(&zero,1);zero*=db(i==0?45:27);}
+            // The finite-gain overdrive's bias is not exactly 4.5 V. Both
+            // branches fed by it must start with its saved operating point.
+            double zero=i==1?initialOutput*db(-12):0;
+            if(i!=1) {zero=i==0?4.5:std::clamp(initialOutput,3.0,6.0);clip.processBlock(&zero,1);zero*=db(i==0?45:27);}
             dc[i].z[0]=-dc[i].b[0]*zero;
         }
     }

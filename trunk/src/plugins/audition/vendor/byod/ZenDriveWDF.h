@@ -12,6 +12,7 @@ public:
 
     void prepare (double sampleRate)
     {
+        dcReady = false;
 
         R4.setVoltage (4.5f);
         R5_R6_C5.setVoltage (4.5f);
@@ -22,6 +23,7 @@ public:
     }
 
     void setParameters(double voice, double gain) {
+        dcReady = false;
         R5_R6_C5.setResistanceValue(R5 + voice * R6);
         Rv9_C4.setResistanceValue(R9 * std::max(gain, 0.001));
     }
@@ -36,9 +38,66 @@ public:
         return wdft::voltage<double> (RL);
     }
 
+    // Solve only the DC bias/feedback path, with the coupling capacitors open.
+    // Keep the existing diode implementation and port impedances: this changes
+    // initial state, not the audio circuit. Return the output DC for the wrapper.
+    double reset (double gainResistance)
+    {
+        Rv9_C4.setResistanceValue (gainResistance);
+        const double currentPerVolt = (1 - opAmpOutputResistance / loadResistance)
+            / (opAmpGain * opAmpInputResistance);
+        const auto outputAt = [=] (double feedbackVoltage) {
+            return (4.5 + feedbackVoltage)
+                / (1 + (biasResistance + opAmpInputResistance) * currentPerVolt);
+        };
+        const auto residual = [&] (double feedbackVoltage) {
+            const double current = outputAt (feedbackVoltage) * currentPerVolt;
+            const double diodeCurrent = -current - feedbackVoltage / gainResistance;
+            const double incident = feedbackVoltage + P3.wdf.R * diodeCurrent;
+            diodes.incident (incident);
+            return 0.5 * (incident + diodes.reflected()) - feedbackVoltage;
+        };
+        double feedbackVoltage = dcFeedbackVoltage;
+        // Two bounded scalar Newton steps suffice in this microvolt DC range;
+        // no audio warm-up, allocation or convergence-dependent loop on reset.
+        if (!dcReady) {
+            feedbackVoltage = -outputAt (0) * currentPerVolt * gainResistance;
+            for (int step = 0; step < 2; ++step) {
+                const double error = residual (feedbackVoltage);
+                const double slope = (residual (feedbackVoltage + 1e-8)
+                    - residual (feedbackVoltage - 1e-8)) / 2e-8;
+                feedbackVoltage -= error / slope;
+            }
+            dcFeedbackVoltage = feedbackVoltage;
+            dcReady = true;
+        }
+        const double output = outputAt (feedbackVoltage);
+        const double current = output * currentPerVolt;
+        const double input = 4.5 - biasResistance * current;
+        const double negativeInput = output - feedbackVoltage;
+        residual (feedbackVoltage);
+        Vin_C3.reset();
+        Vin_C3.setVoltage (0);
+        Vin_C3.incident (input);
+        R5_R6_C5.resetToVoltage (negativeInput);
+        Rv9_C4.resetToVoltage (feedbackVoltage);
+        const auto impedances = R.getPortImpedances();
+        R.restoreWaves ({feedbackVoltage + R.wdf.R * current,
+                        input + impedances[0] * current, negativeInput, 0,
+                        feedbackVoltage - R.wdf.R * current,
+                        input - impedances[0] * current, negativeInput, 2 * output});
+        return output;
+    }
+
+    static constexpr double biasResistance = 470.0e3;
+    static constexpr double loadResistance = 1.0e6;
+    static constexpr double opAmpGain = 100.0;
+    static constexpr double opAmpInputResistance = 1.0e9;
+    static constexpr double opAmpOutputResistance = double(1.0e-1f);
+
     // Port B
     wdft::CapacitiveVoltageSourceT<double> Vin_C3 { 470.0e-9f };
-    wdft::ResistiveVoltageSourceT<double> R4 { 470.0e3f };
+    wdft::ResistiveVoltageSourceT<double> R4 { biasResistance };
     wdft::WDFParallelT<double, decltype (Vin_C3), decltype (R4)> P1 { Vin_C3, R4 };
 
     // Port C
@@ -47,16 +106,16 @@ public:
     wdft::ResistiveCapacitiveVoltageSourceT<double> R5_R6_C5 { R5 + R6, 100.0e-9f };
 
     // Port D
-    wdft::ResistorT<double> RL { 1.0e6f };
+    wdft::ResistorT<double> RL { loadResistance };
 
     struct ImpedanceCalc
     {
         template <typename RType>
         static double calcImpedance (RType& R)
         {
-            constexpr double Ag = 100.0f; // op-amp gain
-            constexpr double Ri = 1.0e9f; // op-amp input impedance
-            constexpr double Ro = 1.0e-1f; // op-amp output impedance
+            constexpr double Ag = opAmpGain;
+            constexpr double Ri = opAmpInputResistance;
+            constexpr double Ro = opAmpOutputResistance;
 
             const auto [Rb, Rc, Rd] = R.getPortImpedances();
 
@@ -82,5 +141,8 @@ public:
     wdft::DiodePairT<double, decltype (P1), wdft::DiodeQuality::Best, OmegaProvider> diodes { P1, 5.241435962608312e-10f, 0.07877217375325735f };
 
 private:
-
+    // Controls and sample rate invalidate the operating point, audio history
+    // does not. Repeated bypass/unbypass need not solve it again.
+    bool dcReady = false;
+    double dcFeedbackVoltage = 0;
 };

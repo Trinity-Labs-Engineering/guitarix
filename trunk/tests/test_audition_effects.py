@@ -29,6 +29,11 @@ class AuditionEffectsTests(unittest.TestCase):
         result = subprocess.run([str(self.executable)], capture_output=True, text=True, timeout=180)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_cat_zero_input_activation_with_current_controls(self):
+        result = subprocess.run([str(self.executable), '--mouse-startup'],
+                                capture_output=True, text=True, timeout=180)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_houston_control_contract(self):
         catalog = TRUNK.parents[1] / 'houston/models/objects/base/lib/pytarix/models/pedals/lib/Audition.json'
         if not catalog.exists():

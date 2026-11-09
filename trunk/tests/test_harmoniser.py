@@ -145,6 +145,29 @@ class HarmoniserTests(unittest.TestCase):
             for block in (1,37,257,1111):
                 np.testing.assert_allclose(self.render(dual=dual,kind=2,dry=30,block=block,inplace=1),expected,atol=3e-6)
 
+    def test_reset_mid_note_has_no_delayed_history_edge(self):
+        # Empty delay history meets a nonzero held note after a reset. The
+        # moving tap may encounter this boundary after the output fade ended;
+        # starting every fixture at a sine zero crossing hid the discontinuity.
+        # render() also repeats reset after signal and checks RT allocations.
+        for rate in (44100, 48000, 96000):
+            for dual in (0, 1):
+                for interval in (-7, 7):
+                    for phase in (.125, .25, .625, .75):
+                        with self.subTest(rate=rate, dual=dual,
+                                          interval=interval, phase=phase):
+                            angle = 2*np.pi*(50*np.arange(2*rate)/rate+phase)
+                            audio = .05*(np.sin(angle)+.35*np.sin(2*angle)
+                                         +.15*np.sin(3*angle))/1.5
+                            wet = self.render(rate=rate, dual=dual, interval=interval,
+                                              interval2=interval, audio=audio,
+                                              tonic=7, mode=5, dry=0, inplace=1)
+                            # At these bass pitches a one-sample history step is
+                            # far above ordinary waveform curvature, including
+                            # the first wet attack and subsequent splice fades.
+                            curvature = np.max(np.abs(np.diff(wet[:rate//2], n=2)))
+                            self.assertLess(curvature, .003*48000/rate)
+
     def test_chord_is_shifted_from_its_lowest_note(self):
         # C major chord -> a major third shift selected from low C.
         rate=48000
