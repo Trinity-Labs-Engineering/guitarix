@@ -27,6 +27,7 @@ struct Plugin {
     bool on = true;
     PluginDef* get_pdef() { return &definition; }
     void set_on_off(bool value) { on = value; }
+    bool get_rt_on_off() const { return on; }
     void commit_rt_scene_state() {}
 };
 struct stringcomp {
@@ -46,6 +47,7 @@ public:
     bool next_commit_needs_ramp = false;
     bool set_plugin_list(const list<Plugin*>& plugins);
     void clear_module_states();
+    void clear_route_states();
     bool has_pending_module_list() const { return pending_module_list; }
     void set_latch() { ++publications; }
     void wait_latch() { ++lifetime_waits; }
@@ -150,6 +152,16 @@ int main() {
     rejected.definition.clear_state = initialize;
     chain.clear_module_states();
     assert(first.definition.initialization_count == 2);
+    assert(second.definition.initialization_count == 2);
+    assert(rejected.definition.initialization_count == 1);
+
+    // Route changes clear active signal history without invoking activation,
+    // including lazy processors whose activation would restart a worker.
+    first.on = true;
+    second.on = false;
+    first.definition.activate_plugin = reject_activation;
+    chain.clear_route_states();
+    assert(first.definition.initialization_count == 3);
     assert(second.definition.initialization_count == 2);
     assert(rejected.definition.initialization_count == 1);
 

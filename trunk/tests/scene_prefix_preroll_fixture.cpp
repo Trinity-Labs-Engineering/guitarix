@@ -7,6 +7,7 @@
 #include <iostream>
 #include <vector>
 #include "gx_scene_input_history.h"
+#include "gx_route_input_gate.h"
 
 using gx_engine::SceneInputHistory;
 constexpr unsigned int PGNI_DYN_POSITION = 0x10000;
@@ -29,6 +30,7 @@ struct monochain_data {
 class MonoModuleChain {
 public:
     SceneInputHistory scene_input_history;
+    gx_engine::RouteInputGate route_input_gate;
     std::uintptr_t history_upstream_signature = 0;
     std::vector<monochain_data> nodes;
     unsigned int input_cursor = 0;

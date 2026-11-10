@@ -59,6 +59,7 @@ struct CmdConnection::methodnames;
 "jack_deactivate", true
 "jack_activate", true
 "jack_status", true
+"route_input_hold", true
 "set_jack_insert", false
 
 /* Parameter, ParamMap */

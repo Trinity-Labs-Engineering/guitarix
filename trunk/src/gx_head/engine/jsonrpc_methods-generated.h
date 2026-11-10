@@ -18,6 +18,7 @@ enum jsonrpc_method {
 	RPCM_jack_deactivate,
 	RPCM_jack_activate,
 	RPCM_jack_status,
+	RPCM_route_input_hold,
 	RPNM_set_jack_insert,
 	RPCM_get,
 	RPNM_set,

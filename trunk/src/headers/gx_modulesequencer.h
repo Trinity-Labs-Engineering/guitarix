@@ -22,6 +22,7 @@
 
 #include "gx_rt_cycle_latch.h"
 #include "gx_scene_input_history.h"
+#include "gx_route_input_gate.h"
 
 namespace gx_engine {
 
@@ -87,6 +88,8 @@ public:
     bool set_plugin_list(const list<Plugin*> &p);
     bool has_pending_module_list() const { return pending_module_list; }
     void clear_module_states();
+    void clear_route_states();
+    void resume_route_processing(RampMode mode) { set_ramp_mode(mode); }
     inline void post_rt_started() { rt_start_latch.notify_rt(); } // RT
     inline void post_rt_finished() { rt_cycle_latch.notify_rt(); } // RT
     bool wait_rt_started_until(const timespec& deadline);
@@ -303,13 +306,19 @@ class MonoModuleChain: public ThreadSafeChainPointer<monochain_data> {
     SceneInputHistory scene_input_history;
     std::uintptr_t history_upstream_signature = 0;
 public:
+    RouteInputGate route_input_gate;
     MonoModuleChain(): ThreadSafeChainPointer<monochain_data>() {}
     void set_samplerate(int samplerate) {
         ProcessingChainBase::set_samplerate(samplerate);
         scene_input_history.set_samplerate(samplerate);
+        route_input_gate.set_samplerate(samplerate);
     }
     void clear_module_states() {
         ProcessingChainBase::clear_module_states();
+        scene_input_history.invalidate_control();
+    }
+    void clear_route_states() {
+        ProcessingChainBase::clear_route_states();
         scene_input_history.invalidate_control();
     }
     bool preroll_scene_prefix(bool externally_muted, ScenePrefixPrerollStatus& status);
@@ -319,6 +328,11 @@ public:
 
 class StereoModuleChain: public ThreadSafeChainPointer<stereochain_data> {
 public:
+    RouteInputGate route_output_gate;
+    void set_samplerate(int samplerate) {
+        ProcessingChainBase::set_samplerate(samplerate);
+        route_output_gate.set_samplerate(samplerate);
+    }
     StereoModuleChain(): ThreadSafeChainPointer<stereochain_data>() {}
 #ifndef GUITARIX_AS_PLUGIN
     void process(int count, float *input1, float *input2, float *output1, float *output2);

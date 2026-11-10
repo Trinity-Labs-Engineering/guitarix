@@ -1487,6 +1487,68 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.end_object();
     }
 
+    FUNCTION(route_input_hold) {
+        if (params.size() != 1 || (params[0]->getInt() != 0 && params[0]->getInt() != 1))
+            throw RpcError(-32602, "expected hold flag (0 or 1)");
+        auto& chain = serv.jack.get_engine().mono_chain;
+        auto& stereo = serv.jack.get_engine().stereo_chain;
+        if (chain.is_stopped() || chain.is_down_dead() ||
+            stereo.is_stopped() || stereo.is_down_dead())
+            throw RpcError(-32001, "Route input gate requires an active audio callback");
+        const bool hold = params[0]->getInt() != 0;
+        timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_nsec += 100000000;
+        if (deadline.tv_nsec >= 1000000000) {
+            ++deadline.tv_sec;
+            deadline.tv_nsec -= 1000000000;
+        }
+        const auto fade = [&](gx_engine::RouteInputGate& gate,
+                              gx_engine::ProcessingChainBase& callback, bool close) {
+            const unsigned token = gate.request(close);
+            while (!gate.ready(token)) {
+                callback.set_latch();
+                if (!callback.wait_rt_finished_until(deadline))
+                    throw RpcError(-32001, "Route audio gate callback timed out");
+            }
+        };
+        fade(chain.route_input_gate, chain, hold);
+        if (hold) {
+            fade(stereo.route_output_gate, stereo, true);
+            const auto mono_mode = chain.get_ramp_mode();
+            const auto stereo_mode = stereo.get_ramp_mode();
+            chain.set_down_dead();
+            stereo.set_down_dead();
+            chain.set_latch();
+            stereo.set_latch();
+            try {
+                if (!chain.wait_rt_finished_until(deadline) ||
+                    !stereo.wait_rt_finished_until(deadline))
+                    throw RpcError(-32001, "Route history ownership timed out");
+                // A moved loop must not replay the previous pedal's amplified
+                // history into that pedal again. No plugin activation, allocation,
+                // model reload or worker restart is needed to clear resident state.
+                chain.clear_route_states();
+                stereo.clear_route_states();
+            } catch (...) {
+                // Keep both gates closed, but allow a later route retry to
+                // reach its callback barrier rather than stranding down_dead.
+                chain.resume_route_processing(mono_mode);
+                stereo.resume_route_processing(stereo_mode);
+                throw;
+            }
+            chain.resume_route_processing(mono_mode);
+            stereo.resume_route_processing(stereo_mode);
+            // Run zeros through the resident chain during the relay operation.
+            // Both converter ramps stay closed until its acknowledgement.
+        } else {
+            fade(stereo.route_output_gate, stereo, false);
+        }
+        jw.begin_object();
+        jw.write_bool_kv("held", hold);
+        jw.end_object();
+    }
+
     FUNCTION(jack_deactivate) {
         if (!params.empty()) {
             throw RpcError(-32602, "expected no parameters");

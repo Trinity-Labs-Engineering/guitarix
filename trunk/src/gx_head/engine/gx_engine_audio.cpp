@@ -329,6 +329,16 @@ void ProcessingChainBase::clear_module_states() {
     }
 }
 
+void ProcessingChainBase::clear_route_states() {
+    // Both callbacks are parked and the DAC ramp is closed. Clear only active
+    // resident state: activation hooks may allocate or restart convolver workers.
+    for (Plugin* plugin : modules) {
+        PluginDef* pd = plugin->get_pdef();
+        if (plugin->get_rt_on_off() && pd->clear_state)
+            pd->clear_state(pd);
+    }
+}
+
 void ProcessingChainBase::release() {
     wait_latch();
     for (list<Plugin*>::const_iterator p = to_release.begin(); p != to_release.end(); ++p) {
@@ -486,6 +496,7 @@ void __rt_func MonoModuleChain::process(int count, float *input, float *output) 
 	return;
     }
     memcpy(output, input, count*sizeof(float));
+    route_input_gate.process(output, count);
     // A small set of input-dependent resident processors (currently the
     // dynamics pair) must observe the live signal even while their audible
     // output is bypassed. Reuse one stack buffer for every such processor;
@@ -609,6 +620,7 @@ void __rt_func StereoModuleChain::process(int count, float *input1, float *input
 	(p->func)(count, output1, output2, output1, output2, p->plugin);
     }
 #endif
+    route_output_gate.process(output1, count, output2);
     if (rm == ramp_mode_off) {
 	return;
     }
