@@ -568,6 +568,8 @@ class CabinetConvolver: public FixedBaseConvolver {
 private:
     int current_cab;
     float level;
+    float output_level;
+    float output_gain;
     int cabinet;
     float bass;
     float treble;

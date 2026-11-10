@@ -107,6 +107,7 @@ int main() {
             methods = source[begin:end].replace(name, "Cabinet")
             fixture = r"""
 #include <cassert>
+#include <cmath>
 struct CabDesc { int ir_count = 1, ir_sr = 96000; float ir_data[1]; };
 struct Entry { CabDesc* data; };
 Entry& getCabEntry(int index) {
@@ -116,6 +117,7 @@ Entry& getCabEntry(int index) {
 }
 struct Cabinet {
     int cabinet = 0, current_cab = 0, syncs = 0, starts = 0;
+    float output_level = -20, output_gain = 1;
     bool start_ok = true;
     struct Conv {
         bool ready = true, load_ok = true;
@@ -169,6 +171,8 @@ int main() {
     assert(cab.current_cab == 1);
 }
 """
+            if not stereo:
+                fixture = fixture.replace("assert(cab.start());", "assert(cab.start()); assert(std::abs(cab.output_gain - .1f) < 1.e-6f);")
             with self.subTest(stereo=stereo), tempfile.TemporaryDirectory(prefix="gx-cabinet-cache-") as directory:
                 cpp = Path(directory) / "fixture.cpp"
                 binary = Path(directory) / "fixture"

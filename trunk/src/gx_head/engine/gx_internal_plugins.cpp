@@ -1454,6 +1454,8 @@ CabinetConvolver::CabinetConvolver(EngineControl& engine, sigc::slot<void> sync,
     FixedBaseConvolver(engine, sync, resamp),
     current_cab(-1),
     level(0),
+    output_level(0),
+    output_gain(1),
     cabinet(0),
     bass(0),
     treble(0),
@@ -1518,6 +1520,8 @@ bool CabinetConvolver::do_update() {
 }
 
 bool CabinetConvolver::start(bool force) {
+    // Activation/scene preparation must not resume at a stale bypassed level.
+    output_gain = std::pow(10.0f, 0.05f * output_level);
     if (force) {
         current_cab = -1;
     }
@@ -1551,12 +1555,23 @@ void CabinetConvolver::run_cab_conf(int count, float *input0, float *output0, Pl
     }
     self.smp.down(buf, output0);
     self.impf.compute(count,output0,output0);
+    // Independent, linear post-IR trim. Keep the legacy Level/tone transfer
+    // intact; hosts can calibrate IR loudness without driving earlier stages.
+    // Ramp over this block so interactive edits do not step the waveform.
+    const float target = std::pow(10.0f, 0.05f * self.output_level);
+    const float previous = self.output_gain;
+    const float step = count > 0 ? (target - previous) / count : 0.0f;
+    for (int i = 0; i < count; ++i) {
+        output0[i] *= previous + step * (i + 1);
+    }
+    self.output_gain = target;
 }
 
 int CabinetConvolver::register_cab(const ParamReg& reg) {
     CabinetConvolver& cab = *static_cast<CabinetConvolver*>(reg.plugin);
     reg.registerIntVar("cab.select", "select", "B", "", &cab.cabinet, 0, 0, 0, cab.cab_names);
     reg.registerFloatVar("cab.Level", N_("Level"),  "S", N_("Level"), &cab.level,  1.0, 0.5, 5.0, 0.5, 0);
+    reg.registerFloatVar("cab.output", N_("Output"), "S", N_("Output trim (dB)"), &cab.output_level, 0.0, -60.0, 40.0, 0.01, 0);
     reg.registerFloatVar("cab.bass", N_("Bass"),   "S", N_("Bass"), &cab.bass,   0.0, -10.0, 10.0, 0.5, 0);
     reg.registerFloatVar("cab.treble", N_("Treble"), "S", N_("Treble"), &cab.treble, 0.0, -10.0, 10.0, 0.5, 0);
     cab.impf.register_par(reg);
