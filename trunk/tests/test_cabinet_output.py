@@ -11,7 +11,7 @@ TRUNK = Path(__file__).resolve().parents[1]
 class CabinetOutputTests(unittest.TestCase):
     def test_trim_is_post_tone_linear_ramped_and_legacy_neutral(self):
         source = (TRUNK / "src/gx_head/engine/gx_internal_plugins.cpp").read_text()
-        methods = source.split("void CabinetConvolver::run_cab_conf(", 1)[1].split("//// STEREO", 1)[0]
+        methods = "void CabinetConvolver::suspend_scene_smoother_for_control(" + source.split("void CabinetConvolver::suspend_scene_smoother_for_control(", 1)[1].split("//// STEREO", 1)[0]
         fixture = r'''
 #include <algorithm>
 #include <atomic>
@@ -42,7 +42,7 @@ struct CabinetConvolver : PluginDef {
     float level = 1, output_level = 0, output_gain = 1, bass = 0, treble = 0;
     int cabinet = 0;
     value_pair* cab_names = nullptr;
-    std::atomic<bool> scene_update_suspended{false};
+    std::atomic<bool> scene_update_suspended{false}, scene_gain_suspended{false}, scene_gain_pending{false};
     EngineControl engine;
     // Stand-ins for resampling/convolution; the actual tone DSP and complete
     // callback below run unchanged. Track the input to detect upstream gain.
@@ -63,13 +63,18 @@ struct CabinetConvolver : PluginDef {
     cabinet_impulse_former::Dsp impf;
     static void run_cab_conf(int, float*, float*, PluginDef*);
     static int register_cab(const ParamReg&);
+    void suspend_scene_smoother_for_control();
+    void finish_scene_smoother_control(bool);
+    void request_scene_smoother_snap();
+    bool is_scene_smoother_snap_pending();
+    bool finish_scene_smoother_snap();
     CabinetConvolver() {
         ParamReg reg{this, reg_float, reg_int};
         register_cab(reg);
         impf.init(48000);
     }
 };
-void CabinetConvolver::run_cab_conf(''' + methods + r'''
+''' + methods + r'''
 int main() {
     CabinetConvolver check;
     auto p = parameters.at("cab.output");
@@ -102,6 +107,31 @@ int main() {
                     assert(std::abs(output[i] - reference[i] * target) < 1.e-4f);
                     if (db == 0) assert(output[i] == reference[i]);
                 }
+                // A gain-only scene on the same cabinet must be settled on
+                // its first sample, with either control ownership or RT fallback.
+                for (bool rt : {false, true}) {
+                    cab.output_gain = 100.f;
+                    cab.output_level = -60.f;
+                    if (rt) {
+                        cab.request_scene_smoother_snap();
+                        assert(cab.is_scene_smoother_snap_pending());
+                    } else {
+                        cab.suspend_scene_smoother_for_control();
+                        cab.finish_scene_smoother_control(false);
+                        assert(cab.output_gain == 100.f); // failed ownership
+                        cab.suspend_scene_smoother_for_control();
+                        cab.finish_scene_smoother_control(true);
+                    }
+                    cab.impf.clear_state_f();
+                    output = input;
+                    CabinetConvolver::run_cab_conf(n, output.data(), output.data(), &cab);
+                    assert(cab.finish_scene_smoother_snap());
+                    for (int i = 0; i < n; ++i)
+                        assert(std::abs(output[i] - reference[i] * .001f) < 1.e-6f);
+                }
+                cab.request_scene_smoother_snap();
+                assert(!cab.finish_scene_smoother_snap()); // no callback: cancel
+                assert(!cab.is_scene_smoother_snap_pending());
                 cab.scene_update_suspended = true;
                 std::fill(output.begin(), output.end(), 0);
                 CabinetConvolver::run_cab_conf(n, input.data(), output.data(), &cab);

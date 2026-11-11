@@ -151,6 +151,7 @@ public:
 
 class SceneOutputLevel : public PluginDef {
 private:
+    const bool mono;
     volatile int scene_smoother_snap_pending;
     volatile int scene_smoother_control_suspended;
     float fVslider0;
@@ -166,9 +167,11 @@ private:
     static void init_static(unsigned int sample_rate, PluginDef*);
     static void compute_static(int count, float *input0, float *input1,
                                float *output0, float *output1, PluginDef*);
+    static void compute_mono_static(int count, float *input, float *output, PluginDef*);
+    static int load_gain_ui(const UiBuilder& builder, int format);
     static int register_params_static(const ParamReg& reg);
 public:
-    SceneOutputLevel();
+    explicit SceneOutputLevel(bool mono = false);
     void suspend_scene_smoother_for_control();
     void finish_scene_smoother_control(bool preset);
     void request_scene_smoother_snap();
@@ -477,9 +480,26 @@ public:
  ** class ConvolverMonoAdapter
  */
 
+// Scene-aware equivalent of jconv_post_mono; keep its interactive transfer.
+class SceneConvolverMonoPost {
+    float gain_db = 0.0f;
+    float wet_dry = 100.0f;
+    double gain_state = 0.0;
+    std::atomic<bool> suspended{false};
+    std::atomic<bool> snap_pending{false};
+public:
+    int register_par(const ParamReg& reg);
+    void compute(int count, float* dry, float* wet, float* output);
+    void suspend_scene_smoother_for_control();
+    void finish_scene_smoother_control(bool preset);
+    void request_scene_smoother_snap();
+    bool is_scene_smoother_snap_pending();
+    bool finish_scene_smoother_snap();
+};
+
 class ConvolverMonoAdapter: public ConvolverAdapter {
 private:
-    jconv_post_mono::Dsp jc_post_mono;
+    SceneConvolverMonoPost jc_post_mono;
     // wrapper for the rack order function pointers
     static void convolver_init(unsigned int samplingFreq, PluginDef *pdef);
     static int activate(bool start, PluginDef *pdef);
@@ -489,6 +509,11 @@ private:
 public:
     ConvolverMonoAdapter(EngineControl& engine, sigc::slot<void> sync);
     ~ConvolverMonoAdapter();
+    void suspend_scene_smoother_for_control() { jc_post_mono.suspend_scene_smoother_for_control(); }
+    void finish_scene_smoother_control(bool preset) { jc_post_mono.finish_scene_smoother_control(preset); }
+    void request_scene_smoother_snap() { jc_post_mono.request_scene_smoother_snap(); }
+    bool is_scene_smoother_snap_pending() { return jc_post_mono.is_scene_smoother_snap_pending(); }
+    bool finish_scene_smoother_snap() { return jc_post_mono.finish_scene_smoother_snap(); }
 };
 
 
@@ -570,6 +595,8 @@ private:
     float level;
     float output_level;
     float output_gain;
+    std::atomic<bool> scene_gain_suspended{false};
+    std::atomic<bool> scene_gain_pending{false};
     int cabinet;
     float bass;
     float treble;
@@ -587,6 +614,11 @@ public:
     CabinetConvolver(EngineControl& engine, sigc::slot<void> sync,
        gx_resample::BufferResampler& resamp);
     ~CabinetConvolver();
+    void suspend_scene_smoother_for_control();
+    void finish_scene_smoother_control(bool preset);
+    void request_scene_smoother_snap();
+    bool is_scene_smoother_snap_pending();
+    bool finish_scene_smoother_snap();
     bool settle_muted_scene() {
         return FixedBaseConvolver::settle_muted_scene(cabinet_changed());
     }

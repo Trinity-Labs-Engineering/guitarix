@@ -233,6 +233,10 @@ class SceneSwitchingContractTests(unittest.TestCase):
 
         for parameter_id in (
             "amp.out_master",
+            "gain.gain",
+            "cab.output",
+            "jconv_mono.gain",
+            "jconv_mono.wet_dry",
             "nam.input",
             "nam.output",
             "snam.input",
@@ -403,6 +407,10 @@ class SceneSwitchingContractTests(unittest.TestCase):
         self.assertIn("neural_amp.suspend_scene_smoother", coordinator)
         self.assertIn("sneural_amp.suspend_scene_smoother", coordinator)
         self.assertIn("mneural_amp.suspend_scene_smoother", coordinator)
+        self.assertIn("scene_rack_gain.suspend_scene_smoother", coordinator)
+        self.assertIn("cabinet.suspend_scene_smoother", coordinator)
+        self.assertIn("mono_convolver.suspend_scene_smoother", coordinator)
+        self.assertIn("ir_gain_settled", scene)
         self.assertIn("gx_system::atomic_set(&ready, 0);", neural)
         self.assertIn("scene_smoother_control_suspended", output)
 
@@ -496,7 +504,7 @@ class SceneSwitchingContractTests(unittest.TestCase):
             "scene_audio_ready = scene_audio_status.finished()",
             scene,
         )
-        for smoother in ("output", "nam", "snam", "mnam"):
+        for smoother in ("output", "nam", "snam", "mnam", "rack", "cab"):
             self.assertIn(f"{smoother}_gain_settled", scene)
         self.assertIn("finish_scene_smoother_snap()", scene)
 

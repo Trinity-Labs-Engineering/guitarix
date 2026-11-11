@@ -27,6 +27,7 @@
 
 #include "engine.h"
 #include "gx_faust_support.h"
+#include "gx_faust_plugins.h"
 
 namespace gx_engine {
 
@@ -144,23 +145,23 @@ void OutPutGate::outputgate_compute(int count, float *input, float *output, Plug
  ** guard is already muted.
  */
 
-SceneOutputLevel::SceneOutputLevel()
-    : PluginDef(), scene_smoother_snap_pending(0),
+SceneOutputLevel::SceneOutputLevel(bool mono)
+    : PluginDef(), mono(mono), scene_smoother_snap_pending(0),
       scene_smoother_control_suspended(0), fVslider0(0.0f) {
     version = PLUGINDEF_VERSION;
     flags = 0;
     groups = 0;
-    id = "gx_outputlevel";
-    name = N_("gx_outputlevel");
-    description = "";
-    category = "";
+    id = mono ? "gain" : "gx_outputlevel";
+    name = mono ? N_("Volume") : N_("gx_outputlevel");
+    description = mono ? N_("simple volume control") : "";
+    category = mono ? N_("Tone Control") : "";
     shortname = "";
-    mono_audio = 0;
-    stereo_audio = compute_static;
+    mono_audio = mono ? compute_mono_static : nullptr;
+    stereo_audio = mono ? nullptr : compute_static;
     set_samplerate = init_static;
     activate_plugin = 0;
     register_params = register_params_static;
-    load_ui = 0;
+    load_ui = mono ? load_gain_ui : nullptr;
     clear_state = clear_state_f_static;
     delete_instance = 0;
     clear_state_f();
@@ -228,7 +229,7 @@ void always_inline SceneOutputLevel::compute(
         if (output0 != input0) {
             memcpy(output0, input0, count * sizeof(float));
         }
-        if (output1 != input1) {
+        if (output1 && output1 != input1) {
             memcpy(output1, input1, count * sizeof(float));
         }
         return;
@@ -244,7 +245,7 @@ void always_inline SceneOutputLevel::compute(
     for (int i = 0; i < count; ++i) {
         fRec0[0] = slow + 0.999 * fRec0[1];
         output0[i] = float(double(input0[i]) * fRec0[0]);
-        output1[i] = float(double(input1[i]) * fRec0[0]);
+        if (output1) output1[i] = float(double(input1[i]) * fRec0[0]);
         fRec0[1] = fRec0[0];
     }
 }
@@ -257,6 +258,11 @@ void __rt_func SceneOutputLevel::compute_static(
 }
 
 int SceneOutputLevel::register_par(const ParamReg& reg) {
+    if (mono) {
+        reg.registerFloatVar("gain.gain", N_("Gain"), "S", N_("gain (dB)"),
+            &fVslider0, 0.0, -4e+01, 4e+01, 0.1, 0);
+        return 0;
+    }
     reg.registerFloatVar(
         "amp.out_master", N_("Level"), "S", N_("Overall Rack output Volume"),
         &fVslider0, 0.0, -5e+01, 4.0, 0.1, 0);
@@ -265,6 +271,21 @@ int SceneOutputLevel::register_par(const ParamReg& reg) {
 
 int SceneOutputLevel::register_params_static(const ParamReg& reg) {
     return static_cast<SceneOutputLevel*>(reg.plugin)->register_par(reg);
+}
+
+void __rt_func SceneOutputLevel::compute_mono_static(
+    int count, float *input, float *output, PluginDef *p) {
+    static_cast<SceneOutputLevel*>(p)->compute(count, input, nullptr, output, nullptr);
+}
+
+int SceneOutputLevel::load_gain_ui(const UiBuilder& b, int form) {
+    // Keep both original desktop layouts without duplicating the generated UI.
+    PluginDef* legacy = gx_effects::gain::plugin();
+    UiBuilder builder = b;
+    builder.plugin = legacy;
+    const int result = legacy->load_ui(builder, form);
+    legacy->delete_instance(legacy);
+    return result;
 }
 
 /****************************************************************
@@ -1021,6 +1042,60 @@ int ConvolverStereoAdapter::jconv_load_ui(const UiBuilder& builder, int format) 
  ** class ConvolverMonoAdapter
  */
 
+int SceneConvolverMonoPost::register_par(const ParamReg& reg) {
+    reg.registerFloatVar("jconv_mono.gain", N_("Gain"), "S",
+        N_("gain trim for processed signal (unit: dB)"), &gain_db,
+        0.0, -20.0, 20.0, 0.1, 0);
+    reg.registerFloatVar("jconv_mono.wet_dry", N_("wet/dry"), "S",
+        N_("percentage of processed signal in output signal"), &wet_dry,
+        100.0, 0.0, 100.0, 1.0, 0);
+    return 0;
+}
+
+void SceneConvolverMonoPost::suspend_scene_smoother_for_control() {
+    suspended.store(true, std::memory_order_release);
+}
+
+void SceneConvolverMonoPost::finish_scene_smoother_control(bool preset) {
+    if (preset) {
+        gain_state = 1000.0 * (0.0010000000000000009 *
+            std::pow(10.0, 0.05 * double(gain_db)));
+        snap_pending.store(false, std::memory_order_release);
+    }
+    suspended.store(false, std::memory_order_release);
+}
+
+void SceneConvolverMonoPost::request_scene_smoother_snap() {
+    snap_pending.store(true, std::memory_order_release);
+}
+
+bool SceneConvolverMonoPost::is_scene_smoother_snap_pending() {
+    return snap_pending.load(std::memory_order_acquire);
+}
+
+bool SceneConvolverMonoPost::finish_scene_smoother_snap() {
+    return !snap_pending.exchange(false, std::memory_order_acq_rel);
+}
+
+void SceneConvolverMonoPost::compute(int count, float* dry, float* wet, float* output) {
+    // Only post-gain is suspended; the convolution history keeps advancing.
+    if (suspended.load(std::memory_order_acquire)) {
+        if (dry != output) memcpy(output, dry, count * sizeof(float));
+        return;
+    }
+    const double slow = 0.0010000000000000009 * std::pow(10.0, 0.05 * double(gain_db));
+    const double mix = 0.01 * double(wet_dry);
+    const double direct = 1.0 - mix;
+    if (snap_pending.load(std::memory_order_acquire)) {
+        gain_state = 1000.0 * slow;
+        snap_pending.store(false, std::memory_order_release);
+    }
+    for (int i = 0; i < count; ++i) {
+        gain_state = slow + 0.999 * gain_state;
+        output[i] = float(direct * double(dry[i]) + mix * double(wet[i]) * gain_state);
+    }
+}
+
 ConvolverMonoAdapter::ConvolverMonoAdapter(
     EngineControl& engine_, sigc::slot<void> sync_)
     : ConvolverAdapter(engine_, sync_) {
@@ -1542,6 +1617,30 @@ void CabinetConvolver::check_update() {
     }
 }
 
+void CabinetConvolver::suspend_scene_smoother_for_control() {
+    scene_gain_suspended.store(true, std::memory_order_release);
+}
+
+void CabinetConvolver::finish_scene_smoother_control(bool preset) {
+    if (preset) {
+        output_gain = std::pow(10.0f, 0.05f * output_level);
+        scene_gain_pending.store(false, std::memory_order_release);
+    }
+    scene_gain_suspended.store(false, std::memory_order_release);
+}
+
+void CabinetConvolver::request_scene_smoother_snap() {
+    scene_gain_pending.store(true, std::memory_order_release);
+}
+
+bool CabinetConvolver::is_scene_smoother_snap_pending() {
+    return scene_gain_pending.load(std::memory_order_acquire);
+}
+
+bool CabinetConvolver::finish_scene_smoother_snap() {
+    return !scene_gain_pending.exchange(false, std::memory_order_acq_rel);
+}
+
 void CabinetConvolver::run_cab_conf(int count, float *input0, float *output0, PluginDef *p) {
     CabinetConvolver& self = *static_cast<CabinetConvolver*>(p);
     if (self.scene_update_suspended.load(std::memory_order_acquire)) {
@@ -1555,10 +1654,17 @@ void CabinetConvolver::run_cab_conf(int count, float *input0, float *output0, Pl
     }
     self.smp.down(buf, output0);
     self.impf.compute(count,output0,output0);
+    // The shared scene barrier owns only the trim accumulator; convolution
+    // history continues to advance while the external output guard is held.
+    if (self.scene_gain_suspended.load(std::memory_order_acquire)) return;
     // Independent, linear post-IR trim. Keep the legacy Level/tone transfer
     // intact; hosts can calibrate IR loudness without driving earlier stages.
     // Ramp over this block so interactive edits do not step the waveform.
     const float target = std::pow(10.0f, 0.05f * self.output_level);
+    if (self.scene_gain_pending.load(std::memory_order_acquire)) {
+        self.output_gain = target;
+        self.scene_gain_pending.store(false, std::memory_order_release);
+    }
     const float previous = self.output_gain;
     const float step = count > 0 ? (target - previous) / count : 0.0f;
     for (int i = 0; i < count; ++i) {

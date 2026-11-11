@@ -86,6 +86,7 @@ public:
     NoiseGate noisegate;
     OutPutGate outputgate;
     SceneOutputLevel scene_outputlevel;
+    SceneOutputLevel scene_rack_gain;
     MonoMute monomute;
     StereoMute stereomute;
     TunerAdapter tuner;
@@ -124,7 +125,8 @@ public:
     // transaction. Returns false without touching accumulator state if a
     // genuinely stalled audio callback prevents safe ownership.
     bool preset_muted_scene_smoothers(bool output_gain, bool nam_gain,
-                                      bool snam_gain, bool mnam_gain);
+                                      bool snam_gain, bool mnam_gain,
+                                      bool rack_gain, bool cab_gain, bool ir_gain);
     void ladspaloader_update_plugins();
     sigc::signal<void,Plugin*,PluginChange::pc>& signal_plugin_changed() { return plugin_changed; }
     std::vector<Glib::ustring>& get_file_list_by_id(const std::string& id);

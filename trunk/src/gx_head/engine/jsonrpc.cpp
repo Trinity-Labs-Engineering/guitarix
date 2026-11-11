@@ -590,6 +590,9 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         bool snap_nam_gain_rt = false;
         bool snap_snam_gain_rt = false;
         bool snap_mnam_gain_rt = false;
+        bool snap_rack_gain = false;
+        bool snap_cab_gain = false;
+        bool snap_ir_gain = false;
         if (params.size() & 1) {
             throw RpcError(-32602, "Invalid param -- array length must be even");
         }
@@ -661,6 +664,13 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
 
             if (externally_muted) {
                 snap_output_gain = snap_output_gain || attr == "amp.out_master";
+                snap_rack_gain = snap_rack_gain ||
+                    attr == "gain.gain" || attr == "gain.on_off";
+                snap_cab_gain = snap_cab_gain ||
+                    attr == "cab.output" || attr == "cab.on_off";
+                snap_ir_gain = snap_ir_gain ||
+                    attr == "jconv_mono.gain" || attr == "jconv_mono.wet_dry" ||
+                    attr == "jconv_mono.on_off";
                 snap_nam_gain_rt = snap_nam_gain_rt ||
                     attr == "nam.input" || attr == "nam.output" ||
                     attr == "nam.on_off";
@@ -692,6 +702,9 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         bool nam_gain_control_preset = false;
         bool snam_gain_control_preset = false;
         bool mnam_gain_control_preset = false;
+        bool rack_gain_control_preset = false;
+        bool cab_gain_control_preset = false;
+        bool ir_gain_control_preset = false;
         try {
             apply_parameter_set(params);
             nam_gain_preset = engine.neural_amp.finish_scene_parameter_batch();
@@ -717,11 +730,17 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             engine.sneural_amp.plugin.get_on_off();
         snap_mnam_gain_rt = snap_mnam_gain_rt &&
             engine.mneural_amp.plugin.get_on_off();
+        snap_rack_gain = snap_rack_gain &&
+            engine.pluginlist.lookup_plugin("gain")->get_on_off();
+        snap_cab_gain = snap_cab_gain && engine.cabinet.plugin.get_on_off();
+        snap_ir_gain = snap_ir_gain && engine.mono_convolver.plugin.get_on_off();
         const int requested_gain_snaps =
             static_cast<int>(snap_output_gain) +
             static_cast<int>(snap_nam_gain_rt) +
             static_cast<int>(snap_snam_gain_rt) +
-            static_cast<int>(snap_mnam_gain_rt);
+            static_cast<int>(snap_mnam_gain_rt) +
+            static_cast<int>(snap_rack_gain) + static_cast<int>(snap_cab_gain) +
+            static_cast<int>(snap_ir_gain);
         bool commit_ok = false;
         bool processing_topology_changed = false;
         bool rt_state_changed = false;
@@ -759,12 +778,16 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             scene_control_barrier_finished =
                 engine.preset_muted_scene_smoothers(
                     snap_output_gain, snap_nam_gain_rt,
-                    snap_snam_gain_rt, snap_mnam_gain_rt);
+                    snap_snam_gain_rt, snap_mnam_gain_rt,
+                    snap_rack_gain, snap_cab_gain, snap_ir_gain);
             if (scene_control_barrier_finished) {
                 output_gain_control_preset = snap_output_gain;
                 nam_gain_control_preset = snap_nam_gain_rt;
                 snam_gain_control_preset = snap_snam_gain_rt;
                 mnam_gain_control_preset = snap_mnam_gain_rt;
+                rack_gain_control_preset = snap_rack_gain;
+                cab_gain_control_preset = snap_cab_gain;
+                ir_gain_control_preset = snap_ir_gain;
                 output_gain_preset = output_gain_control_preset;
                 nam_gain_preset = nam_gain_preset || nam_gain_control_preset;
                 snam_gain_preset = snam_gain_preset || snam_gain_control_preset;
@@ -784,6 +807,12 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             snap_snam_gain_rt && !snam_gain_control_preset;
         const bool mnam_gain_rt_requested =
             snap_mnam_gain_rt && !mnam_gain_control_preset;
+        const bool rack_gain_rt_requested = snap_rack_gain && !rack_gain_control_preset;
+        const bool cab_gain_rt_requested = snap_cab_gain && !cab_gain_control_preset;
+        const bool ir_gain_rt_requested = snap_ir_gain && !ir_gain_control_preset;
+        if (rack_gain_rt_requested) engine.scene_rack_gain.request_scene_smoother_snap();
+        if (cab_gain_rt_requested) engine.cabinet.request_scene_smoother_snap();
+        if (ir_gain_rt_requested) engine.mono_convolver.request_scene_smoother_snap();
         if (output_gain_rt_requested) {
             engine.scene_outputlevel.request_scene_smoother_snap();
         }
@@ -810,7 +839,10 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         const bool mnam_gain_pending = mnam_gain_rt_requested &&
             engine.mneural_amp.is_scene_smoother_snap_pending();
         const bool mono_gain_pending =
-            nam_gain_pending || snam_gain_pending || mnam_gain_pending;
+            nam_gain_pending || snam_gain_pending || mnam_gain_pending ||
+            (rack_gain_rt_requested && engine.scene_rack_gain.is_scene_smoother_snap_pending()) ||
+            (cab_gain_rt_requested && engine.cabinet.is_scene_smoother_snap_pending()) ||
+            (ir_gain_rt_requested && engine.mono_convolver.is_scene_smoother_snap_pending());
         // Control callbacks and chain publication alone do not prove that the
         // new resident scene has reached audio. While Houston owns the hardware
         // mute, observe callback entry on both chains after publication. This
@@ -848,9 +880,19 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
             mnam_gain_settled =
                 engine.mneural_amp.finish_scene_smoother_snap();
         }
+        const bool rack_gain_settled = rack_gain_rt_requested
+            ? engine.scene_rack_gain.finish_scene_smoother_snap()
+            : !snap_rack_gain || rack_gain_control_preset;
+        const bool cab_gain_settled = cab_gain_rt_requested
+            ? engine.cabinet.finish_scene_smoother_snap()
+            : !snap_cab_gain || cab_gain_control_preset;
+        const bool ir_gain_settled = ir_gain_rt_requested
+            ? engine.mono_convolver.finish_scene_smoother_snap()
+            : !snap_ir_gain || ir_gain_control_preset;
         const bool gain_smoothers_settled =
             output_gain_settled && nam_gain_settled &&
-            snam_gain_settled && mnam_gain_settled;
+            snam_gain_settled && mnam_gain_settled &&
+            rack_gain_settled && cab_gain_settled && ir_gain_settled;
 
         gx_engine::ScenePrefixPrerollStatus scene_prefix_preroll;
         const bool scene_prefix_preroll_ready =
@@ -907,7 +949,10 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
                     << " snamGainSettled=" << (snam_gain_settled ? "true" : "false")
                     << " mnamGainRequested=" << (snap_mnam_gain_rt ? "true" : "false")
                     << " mnamGainPreset=" << (mnam_gain_preset ? "true" : "false")
-                    << " mnamGainSettled=" << (mnam_gain_settled ? "true" : "false");
+                    << " mnamGainSettled=" << (mnam_gain_settled ? "true" : "false")
+                    << " rackGainSettled=" << (rack_gain_settled ? "true" : "false")
+                    << " cabGainSettled=" << (cab_gain_settled ? "true" : "false")
+                    << " irGainSettled=" << (ir_gain_settled ? "true" : "false");
             gx_print_warning("scene switch", details.str());
             // -32001 means publication/activation itself is uncertain and
             // requires Houston's authoritative full reconciliation. -32002
@@ -945,7 +990,9 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_bool_kv(
             "gainSmoothersPreset",
             output_gain_preset || nam_gain_preset ||
-                snam_gain_preset || mnam_gain_preset);
+                snam_gain_preset || mnam_gain_preset ||
+                rack_gain_control_preset || cab_gain_control_preset || ir_gain_control_preset);
+        jw.write_kv("gainSmootherVersion", 3);
         jw.write_bool_kv("gainSmoothersSettled", gain_smoothers_settled);
         jw.write_bool_kv("audioReady", scene_audio_ready);
         jw.write_bool_kv("prefixPrerollAttempted", scene_prefix_preroll.attempted);
@@ -1003,6 +1050,18 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.write_bool_kv("mnamGainSmootherPreset", mnam_gain_preset);
         jw.write_bool_kv("mnamGainSmootherRtRequested", mnam_gain_rt_requested);
         jw.write_bool_kv("mnamGainSmootherSettled", mnam_gain_settled);
+        jw.write_bool_kv("rackGainSmootherRequested", snap_rack_gain);
+        jw.write_bool_kv("rackGainSmootherPreset", rack_gain_control_preset);
+        jw.write_bool_kv("rackGainSmootherRtRequested", rack_gain_rt_requested);
+        jw.write_bool_kv("rackGainSmootherSettled", rack_gain_settled);
+        jw.write_bool_kv("cabGainSmootherRequested", snap_cab_gain);
+        jw.write_bool_kv("cabGainSmootherPreset", cab_gain_control_preset);
+        jw.write_bool_kv("cabGainSmootherRtRequested", cab_gain_rt_requested);
+        jw.write_bool_kv("cabGainSmootherSettled", cab_gain_settled);
+        jw.write_bool_kv("irGainSmootherRequested", snap_ir_gain);
+        jw.write_bool_kv("irGainSmootherPreset", ir_gain_control_preset);
+        jw.write_bool_kv("irGainSmootherRtRequested", ir_gain_rt_requested);
+        jw.write_bool_kv("irGainSmootherSettled", ir_gain_settled);
         jw.write_key("phaseTimingsMs");
         jw.begin_object();
         jw.write_kv("validation", elapsed_ms(scene_started_at, validation_finished_at));

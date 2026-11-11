@@ -287,6 +287,7 @@ GxEngine::GxEngine(const string& plugin_dir, ParameterGroups& groups, const gx_s
       noisegate(),
       outputgate(&noisegate),
       scene_outputlevel(),
+      scene_rack_gain(true),
       monomute(),
       stereomute(),
       tuner(*this),
@@ -365,8 +366,9 @@ GxEngine::~GxEngine() {
 }
 
 bool GxEngine::preset_muted_scene_smoothers(
-    bool output_gain, bool nam_gain, bool snam_gain, bool mnam_gain) {
-    const bool mono_gain = nam_gain || snam_gain || mnam_gain;
+    bool output_gain, bool nam_gain, bool snam_gain, bool mnam_gain,
+    bool rack_gain, bool cab_gain, bool ir_gain) {
+    const bool mono_gain = nam_gain || snam_gain || mnam_gain || rack_gain || cab_gain || ir_gain;
     if (!output_gain && !mono_gain) {
         return true;
     }
@@ -391,6 +393,9 @@ bool GxEngine::preset_muted_scene_smoothers(
     if (mnam_gain) {
         restore_mnam_ready = mneural_amp.suspend_scene_smoother_for_control();
     }
+    if (rack_gain) scene_rack_gain.suspend_scene_smoother_for_control();
+    if (cab_gain) cabinet.suspend_scene_smoother_for_control();
+    if (ir_gain) mono_convolver.suspend_scene_smoother_for_control();
 
     const SceneAudioCycleStatus ownership =
         wait_scene_control_cycle(mono_gain, output_gain);
@@ -411,6 +416,9 @@ bool GxEngine::preset_muted_scene_smoothers(
         mneural_amp.finish_scene_smoother_control(
             restore_mnam_ready, acquired);
     }
+    if (rack_gain) scene_rack_gain.finish_scene_smoother_control(acquired);
+    if (cab_gain) cabinet.finish_scene_smoother_control(acquired);
+    if (ir_gain) mono_convolver.finish_scene_smoother_control(acquired);
     return acquired;
 }
 
@@ -465,7 +473,7 @@ void GxEngine::load_static_plugins() {
     pl.add(builtin_poweramp_plugins,              PLUGIN_POS_RACK, PGN_ALTERNATIVE);
 
     // mono
-    pl.add(gx_effects::gain::plugin(),            PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(&scene_rack_gain,                    PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::low_high_pass::plugin(),   PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::highbooster::plugin(),     PLUGIN_POS_RACK, PGN_GUI);
     pl.add(new ArtemisEq(),                    PLUGIN_POS_RACK, PGN_GUI);
