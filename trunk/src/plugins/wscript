@@ -15,6 +15,7 @@ sources = [ # generate .so files that can be loaded by guitarix
 lib_csource_defs = [ # put in static library linked with guitarix
     ["vibe.cc", ("plugin_mono", "plugin_stereo")],
     "metronome.cc",
+    ["metal_preamp.cc", ("meridian", "rectified", "caliber")],
     "abgate.cc",
     "jcm800pre.cpp",
     "reversedelay.cc",
@@ -74,6 +75,7 @@ lib_sources = [ # put in static library linked with guitarix
     ]
 
 lib_sources_shared = [
+    'metal_preamp.cc',
     'zita_rev1.dsp',
     'vibe.cc',
     'abgate.cc',
@@ -104,6 +106,13 @@ lib_sources_shared = [
 def build(bld):
     if not (bld.env.STANDALONE or bld.env.NEW_LADSPA):
         return
+
+    if bld.env.STANDALONE:
+        model_doc = os.path.join(bld.env.SHAREDIR, 'doc', 'artemis-guitarix', 'metal-heads')
+        vendor = bld.path.find_dir('tamgamp')
+        bld.install_files(model_doc, ['metal_preamp.cc'])
+        bld.install_files(os.path.join(model_doc, 'tamgamp'), vendor.ant_glob('**/*'),
+                          cwd=vendor, relative_trick=True)
 
     if bld.env.FAUST:
         arg, float_arg, double_arg = bld.get_faust_args()
@@ -156,14 +165,15 @@ def build(bld):
     bld.add_group()
     have_pluginlib = len(lib_sources) != 0
     bld.env.HAVE_PLUGINLIB = have_pluginlib
-    incl = [".","../headers", "../gx_head/engine", "../gx_head/engine/tabels"]
+    incl = [".","../headers", "../gx_head/engine", "../gx_head/engine/tabels", "tamgamp/include"]
+    tamgamp_support = ["tamgamp/src/resources/faust.cpp"]
     if not bld.env.ZITA_RESAMPLER:
         incl.append('../zita-resampler-1.1.0')
     
     if have_pluginlib:
         bld.stlib(
             includes = incl,
-            source = [s.replace(".dsp",".cc") for s in lib_sources]+lib_csources,
+            source = [s.replace(".dsp",".cc") for s in lib_sources]+lib_csources+tamgamp_support,
             use = ["EIGEN3"],
             target = "plugins", # (also defines name of task)
             )
@@ -171,7 +181,7 @@ def build(bld):
         features = 'cxx',
         cxxflags = bld.env.CXXFLAGS_cxxshlib + ["-fvisibility=hidden"],
         includes = incl,
-        source = [s.replace(".dsp",".cc") for s in lib_sources_shared],
+        source = [s.replace(".dsp",".cc") for s in lib_sources_shared]+tamgamp_support,
         use = ["EIGEN3"],
         )
     for s in sources:
