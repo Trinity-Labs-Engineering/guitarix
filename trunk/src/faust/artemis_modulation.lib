@@ -1,0 +1,12 @@
+// Copyright (C) 2026 Artemis contributors. MIT.
+// See FAUST_EFFECTS_LICENSES.txt for the licence text.
+import("stdfaust.lib");
+
+// Seed from the saved value on reset; only live edits slew. No startup fade,
+// lookahead, extra scene wait, or allocation in the audio callback.
+smooth_control = si.smooth(ba.tau2pole(0.010) * (1 : mem));
+blend(amount, dry, wet) = dry + amount * (wet-dry);
+
+// Third-order Lagrange interpolation with room for its taps at 192 kHz.
+// The interpolator requires a delay greater than one sample.
+delay(maximum, samples) = de.fdelay3(maximum, max(2, min(maximum-2, samples)));

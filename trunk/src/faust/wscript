@@ -70,6 +70,7 @@ def build(bld):
         'studio_compressor.dsp',
         'fet_compressor.dsp',
         'opto_compressor.dsp',
+        'harmonic_tremolo.dsp',
         'spring_reverb.dsp',
         'plate_reverb.dsp',
         'hall_reverb.dsp',

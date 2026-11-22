@@ -1,4 +1,4 @@
-// generated from file 'src/plugins/flanger_gx.dsp' by dsp2cc:
+// generated from file '../src/plugins/flanger_gx.dsp' by dsp2cc:
 // Code generated with Faust (https://faust.grame.fr)
 
 #include "gx_faust_support.h"
@@ -11,23 +11,31 @@ class Dsp: public PluginDef {
 private:
 	int fSampleRate;
 	FAUSTFLOAT fHslider0;
-	FAUSTFLOAT fHslider1;
-	int IOTA0;
-	double fVec0[2048];
 	double fConst0;
 	double fConst1;
-	FAUSTFLOAT fHslider2;
-	FAUSTFLOAT fHslider3;
-	double fConst2;
-	FAUSTFLOAT fHslider4;
-	int iVec1[2];
-	double fRec1[2];
-	double fRec2[2];
-	FAUSTFLOAT fHslider5;
-	double fVec2[2048];
+	int iVec0[2];
 	double fRec0[2];
-	double fVec3[4096];
+	FAUSTFLOAT fHslider1;
+	double fRec1[2];
+	int IOTA0;
+	double fVec1[2048];
+	double fConst2;
+	FAUSTFLOAT fHslider2;
 	double fRec3[2];
+	FAUSTFLOAT fHslider3;
+	double fRec4[2];
+	double fConst3;
+	FAUSTFLOAT fHslider4;
+	double fRec7[2];
+	double fRec8[2];
+	double fRec6[2];
+	double fRec5[2];
+	FAUSTFLOAT fHslider5;
+	double fRec9[2];
+	double fVec2[2048];
+	double fRec2[2];
+	double fVec3[4096];
+	double fRec10[2];
 
 	void clear_state_f();
 	int load_ui_f(const UiBuilder& b, int form);
@@ -74,14 +82,21 @@ Dsp::~Dsp() {
 
 inline void Dsp::clear_state_f()
 {
-	for (int l0 = 0; l0 < 2048; l0 = l0 + 1) fVec0[l0] = 0.0;
-	for (int l1 = 0; l1 < 2; l1 = l1 + 1) iVec1[l1] = 0;
+	for (int l0 = 0; l0 < 2; l0 = l0 + 1) iVec0[l0] = 0;
+	for (int l1 = 0; l1 < 2; l1 = l1 + 1) fRec0[l1] = 0.0;
 	for (int l2 = 0; l2 < 2; l2 = l2 + 1) fRec1[l2] = 0.0;
-	for (int l3 = 0; l3 < 2; l3 = l3 + 1) fRec2[l3] = 0.0;
-	for (int l4 = 0; l4 < 2048; l4 = l4 + 1) fVec2[l4] = 0.0;
-	for (int l5 = 0; l5 < 2; l5 = l5 + 1) fRec0[l5] = 0.0;
-	for (int l6 = 0; l6 < 4096; l6 = l6 + 1) fVec3[l6] = 0.0;
-	for (int l7 = 0; l7 < 2; l7 = l7 + 1) fRec3[l7] = 0.0;
+	for (int l3 = 0; l3 < 2048; l3 = l3 + 1) fVec1[l3] = 0.0;
+	for (int l4 = 0; l4 < 2; l4 = l4 + 1) fRec3[l4] = 0.0;
+	for (int l5 = 0; l5 < 2; l5 = l5 + 1) fRec4[l5] = 0.0;
+	for (int l6 = 0; l6 < 2; l6 = l6 + 1) fRec7[l6] = 0.0;
+	for (int l7 = 0; l7 < 2; l7 = l7 + 1) fRec8[l7] = 0.0;
+	for (int l8 = 0; l8 < 2; l8 = l8 + 1) fRec6[l8] = 0.0;
+	for (int l9 = 0; l9 < 2; l9 = l9 + 1) fRec5[l9] = 0.0;
+	for (int l10 = 0; l10 < 2; l10 = l10 + 1) fRec9[l10] = 0.0;
+	for (int l11 = 0; l11 < 2048; l11 = l11 + 1) fVec2[l11] = 0.0;
+	for (int l12 = 0; l12 < 2; l12 = l12 + 1) fRec2[l12] = 0.0;
+	for (int l13 = 0; l13 < 4096; l13 = l13 + 1) fVec3[l13] = 0.0;
+	for (int l14 = 0; l14 < 2; l14 = l14 + 1) fRec10[l14] = 0.0;
 }
 
 void Dsp::clear_state_f_static(PluginDef *p)
@@ -93,8 +108,9 @@ inline void Dsp::init(unsigned int sample_rate)
 {
 	fSampleRate = sample_rate;
 	fConst0 = std::min<double>(1.92e+05, std::max<double>(1.0, static_cast<double>(fSampleRate)));
-	fConst1 = 0.5 * fConst0;
-	fConst2 = 0.10471975511965977 / fConst0;
+	fConst1 = std::exp(-(1e+02 / fConst0));
+	fConst2 = 0.5 * fConst0;
+	fConst3 = 0.10471975511965977 / fConst0;
 	IOTA0 = 0;
 	clear_state_f();
 }
@@ -106,49 +122,74 @@ void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0)
 {
-	double fSlow0 = static_cast<double>(fHslider0);
+	double fSlow0 = 0.01 * static_cast<double>(fHslider0);
 	double fSlow1 = static_cast<double>(fHslider1);
-	double fSlow2 = 0.01 * fSlow0 * std::min<double>(1.0, 1.0 - fSlow1);
-	double fSlow3 = 2.0 - fSlow2;
-	double fSlow4 = 0.01 * fSlow0 * std::min<double>(1.0, fSlow1 + 1.0);
-	double fSlow5 = 2.0 - fSlow4;
-	double fSlow6 = 0.001 * static_cast<double>(fHslider2);
-	double fSlow7 = 0.0005 * static_cast<double>(fHslider3);
-	double fSlow8 = fConst2 * static_cast<double>(fHslider4);
-	double fSlow9 = std::sin(fSlow8);
-	double fSlow10 = std::cos(fSlow8);
-	double fSlow11 = 0.3333333333333333 * static_cast<double>(fHslider5) * (std::fabs(fSlow1) + 2.0);
+	double fSlow2 = static_cast<double>(fHslider2);
+	double fSlow3 = static_cast<double>(fHslider3);
+	double fSlow4 = static_cast<double>(fHslider4);
+	double fSlow5 = std::min<double>(0.95, std::max<double>(-0.95, static_cast<double>(fHslider5)));
 	for (int i0 = 0; i0 < count; i0 = i0 + 1) {
-		double fTemp0 = static_cast<double>(input0[i0]);
-		fVec0[IOTA0 & 2047] = fTemp0;
-		iVec1[0] = 1;
-		fRec1[0] = fSlow9 * fRec2[1] + fSlow10 * fRec1[1];
-		fRec2[0] = static_cast<double>(1 - iVec1[1]) + fSlow10 * fRec2[1] - fSlow9 * fRec1[1];
-		double fTemp1 = fSlow6 + fSlow7 * (fRec1[0] + 1.0);
-		double fTemp2 = fConst1 * fTemp1;
-		double fTemp3 = std::floor(fTemp2);
-		double fTemp4 = fTemp3 + (1.0 - fTemp2);
-		double fTemp5 = fTemp2 - fTemp3;
-		int iTemp6 = static_cast<int>(fTemp2);
-		int iTemp7 = std::min<int>(1025, std::max<int>(0, iTemp6 + 1));
-		int iTemp8 = std::min<int>(1025, std::max<int>(0, iTemp6));
-		double fTemp9 = fTemp5 * fVec0[(IOTA0 - iTemp7) & 2047] + fSlow11 * fRec0[1] + fVec0[(IOTA0 - iTemp8) & 2047] * fTemp4;
-		fVec2[IOTA0 & 2047] = fTemp9;
-		fRec0[0] = fTemp4 * fVec2[(IOTA0 - iTemp8) & 2047] + fTemp5 * fVec2[(IOTA0 - iTemp7) & 2047];
-		double fTemp10 = fSlow5 * fTemp0 + fSlow4 * fRec0[0];
-		double fTemp11 = fTemp10 - fSlow11 * fRec3[1];
-		fVec3[IOTA0 & 4095] = fTemp11;
-		double fTemp12 = fConst0 * fTemp1;
-		int iTemp13 = static_cast<int>(fTemp12);
-		double fTemp14 = std::floor(fTemp12);
-		fRec3[0] = fVec3[(IOTA0 - std::min<int>(2049, std::max<int>(0, iTemp13))) & 4095] * (fTemp14 + (1.0 - fTemp12)) + (fTemp12 - fTemp14) * fVec3[(IOTA0 - std::min<int>(2049, std::max<int>(0, iTemp13 + 1))) & 4095];
-		output0[i0] = static_cast<FAUSTFLOAT>(0.25 * (fSlow3 * fTemp10 + fSlow2 * fRec3[0]));
-		IOTA0 = IOTA0 + 1;
-		iVec1[1] = iVec1[0];
-		fRec1[1] = fRec1[0];
-		fRec2[1] = fRec2[0];
+		iVec0[0] = 1;
+		double fTemp0 = static_cast<double>(iVec0[1]);
+		double fTemp1 = 1.0 - fConst1 * fTemp0;
+		fRec0[0] = fSlow0 * fTemp1 + fConst1 * fTemp0 * fRec0[1];
+		fRec1[0] = fSlow1 * fTemp1 + fConst1 * fTemp0 * fRec1[1];
+		double fTemp2 = std::min<double>(1.0, 1.0 - fRec1[0]);
+		double fTemp3 = static_cast<double>(input0[i0]);
+		fVec1[IOTA0 & 2047] = fTemp3;
+		double fTemp4 = std::min<double>(1.0, fRec1[0] + 1.0);
+		fRec3[0] = fSlow2 * fTemp1 + fConst1 * fTemp0 * fRec3[1];
+		fRec4[0] = fSlow3 * fTemp1 + fConst1 * fTemp0 * fRec4[1];
+		fRec7[0] = fSlow4 * fTemp1 + fConst1 * fTemp0 * fRec7[1];
+		fRec8[0] = fRec8[1] - fConst3 * fRec7[0] * fRec5[1];
+		fRec6[0] = fConst3 * fRec7[0] * fRec8[0] + static_cast<double>(1 - iVec0[1]) + fRec6[1];
+		fRec5[0] = fRec6[0];
+		double fTemp5 = 0.001 * fRec3[0] + 0.0005 * fRec4[0] * (fRec5[0] + 1.0);
+		double fTemp6 = std::max<double>(2.0, std::min<double>(2044.0, fConst2 * fTemp5));
+		double fTemp7 = fTemp6 + -0.999995;
+		double fTemp8 = std::floor(fTemp7);
+		double fTemp9 = fTemp6 + (-3.0 - fTemp8);
+		double fTemp10 = fTemp6 + (-2.0 - fTemp8);
+		double fTemp11 = fTemp6 - fTemp8;
+		double fTemp12 = fTemp6 + (-1.0 - fTemp8);
+		double fTemp13 = fTemp11 * fTemp12;
+		double fTemp14 = fTemp13 * fTemp10;
+		int iTemp15 = static_cast<int>(fTemp7);
+		int iTemp16 = std::min<int>(2046, std::max<int>(0, iTemp15 + 3));
+		fRec9[0] = fSlow5 * fTemp1 + fConst1 * fTemp0 * fRec9[1];
+		double fTemp17 = std::fabs(fRec1[0]) + 2.0;
+		int iTemp18 = std::min<int>(2046, std::max<int>(0, iTemp15 + 1));
+		int iTemp19 = std::min<int>(2046, std::max<int>(0, iTemp15));
+		int iTemp20 = std::min<int>(2046, std::max<int>(0, iTemp15 + 2));
+		double fTemp21 = 0.16666666666666666 * fTemp14 * fVec1[(IOTA0 - iTemp16) & 2047] + 0.3333333333333333 * fRec9[0] * fRec2[1] * fTemp17 + fTemp9 * (fTemp10 * (0.5 * fTemp11 * fVec1[(IOTA0 - iTemp18) & 2047] - 0.16666666666666666 * fVec1[(IOTA0 - iTemp19) & 2047] * fTemp12) - 0.5 * fTemp13 * fVec1[(IOTA0 - iTemp20) & 2047]);
+		fVec2[IOTA0 & 2047] = fTemp21;
+		fRec2[0] = fTemp9 * (fTemp10 * (0.5 * fTemp11 * fVec2[(IOTA0 - iTemp18) & 2047] - 0.16666666666666666 * fTemp12 * fVec2[(IOTA0 - iTemp19) & 2047]) - 0.5 * fTemp13 * fVec2[(IOTA0 - iTemp20) & 2047]) + 0.16666666666666666 * fTemp14 * fVec2[(IOTA0 - iTemp16) & 2047];
+		double fTemp22 = fTemp3 * (2.0 - fRec0[0] * fTemp4) + fRec0[0] * fRec2[0] * fTemp4;
+		double fTemp23 = std::max<double>(2.0, std::min<double>(4.09e+03, fConst0 * fTemp5));
+		double fTemp24 = fTemp23 + -0.999995;
+		double fTemp25 = std::floor(fTemp24);
+		double fTemp26 = fTemp23 + (-2.0 - fTemp25);
+		double fTemp27 = fTemp23 - fTemp25;
+		double fTemp28 = fTemp22 - 0.3333333333333333 * fRec9[0] * fTemp17 * fRec10[1];
+		fVec3[IOTA0 & 4095] = fTemp28;
+		int iTemp29 = static_cast<int>(fTemp24);
+		double fTemp30 = fTemp23 + (-1.0 - fTemp25);
+		double fTemp31 = fTemp27 * fTemp30;
+		fRec10[0] = (fTemp23 + (-3.0 - fTemp25)) * (fTemp26 * (0.5 * fTemp27 * fVec3[(IOTA0 - std::min<int>(4092, std::max<int>(0, iTemp29 + 1))) & 4095] - 0.16666666666666666 * fVec3[(IOTA0 - std::min<int>(4092, std::max<int>(0, iTemp29))) & 4095] * fTemp30) - 0.5 * fTemp31 * fVec3[(IOTA0 - std::min<int>(4092, std::max<int>(0, iTemp29 + 2))) & 4095]) + 0.16666666666666666 * fTemp31 * fTemp26 * fVec3[(IOTA0 - std::min<int>(4092, std::max<int>(0, iTemp29 + 3))) & 4095];
+		output0[i0] = static_cast<FAUSTFLOAT>(0.25 * ((2.0 - fRec0[0] * fTemp2) * fTemp22 + fRec0[0] * fRec10[0] * fTemp2));
+		iVec0[1] = iVec0[0];
 		fRec0[1] = fRec0[0];
+		fRec1[1] = fRec1[0];
+		IOTA0 = IOTA0 + 1;
 		fRec3[1] = fRec3[0];
+		fRec4[1] = fRec4[0];
+		fRec7[1] = fRec7[0];
+		fRec8[1] = fRec8[0];
+		fRec6[1] = fRec6[0];
+		fRec5[1] = fRec5[0];
+		fRec9[1] = fRec9[0];
+		fRec2[1] = fRec2[0];
+		fRec10[1] = fRec10[0];
 	}
 }
 
@@ -159,9 +200,9 @@ void __rt_func Dsp::compute_static(int count, FAUSTFLOAT *input0, FAUSTFLOAT *ou
 
 int Dsp::register_par(const ParamReg& reg)
 {
-	reg.registerFloatVar("flanger_mono_gx.bpm",N_("BPM"),"S","",&fHslider4, 24.0, 24.0, 3.6e+02, 1.0, 0);
+	reg.registerFloatVar("flanger_mono_gx.bpm",N_("BPM"),"S","",&fHslider4, 6.0, 3.0, 3.6e+02, 0.1, 0);
 	reg.registerFloatVar("flanger_mono_gx.depth",N_("Depth"),"S","",&fHslider2, 0.5, 0.0, 5.0, 0.01, 0);
-	reg.registerFloatVar("flanger_mono_gx.feedback",N_("Feedback"),"S","",&fHslider5, -0.707, -0.99, 0.99, 0.01, 0);
+	reg.registerFloatVar("flanger_mono_gx.feedback",N_("Feedback"),"S","",&fHslider5, -0.707, -1.0, 1.0, 0.01, 0);
 	reg.registerFloatVar("flanger_mono_gx.mix",N_("Mix"),"S","",&fHslider1, 0.0, -1.0, 1.0, 0.1, 0);
 	reg.registerFloatVar("flanger_mono_gx.wet",N_("Wet"),"S","",&fHslider0, 1e+02, 0.0, 1e+02, 1.0, 0);
 	reg.registerFloatVar("flanger_mono_gx.width",N_("Width"),"S","",&fHslider3, 5.0, 0.0, 1e+01, 0.01, 0);

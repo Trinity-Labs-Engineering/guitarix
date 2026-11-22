@@ -1,28 +1,16 @@
-declare id 		"flanger_mono";
-declare name            "Flanger Mono";
-declare category        "Modulation";
-declare license 	"BSD";
-
+declare id "flanger_mono";
+declare name "Flanger Mono";
+declare category "Modulation";
+declare license "BSD";
 import("stdfaust.lib");
-import("guitarix.lib");
+mod = library("artemis_modulation.lib");
+freq = hslider("lfobpm[name:BPM][unit:bpm]", 12, 3, 360, 0.1) : mod.smooth_control : /(60);
+depth = hslider("depth[name:Depth]", 0.5, 0, 1, 0.01) : mod.smooth_control;
+wet = vslider("wet_dry[name:Dry/Wet]", 100, 0, 100, 1) : /(100) : mod.smooth_control;
 
-flangermono(curdel)
-  = _<: _, (-:de.fdelay(2048,curdel)) ~ *(0.5) : _, 
-  *(-1) : + : *(0.5);
-  
-
-flangermonogx = _ <: *(1-depth), (flangermono(curdel):*(depth)) :> _
-with {
-	  lfol = os.oscrs; 
-	  dflange = 0.001 * ma.SR *  10.0;
-	  odflange = 0.001 * ma.SR *  1.0;
-	  //freq	 = hslider("freq [unit:Hz]", 0.2, 0, 5, 0.01);
-      freq   = hslider("lfobpm[name:BPM][unit:bpm][tooltip:LFO in Beats per Minute]",24,24,360,1)/60;
-	  depth = hslider("depth[name:Depth]", 0.5, 0, 1, 0.01);
-	  curdel = odflange+dflange*depth*(1 + lfol(freq))/2;
-  };
-  
-wet = vslider("wet_dry[name:Wet/Dry][tooltip:percentage of processed signal in output signal]",  100, 0, 100, 1) : /(100);
-dry = 1 - wet;
-  
-process =  _<:*(dry),(*(wet): flangermonogx ):>_;
+// Classic feed-forward comb with a shared, regenerative delay. Depth controls
+// excursion rather than also diluting the delayed voice with a second dry mix.
+// Feedback has unity DC gain and ample margin below self-oscillation.
+curdel = ma.SR * (0.0005 + 0.005 * depth * (1 + os.oscs(freq)));
+voice = *(0.5) : (+ : mod.delay(4092, curdel)) ~ *(0.5);
+process(x) = mod.blend(wet, x, (x + voice(x)) * 0.5);

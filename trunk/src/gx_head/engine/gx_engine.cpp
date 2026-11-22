@@ -529,6 +529,7 @@ void GxEngine::load_static_plugins() {
 #endif
     pl.add(gx_effects::biquad::plugin(),          PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::tremolo::plugin(),         PLUGIN_POS_RACK, PGN_GUI);
+    pl.add(gx_effects::harmonic_tremolo::plugin(), PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::phaser_mono::plugin(),     PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::chorus_mono::plugin(),     PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::flanger_mono::plugin(),    PLUGIN_POS_RACK, PGN_GUI);

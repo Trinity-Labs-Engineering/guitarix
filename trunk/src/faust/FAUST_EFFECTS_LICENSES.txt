@@ -1,5 +1,13 @@
 Attribution for the mono Faust additions
 
+Modulation helpers (artemis_modulation.lib): Copyright (C) 2026 Artemis
+contributors, MIT. Harmonic Tremolo: Artemis contributors, GPL-3.0-or-later;
+see ../../COPYING. The revised mono flanger retains its original BSD declaration.
+Mono chorus retains Albert Graef's attribution; the optical tremolo retains
+transmogrify's vactrol model and attribution, and the generic phaser retains
+Julius O. Smith's topology. Faust library calls retain their library licences.
+No external BBD circuit implementation has been imported. See FAUST_MODULATION.md.
+
 Compressor gain computer: Bart Brouns, adapted from compressors.lib 1.6.0
 (GPLv3; current upstream identifies GPL-3.0-only). The Artemis studio, FET and
 optical behavioural models, control wrappers and rationalised antialiasing

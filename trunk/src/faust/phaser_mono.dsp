@@ -3,14 +3,15 @@ declare name "Phaser Mono";
 declare category "Modulation";
 
 import("stdfaust.lib");
+mod = library("artemis_modulation.lib");
 
 phaser_monogx = component("phaser.dsp").phaser_mono(Notches,0,width,frqmin,fratio,frqmax,freq,mdepth,fb,invert)
 with {
   Notches = 4;
   //freq  = hslider("Speed [unit:Hz] ", 0.5, 0, 10, 0.01);
-  freq     = hslider("lfobpm[name:Speed (bpm)][tooltip:Speed in Beats per Minute]",30,24,360,1)/60;
+  freq     = hslider("lfobpm[name:Speed (bpm)][tooltip:Speed in Beats per Minute]",30,6,360,0.1) : mod.smooth_control : /(60);
   
-  depth = hslider("depth[name:Depth]", 0.5, 0, 1, 0.01);
+  depth = hslider("depth[name:Depth]", 0.5, 0, 1, 0.01) : mod.smooth_control;
   fb	 = 0.5 ;//hslider("feedback gain", 0, 0, 1, 0.01);
   width  = 1000 ;//hslider("Notch width [unit:Hz]", 1000, 10, 5000, 1);
   vibr   = 1 ;//checkbox("VibratoMode[enum:direct | vibrato]");
@@ -24,7 +25,7 @@ with {
   
 };
 
-wet = vslider("wet_dry[name:Dry/Wet][tooltip:percentage of processed signal in output signal]",  100, 0, 100, 1) : /(100);
+wet = vslider("wet_dry[name:Dry/Wet][tooltip:percentage of processed signal in output signal]",  100, 0, 100, 1) : /(100) : mod.smooth_control;
 dry = 1 - wet;
 
 process =  _<:*(dry),(*(wet): phaser_monogx ):>_;

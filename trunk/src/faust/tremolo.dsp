@@ -9,6 +9,7 @@ declare gladefile "tremolo_ui.glade";
 */
 
 import("stdfaust.lib");
+mod = library("artemis_modulation.lib");
 
 /* vactrol model */
 
@@ -32,23 +33,22 @@ cds = ((_ <: _,_),_ : _+(1-alpha)*_) ~ (_<:*(alpha)) with {
 
 vactrol = pow(_,1.9) : cds : *(b) + exp(1) : exp(log(Ra)/log) : R1/(_ + R1);
 
-/* triangle oscillator (not bandlimited, frequency is approximate) */
-
-trianglewave(freq) = _ ~ (_ <: _ + hyst) : /(periodsamps) with {
-   if(c,t,e) = select2(c,e,t);
-    hyst(x) = if(_ > 0, 2 * (x < periodsamps) - 1, 1 - 2 * (x > 0)) ~ _;
-    periodsamps = int(ma.SR / (2*float(freq)));
-};
-
 /* tremolo unit, using triangle or sine oscillator as lfo */
 
-tremolo(freq, depth) = lfo * depth + 1 - depth : vactrol with {
+tremolo(freq, depth) = 1-depth + depth*gain with {
     sine(freq) = (os.oscs(freq) + 1) / 2 : max(0); // max(0) because of numerical inaccuracy
     SINE=checkbox("SINE[enum:triangle|sine|square]");
-    lfo = select3(SINE, trianglewave(freq), sine(freq), os.lf_squarewavepos(freq));
+    lfo = select3(SINE, os.lf_trianglepos(freq), sine(freq), os.lf_squarewavepos(freq));
+    // Depth belongs after the nonlinear LDR, so half-depth means half the
+    // gain excursion. Normalise the physical divider's dark/light gains.
+    dark = R1/(Ra+R1);
+    light = R1/(Rb+R1);
+    gain = (vactrol(lfo)-dark)/(light-dark) : max(0) : min(1);
 };
 
-wet = vslider("wet_dry[name:Dry/Wet][tooltip:percentage of processed signal in output signal]",  100, 0, 100, 1) : /(100);
+wet = vslider("wet_dry[name:Dry/Wet][tooltip:percentage of processed signal in output signal]",  100, 0, 100, 1) : /(100) : mod.smooth_control;
 dry = 1 - wet;
 
-process =  _<:*(dry),(*(wet): *(tremolo((vslider("bpm[name:BPM][unit:bpm]",300,24,360,1)/60),vslider("depth[name:Depth]",0.5,0,1,0.01)))):>_;
+rate = vslider("bpm[name:BPM][unit:bpm]", 240, 6, 360, 0.1) : mod.smooth_control : /(60);
+depth = vslider("depth[name:Depth]", 0.75, 0, 1, 0.01) : mod.smooth_control;
+process = *(dry + wet * tremolo(rate, depth));

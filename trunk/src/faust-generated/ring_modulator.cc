@@ -7,8 +7,8 @@ class mydspSIG0 {
 	
   private:
 	
-	int iVec0[2];
-	int iRec0[2];
+	int iVec1[2];
+	int iRec1[2];
 	
   public:
 	
@@ -20,21 +20,21 @@ class mydspSIG0 {
 	}
 	
 	void instanceInitmydspSIG0(int sample_rate) {
-		for (int l0 = 0; l0 < 2; l0 = l0 + 1) {
-			iVec0[l0] = 0;
+		for (int l2 = 0; l2 < 2; l2 = l2 + 1) {
+			iVec1[l2] = 0;
 		}
-		for (int l1 = 0; l1 < 2; l1 = l1 + 1) {
-			iRec0[l1] = 0;
+		for (int l3 = 0; l3 < 2; l3 = l3 + 1) {
+			iRec1[l3] = 0;
 		}
 	}
 	
 	void fillmydspSIG0(int count, double* table) {
 		for (int i1 = 0; i1 < count; i1 = i1 + 1) {
-			iVec0[0] = 1;
-			iRec0[0] = (iVec0[1] + iRec0[1]) % 65536;
-			table[i1] = std::sin(9.587379924285257e-05 * double(iRec0[0]));
-			iVec0[1] = iVec0[0];
-			iRec0[1] = iRec0[0];
+			iVec1[0] = 1;
+			iRec1[0] = (iVec1[1] + iRec1[1]) % 65536;
+			table[i1] = std::sin(9.587379924285257e-05 * static_cast<double>(iRec1[0]));
+			iVec1[1] = iVec1[0];
+			iRec1[1] = iRec1[0];
 		}
 	}
 
@@ -49,11 +49,15 @@ static double ftbl0mydspSIG0[65536];
 class Dsp: public PluginDef {
 private:
 	int fSampleRate;
-	int iVec1[2];
 	FAUSTFLOAT fHslider0;
 	double fConst0;
-	double fRec1[2];
+	double fConst1;
+	int iVec0[2];
+	double fRec0[2];
+	double fConst2;
 	FAUSTFLOAT fHslider1;
+	double fRec3[2];
+	double fRec2[2];
 
 	void clear_state_f();
 	int load_ui_f(const UiBuilder& b, int form);
@@ -100,8 +104,10 @@ Dsp::~Dsp() {
 
 inline void Dsp::clear_state_f()
 {
-	for (int l2 = 0; l2 < 2; l2 = l2 + 1) iVec1[l2] = 0;
-	for (int l3 = 0; l3 < 2; l3 = l3 + 1) fRec1[l3] = 0.0;
+	for (int l0 = 0; l0 < 2; l0 = l0 + 1) iVec0[l0] = 0;
+	for (int l1 = 0; l1 < 2; l1 = l1 + 1) fRec0[l1] = 0.0;
+	for (int l4 = 0; l4 < 2; l4 = l4 + 1) fRec3[l4] = 0.0;
+	for (int l5 = 0; l5 < 2; l5 = l5 + 1) fRec2[l5] = 0.0;
 }
 
 void Dsp::clear_state_f_static(PluginDef *p)
@@ -116,7 +122,9 @@ inline void Dsp::init(unsigned int sample_rate)
 	sig0->fillmydspSIG0(65536, ftbl0mydspSIG0);
 	deletemydspSIG0(sig0);
 	fSampleRate = sample_rate;
-	fConst0 = 1.0 / std::min<double>(1.92e+05, std::max<double>(1.0, double(fSampleRate)));
+	fConst0 = std::min<double>(1.92e+05, std::max<double>(1.0, static_cast<double>(fSampleRate)));
+	fConst1 = std::exp(-(1e+02 / fConst0));
+	fConst2 = 1.0 / fConst0;
 	clear_state_f();
 }
 
@@ -127,16 +135,21 @@ void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 
 void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0)
 {
-	double fSlow0 = fConst0 * double(fHslider0);
-	double fSlow1 = double(fHslider1);
-	double fSlow2 = 1.0 - fSlow1;
+	double fSlow0 = static_cast<double>(fHslider0);
+	double fSlow1 = static_cast<double>(fHslider1);
 	for (int i0 = 0; i0 < count; i0 = i0 + 1) {
-		iVec1[0] = 1;
-		double fTemp0 = ((1 - iVec1[1]) ? 0.0 : fSlow0 + fRec1[1]);
-		fRec1[0] = fTemp0 - std::floor(fTemp0);
-		output0[i0] = FAUSTFLOAT(double(input0[i0]) * (fSlow2 + fSlow1 * ftbl0mydspSIG0[std::max<int>(0, std::min<int>(int(65536.0 * fRec1[0]), 65535))]));
-		iVec1[1] = iVec1[0];
-		fRec1[1] = fRec1[0];
+		iVec0[0] = 1;
+		double fTemp0 = static_cast<double>(iVec0[1]);
+		double fTemp1 = 1.0 - fConst1 * fTemp0;
+		fRec0[0] = fSlow0 * fTemp1 + fConst1 * fTemp0 * fRec0[1];
+		fRec3[0] = fSlow1 * fTemp1 + fConst1 * fTemp0 * fRec3[1];
+		double fTemp2 = ((1 - iVec0[1]) ? 0.0 : fRec2[1] + fConst2 * fRec3[0]);
+		fRec2[0] = fTemp2 - std::floor(fTemp2);
+		output0[i0] = static_cast<FAUSTFLOAT>(static_cast<double>(input0[i0]) * (1.0 - fRec0[0] + fRec0[0] * ftbl0mydspSIG0[std::max<int>(0, std::min<int>(static_cast<int>(65536.0 * fRec2[0]), 65535))]));
+		iVec0[1] = iVec0[0];
+		fRec0[1] = fRec0[0];
+		fRec3[1] = fRec3[0];
+		fRec2[1] = fRec2[0];
 	}
 }
 
@@ -147,8 +160,8 @@ void __rt_func Dsp::compute_static(int count, FAUSTFLOAT *input0, FAUSTFLOAT *ou
 
 int Dsp::register_par(const ParamReg& reg)
 {
-	reg.registerFloatVar("ring_modulator.dry/wet",N_("Mix"),"S","",&fHslider1, 0.5, 0.0, 1.0, 0.05, 0);
-	reg.registerFloatVar("ring_modulator.freq",N_("Freq"),"S","",&fHslider0, 2.4e+02, 1.2e+02, 1.6e+03, 0.5, 0);
+	reg.registerFloatVar("ring_modulator.dry/wet",N_("Mix"),"S","",&fHslider0, 0.5, 0.0, 1.0, 0.05, 0);
+	reg.registerFloatVar("ring_modulator.freq",N_("Freq"),"S","",&fHslider1, 2.4e+02, 1.2e+02, 1.6e+03, 0.5, 0);
 	return 0;
 }
 
