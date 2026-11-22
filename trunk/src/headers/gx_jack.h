@@ -26,6 +26,7 @@
 #define SRC_HEADERS_GX_JACK_H_
 
 #include <atomic>
+#include <vector>
 
 #ifndef GUITARIX_AS_PLUGIN
 
@@ -242,6 +243,10 @@ private:
     std::atomic<jack_nframes_t> jack_sr;   // jack sample rate
     std::atomic<jack_nframes_t> jack_bs;   // jack buffer size
     float               *insert_buffer;
+    jack_port_t         *split_input = nullptr;
+    std::vector<float>  mixed_input;
+    std::atomic<int>    split_blend_percent{0};
+    float               previous_split_gain = 0.0f;
     mutable std::mutex  client_activity_mutex;
     std::atomic<bool>   jack_shutdown_seen;
     std::atomic<bool>   amp_client_active;
@@ -343,6 +348,7 @@ public:
     JackClientActivityStatus jack_deactivate_clients();
     JackClientActivityStatus jack_activate_clients();
     JackClientActivityStatus get_jack_client_activity_status() const;
+    void set_split_blend(int percent) { split_blend_percent.store(percent, std::memory_order_relaxed); }
     void*               get_midi_buffer(jack_nframes_t nframes);
     bool                send_midi_cc(int cc_num, int pgm_num, int bgn, int num);
 

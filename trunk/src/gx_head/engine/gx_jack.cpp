@@ -526,6 +526,9 @@ bool GxJack::gx_jack_init(bool startserver, int wait_after_connect, const gx_sys
 		
 	// create buffer to bypass the insert ports
     insert_buffer = new float[buffer_size];
+    mixed_input.resize(buffer_size);
+    previous_split_gain = 0.0f;
+    set_split_blend(0);
     if (IS_RT) IS_RT = jack_is_realtime(client) ? true : false;
     gx_jack_callbacks();
     client_change(); // might load port connection definitions
@@ -602,6 +605,8 @@ void GxJack::gx_jack_cleanup() {
         fx_client_active = false;
     }
     jack_port_unregister(client, ports.input.port);
+    if (split_input) jack_port_unregister(client, split_input);
+    split_input = nullptr;
     jack_port_unregister(client, ports.midi_input.port);
     if (!single_client) {
         jack_port_unregister(client, ports.insert_out.port);
@@ -828,6 +833,7 @@ void GxJack::gx_jack_callbacks() {
     // register ports for gx_amp
     ports.input.port = jack_port_register(
 	client, "in_0", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
+    split_input = jack_port_register(client, "split_in", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
     ports.midi_input.port = jack_port_register(
 	client, "midi_in_1", JACK_DEFAULT_MIDI_TYPE, JackPortIsInput, 0);
     if (!single_client) {
@@ -1156,10 +1162,20 @@ int __rt_func GxJack::gx_jack_process(jack_nframes_t nframes, void *arg) {
     if (!self.single_client) {
         obuf = get_float_buf(self.ports.insert_out.port, nframes);
     } 
-	self.engine.mono_chain.process(
-	    nframes,
-	    get_float_buf(self.ports.input.port, nframes),
-	    obuf);
+    float *input = get_float_buf(self.ports.input.port, nframes);
+    const float gain = self.split_blend_percent.load(std::memory_order_relaxed) * 0.01f;
+    if (self.split_input && (gain != 0.0f || self.previous_split_gain != 0.0f)) {
+        // JACK sums all cables on split_in. Keep both shared JACK inputs read-only.
+        const float *split = get_float_buf(self.split_input, nframes);
+        const float step = (gain - self.previous_split_gain) / nframes;
+        for (jack_nframes_t i = 0; i < nframes; ++i) {
+            const float mix = self.previous_split_gain + step * (i + 1);
+            self.mixed_input[i] = (1.0f - mix) * input[i] + mix * split[i];
+        }
+        self.previous_split_gain = gain;
+        input = self.mixed_input.data();
+    }
+    self.engine.mono_chain.process(nframes, input, obuf);
 
     if (self.bypass_insert && !self.single_client) {
         memcpy(self.insert_buffer, obuf, nframes*sizeof(float));
@@ -1476,6 +1492,7 @@ int GxJack::gx_jack_buffersize_callback(jack_nframes_t nframes, void* arg) {
 	delete[] self.insert_buffer;
 	self.insert_buffer = NULL;
     self.insert_buffer = new float[nframes];
+    self.mixed_input.resize(nframes);
     return 0;
 }
 

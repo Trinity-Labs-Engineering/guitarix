@@ -1546,6 +1546,16 @@ void CmdConnection::call(gx_system::JsonWriter& jw, const methodnames *mn, JsonA
         jw.end_object();
     }
 
+    FUNCTION(set_split_blend) {
+        if (params.size() != 1)
+            throw RpcError(-32602, "expected split blend percentage");
+        const int percent = params[0]->getInt();
+        if (percent < 0 || percent > 100)
+            throw RpcError(-32602, "split blend must be between 0 and 100");
+        serv.jack.set_split_blend(percent);
+        jw.write(percent);
+    }
+
     FUNCTION(route_input_hold) {
         if (params.size() != 1 || (params[0]->getInt() != 0 && params[0]->getInt() != 1))
             throw RpcError(-32602, "expected hold flag (0 or 1)");
