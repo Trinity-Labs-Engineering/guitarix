@@ -1,4 +1,4 @@
-// generated from file 'src/faust/delay.dsp' by dsp2cc:
+// generated from file '../src/faust/delay.dsp' by dsp2cc:
 // Code generated with Faust (https://faust.grame.fr)
 
 
@@ -22,6 +22,7 @@ private:
 	float fRec1[2];
 
 	bool mem_allocated;
+	unsigned int pending_sample_rate;
 	void mem_alloc();
 	void mem_free();
 	void clear_state_f();
@@ -49,7 +50,8 @@ public:
 Dsp::Dsp()
 	: PluginDef(),
 	  fVec0(0),
-	  mem_allocated(false) {
+	  mem_allocated(false),
+	  pending_sample_rate(0) {
 	version = PLUGINDEF_VERSION;
 	flags = 0;
 	id = "delay";
@@ -69,10 +71,12 @@ Dsp::Dsp()
 }
 
 Dsp::~Dsp() {
+	mem_free();
 }
 
 inline void Dsp::clear_state_f()
 {
+	if (!mem_allocated) return;
 	for (int l0 = 0; l0 < 2; l0 = l0 + 1) fRec0[l0] = 0.0f;
 	for (int l1 = 0; l1 < 1048576; l1 = l1 + 1) fVec0[l1] = 0.0f;
 	for (int l2 = 0; l2 < 2; l2 = l2 + 1) fRec2[l2] = 0.0f;
@@ -98,7 +102,12 @@ inline void Dsp::init(unsigned int sample_rate)
 
 void Dsp::init_static(unsigned int sample_rate, PluginDef *p)
 {
-	static_cast<Dsp*>(p)->init(sample_rate);
+	Dsp *dsp = static_cast<Dsp*>(p);
+	dsp->pending_sample_rate = sample_rate;
+	if (dsp->mem_allocated) {
+		dsp->init(sample_rate);
+		dsp->clear_state_f();
+	}
 }
 
 void Dsp::mem_alloc()
@@ -117,10 +126,16 @@ int Dsp::activate(bool start)
 {
 	if (start) {
 		if (!mem_allocated) {
-			mem_alloc();
-			clear_state_f();
+			try {
+				mem_alloc();
+				if (pending_sample_rate) init(pending_sample_rate);
+				clear_state_f();
+			} catch (...) {
+				mem_free();
+				return -1;
+			}
 		}
-	} else if (mem_allocated) {
+	} else {
 		mem_free();
 	}
 	return 0;
@@ -166,7 +181,7 @@ void __rt_func Dsp::compute_static(int count, FAUSTFLOAT *input0, FAUSTFLOAT *ou
 
 int Dsp::register_par(const ParamReg& reg)
 {
-	reg.registerFloatVar("delay.bpm",N_("BPM"),"S",N_("Delay in Beats per Minute"),&fHslider0, 1.2e+02f, 24.0f, 3.6e+02f, 1.0f, 0);
+	reg.registerFloatVar("delay.bpm",N_("BPM"),"S",N_("Delay in Beats per Minute"),&fHslider0, 1.2e+02f, 24.0f, 6e+03f, 0.1f, 0);
 	reg.registerFloatVar("delay.gain",N_("Gain"),"S","",&fVslider0, 0.0f, -2e+01f, 2e+01f, 0.1f, 0);
 	return 0;
 }

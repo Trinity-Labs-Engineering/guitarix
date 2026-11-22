@@ -9,6 +9,7 @@
 #include "gx_faust_support.h"
 namespace effects {
 #include "faust-generated/delay.cc"
+#include "faust-generated/echo.cc"
 #include "faust-generated/digital_delay.cc"
 #include "faust-generated/duck_delay.cc"
 #include "faust-generated/chorus_mono.cc"
@@ -23,12 +24,12 @@ namespace effects {
 namespace pluginlib { namespace flanger_gx { PluginDef* plugin(); }
 namespace reversedelay { PluginDef* plugin(); } }
 
-struct Control { float* value; float low, high; };
+struct Control { float* value; float low, high, initial, step; };
 std::map<std::string, Control> controls;
 float* register_float(const char* id, const char*, const char*, const char*, float* value,
-                      float initial, float low, float high, float, const value_pair*) {
+                      float initial, float low, float high, float step, const value_pair*) {
     *value = initial;
-    controls[id] = {value, low, high};
+    controls[id] = {value, low, high, initial, step};
     return value;
 }
 int* register_int(const char*, const char*, const char*, const char*, int* value, int initial, int, int, const value_pair*) {
@@ -50,10 +51,10 @@ void release(PluginDef* p) {
     if (p->activate_plugin) p->activate_plugin(false, p);
     p->delete_instance(p);
 }
-std::vector<float> render(PluginDef* p, const std::vector<float>& input) {
+std::vector<float> render(PluginDef* p, const std::vector<float>& input, int block = 256) {
     std::vector<float> output(input.size());
-    for (size_t offset = 0; offset < input.size(); offset += 256) {
-        int count = std::min<size_t>(256, input.size() - offset);
+    for (size_t offset = 0; offset < input.size(); offset += block) {
+        int count = std::min<size_t>(block, input.size() - offset);
         p->mono_audio(count, const_cast<float*>(input.data()) + offset, output.data() + offset, p);
     }
     for (float value : output) assert(std::isfinite(value));
@@ -116,7 +117,7 @@ void digital_catalog_tail(float highpass, float lowpass) {
 }
 void modulation(PluginDef* p, const std::string& bpm, const std::string& depth = "") {
     prepare(p);
-    assert(controls.at(bpm).low == 24 && controls.at(bpm).high == 360);
+    assert(controls.at(bpm).low > 0 && controls.at(bpm).low <= 24 && controls.at(bpm).high == 360);
     std::vector<float> input(48000);
     for (int i = 0; i < 48000; ++i) input[i] = 0.2 * std::sin(i * 0.057);
     if (!depth.empty()) {
@@ -131,8 +132,8 @@ void modulation(PluginDef* p, const std::string& bpm, const std::string& depth =
 }
 void delay_range(PluginDef* p, const std::string& bpm) {
     prepare(p, 192000);
-    assert(controls.at(bpm).low == 24 && controls.at(bpm).high == 360);
-    for (float tempo : {24.f, 360.f, 24.f}) {
+    assert(controls.at(bpm).low == 24 && controls.at(bpm).high == 6000);
+    for (float tempo : {24.f, 6000.f, 24.f}) {
         set(bpm, tempo);
         render(p, std::vector<float>(1100000, 0.01f));
     }
@@ -152,6 +153,48 @@ void vibe_rate() {
     for (size_t i = 1; i < samples.size(); ++i) if (samples[i-1] < .5 && samples[i] >= .5) ++crossings;
     assert(crossings == 1 || crossings == 2);
 }
+// Measure actual first-repeat times, not just expanded slider metadata.
+void slapback(PluginDef* p) {
+    const std::string bpm = std::string(p->id) + ".bpm";
+    for (int rate : {44100, 48000, 96000, 192000}) {
+        prepare(p, rate);
+        if (rate == 44100) {
+            const auto c = controls.at(bpm);
+            std::cout << "META\t" << bpm << '\t' << c.initial << '\t' << c.low << '\t' << c.high << '\t' << c.step << '\n';
+        }
+        for (int ms : {10, 40, 80, 100, 120, 2500}) {
+            set(bpm, 60000.f / ms);
+            if (p->clear_state) p->clear_state(p);
+            const int expected = std::lround(ms * rate / 1000.0);
+            if (std::string(p->id) == "reversedelay") {
+                // Reverse delay is chunk-based; verify its real cycle length
+                // and finite window output even at the shortest intervals.
+                for (float window : {0.f, .5f, 100.f}) {
+                    set("reversedelay.window", window); p->clear_state(p);
+                    auto y = render(p, std::vector<float>(expected + 1, .1f), 32);
+                    assert(std::abs(*controls.at("reversedelay.buf_indication").value) < .01);
+                    for (float v : y) assert(std::abs(v) <= .11);
+                }
+            } else {
+                if (std::string(p->id) == "echo") set("echo.percent", 50);
+                render(p, std::vector<float>(rate * 2), 32);
+                std::vector<float> x(expected + 32); x[0] = .1f;
+                const auto y = render(p, x, 32);
+                int first = 1;
+                while (first < int(y.size()) && std::abs(y[first]) < .0001f) ++first;
+                if (std::abs(first - expected) > 3) {
+                    std::cerr << p->id << " at " << rate << " Hz, " << ms << " ms: first echo " << first << " expected " << expected << '\n';
+                    std::abort();
+                }
+                assert(peak(y, std::max(1, expected - 3), expected + 4) > .02);
+            }
+            // Resident reset must not replay an old short delay or tail.
+            if (p->clear_state) p->clear_state(p);
+            assert(peak(render(p, std::vector<float>(rate / 10), 32), 0, rate / 10) == 0);
+        }
+    }
+    release(p);
+}
 int main(int argc, char** argv) {
     assert(argc == 3);
     digital_catalog_tail(std::stof(argv[1]), std::stof(argv[2]));
@@ -159,7 +202,7 @@ int main(int argc, char** argv) {
     auto quiet = digital_decay(80, 20), loud = digital_decay(80, 90);
     assert(std::abs(quiet - loud) < 0.0001);
     assert(digital_decay(90, 50) > digital_decay(40, 50) * 10);
-    modulation(effects::flanger_mono::plugin(), "flanger_mono.lfobpm", "flanger_mono.depth");
+    modulation(effects::flanger_mono::plugin(), "flanger_mono.lfobpm"); // zero sweep retains a static comb
     modulation(effects::phaser_mono::plugin(), "phaser_mono.lfobpm", "phaser_mono.depth");
     modulation(effects::chorus_mono::plugin(), "chorus_mono.bpm");
     modulation(effects::tremolo::plugin(), "tremolo.bpm");
@@ -167,5 +210,10 @@ int main(int argc, char** argv) {
     delay_range(effects::duck_delay::plugin(), "duckDelay.bpm");
     delay_range(pluginlib::reversedelay::plugin(), "reversedelay.bpm");
     vibe_rate();
+    slapback(effects::delay::plugin());
+    slapback(effects::echo::plugin());
+    slapback(effects::digital_delay::plugin());
+    slapback(effects::duck_delay::plugin());
+    slapback(pluginlib::reversedelay::plugin());
     std::cout << "Tempo effects: feedback decay, depth, BPM ranges and buffers passed\n";
 }

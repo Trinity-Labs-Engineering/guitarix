@@ -1,4 +1,4 @@
-// generated from file 'src/faust/duck_delay.dsp' by dsp2cc:
+// generated from file '../src/faust/duck_delay.dsp' by dsp2cc:
 // Code generated with Faust (https://faust.grame.fr)
 
 
@@ -30,16 +30,16 @@ private:
 	unsigned int pending_sample_rate;
 	void mem_alloc();
 	void mem_free();
-	int activate(bool start);
 	void clear_state_f();
+	int activate(bool start);
 	int load_ui_f(const UiBuilder& b, int form);
 	static const char *glade_def;
 	void init(unsigned int sample_rate);
 	void compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0);
 	int register_par(const ParamReg& reg);
 
-	static int activate_static(bool start, PluginDef*);
 	static void clear_state_f_static(PluginDef*);
+	static int activate_static(bool start, PluginDef*);
 	static int load_ui_f_static(const UiBuilder& b, int form);
 	static void init_static(unsigned int sample_rate, PluginDef*);
 	static void compute_static(int count, FAUSTFLOAT *input0, FAUSTFLOAT *output0, PluginDef*);
@@ -198,7 +198,7 @@ int Dsp::register_par(const ParamReg& reg)
 {
 	reg.registerFloatVar("duckDelay.amount",N_("Amount"),"S","",&fHslider2, 0.5, 0.0, 56.0, 0.05, 0);
 	reg.registerFloatVar("duckDelay.attack",N_("Attack"),"S","",&fHslider4, 0.1, 0.05, 0.5, 0.05, 0);
-	reg.registerFloatVar("duckDelay.bpm",N_("BPM"),"S","",&fHslider1, 1.2e+02, 24.0, 3.6e+02, 1.0, 0);
+	reg.registerFloatVar("duckDelay.bpm",N_("BPM"),"S","",&fHslider1, 1.2e+02, 24.0, 6e+03, 0.1, 0);
 	reg.registerFloatVar("duckDelay.feedback",N_("Feedback"),"S","",&fHslider0, 0.0, 0.0, 1.0, 0.05, 0);
 	reg.registerFloatVar("duckDelay.relese",N_("Release"),"S","",&fHslider3, 0.1, 0.05, 2.0, 0.05, 0);
 	return 0;

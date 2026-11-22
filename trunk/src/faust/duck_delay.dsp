@@ -25,7 +25,7 @@ declare category "Echo / Delay";
 import("stdfaust.lib");
 
 //Constrols
-p_time = (60000 / hslider("bpm[name:BPM][unit:bpm]", 120, 24, 360, 1)):si.smooth(ba.tau2pole(0.1));
+p_time = (60000 / hslider("bpm[name:BPM][unit:bpm]", 120,24,6000,0.1)):si.smooth(ba.tau2pole(0.1));
 p_feedback = hslider("feedback[name:Feedback]", 0, 0, 1, 0.05);
 p_attack_time = hslider("attack[name:Attack]", 0.1, 0.05, 0.5, 0.05);
 p_release_time = hslider("relese[name:Release]", 0.1, 0.05, 2, 0.05);

@@ -49,7 +49,10 @@ private:
 	    set_full(0, full_samples, t*full_samples);
 	}
 	bool set_full(float min_val, unsigned int full_samples, unsigned int active_samples) {
-	    if(active_samples >= full_samples) return false;
+	    if(full_samples < 3) return false;
+	    // Short slapback chunks still need a finite two-sample fade. Integer
+	    // division by two otherwise becomes zero at the minimum Window setting.
+	    active_samples = std::clamp(active_samples, 2u, full_samples - 1);
 
 	    acc = min_val;
 	    val = min_val;
@@ -158,7 +161,7 @@ void ReverseDelay::clear_state_impl(PluginDef *plugin) {
 
 int ReverseDelay::registerparam(const ParamReg& reg) {
     ReverseDelay& self = *static_cast<ReverseDelay*>(reg.plugin);
-    reg.registerFloatVar("reversedelay.bpm", N_("BPM"), "S", N_("Delay in Beats per Minute"), &self.bpm, 120, 24, 360, 1, 0);
+    reg.registerFloatVar("reversedelay.bpm", N_("BPM"), "S", N_("Delay in Beats per Minute"), &self.bpm, 120, 24, 6000, 0.1, 0);
     reg.registerFloatVar("reversedelay.feedback", N_("Feedback"), "S", N_("Feedback"), &self.feedback, 0, 0, 1, 0.05, 0);
     reg.registerFloatVar("reversedelay.window", N_("Window (%)"), "S", N_("Crossfade between delayed chunks in percents"), &self.window, 50, 0, 100, 1, 0);
     reg.registerFloatVar("reversedelay.drywet", N_("Dry/Wet"), "S", N_("Dry/Wet"), &self.drywet, 0.5, 0, 1, 0.05, 0);
@@ -196,7 +199,7 @@ void ReverseDelay::process(int count, float *input, float *output, PluginDef *pl
 
     //Update params
     if(self.bpm_old != self.bpm) {
-	self.cur_buf_size = (60.0 / std::max(24.0f, std::min(360.0f, self.bpm))) * self.sample_rate;
+	self.cur_buf_size = (60.0 / std::max(24.0f, std::min(6000.0f, self.bpm))) * self.sample_rate;
 	self.counter = 0;
 	self.ow.set_coef((self.window)/(100.0 + 1.0), self.cur_buf_size/2); //Avoid to pass 1
 

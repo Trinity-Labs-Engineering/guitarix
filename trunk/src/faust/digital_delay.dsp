@@ -39,7 +39,7 @@ dide         = _<:*(dry),(delx(B) : *(wet)):>_ with {
 
     delayed  = de.sdelay(N, interp, min(2^19,(tempo2note(tact,dbpm)))) with {
       dtime  = hslider("delay[name:Delay][tooltip:Delay Time in ms]", 2500, 0.1, 5000, 0.1)*ma.SR/1000.0;
-      dbpm   = ba.tempo(hslider("bpm[name:BPM][tooltip:Delay in Beats per Minute]",120,24,360,1));
+      dbpm   = ba.tempo(hslider("bpm[name:BPM][tooltip:Delay in Beats per Minute]",120,24,6000,0.1));
       tact   = hslider("notes[name:Notes][enum:Dotted 1/2 note|1/2 note|1/2 note triplets|
 Dotted 1/4 note|1/4 note|1/4 note triplets|Dotted 1/8 note|1/8 note|1/8 note triplets|
 Dotted 1/16 note|1/16 note|1/16 note triplets|Dotted 1/32 note|1/32 note|1/32 note triplets|
