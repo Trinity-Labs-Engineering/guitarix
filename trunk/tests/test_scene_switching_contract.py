@@ -625,6 +625,9 @@ class SceneSwitchingContractTests(unittest.TestCase):
             tracker,
             registration(ladspa, "gx_effects::compressor::plugin()"),
         )
+        for source in (engine, ladspa):
+            for model in ("studio_compressor", "fet_compressor", "opto_compressor"):
+                self.assertIn(tracker, registration(source, f"gx_effects::{model}::plugin()"))
         self.assertIn("float resident_bypass_output[count];", audio)
         self.assertIn("memcpy(resident_bypass_output, output", audio)
         self.assertIn("p->plugin->flags & PGNI_RESIDENT_TRACK_BYPASS", audio)

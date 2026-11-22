@@ -500,6 +500,12 @@ void GxEngine::load_static_plugins() {
     pl.add(gx_effects::impulseresponse::plugin(), PLUGIN_POS_RACK, PGN_GUI);
     pl.add(gx_effects::compressor::plugin(),      PLUGIN_POS_RACK,
            PGN_GUI | PGNI_RESIDENT_TRACK_BYPASS);
+    pl.add(gx_effects::studio_compressor::plugin(), PLUGIN_POS_RACK,
+           PGN_GUI | PGNI_RESIDENT_TRACK_BYPASS);
+    pl.add(gx_effects::fet_compressor::plugin(), PLUGIN_POS_RACK,
+           PGN_GUI | PGNI_RESIDENT_TRACK_BYPASS);
+    pl.add(gx_effects::opto_compressor::plugin(), PLUGIN_POS_RACK,
+           PGN_GUI | PGNI_RESIDENT_TRACK_BYPASS);
     pl.add(gx_effects::expander::plugin(),        PLUGIN_POS_RACK,
            PGN_GUI | PGNI_RESIDENT_TRACK_BYPASS);
     pl.add(gx_effects::overdrive::plugin(),       PLUGIN_POS_RACK, PGN_GUI);

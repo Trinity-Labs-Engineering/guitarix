@@ -1,0 +1,74 @@
+// Artemis dynamics building blocks. GPL-3.0-only.
+// gain_computer is adapted from Bart Brouns' peak_compression_gain_mono_db:
+// compressors.lib 1.6.0, supplied with this build's Faust libraries 2.59.0.
+// https://github.com/grame-cncm/faustlibraries/blob/master/compressors.lib
+// Source SHA-256: e89e97a117d9159ac7c2139758b971b2e5260ff78cce320c400e67baf036eccf
+// Original author Bart Brouns, GPLv3. See ../../COPYING.
+// Remaining integration/behavioural models: Copyright (C) 2026 Artemis contributors.
+// These are topology/response models, not calibrated 1176 or LA-2A circuit clones.
+import("stdfaust.lib");
+
+// Seed controls from the saved value on the first sample. Subsequent edits take
+// a 10 ms time constant, including discrete ratio changes. No startup fade from
+// zero, allocation, lookahead, or scene-settling wait is required.
+smooth_control = si.smooth(ba.tau2pole(0.010) * (1 : mem));
+
+declare gain_computer author "Bart Brouns; Artemis integration";
+declare gain_computer license "GPL-3.0-only";
+gain_computer(strength, threshold, knee, level) =
+    select3((level > threshold-knee/2) + (level > threshold+knee/2),
+        0, (level-threshold+knee/2)^2 / (2*max(0.000001,knee)),
+        level-threshold) : max(0) : *(-strength);
+
+level_db = abs : max(1e-12) : ba.linear2db;
+ar(attack, release) = si.onePoleSwitching(max(1/ma.SR,attack), max(1/ma.SR,release));
+
+// Feed-forward peak detection with gain-domain ballistics. Smoothing the
+// reduction after the knee also smooths threshold/ratio automation.
+studio(ratio, threshold, knee, attack, release, x) = x * ba.db2linear(gain)
+with {
+    gain = x : level_db : gain_computer(1-1/ratio,threshold,knee) : ar(release,attack);
+};
+
+// Feedback detector observes the previous compressed sample, before makeup,
+// colour and dry/wet. Feedback slope R-1 gives steady-state ratio R (using
+// 1-1/R here would incorrectly limit the effective ratio to less than 2:1).
+// Ratio-scaled detector time constants keep the high-ratio, fastest setting
+// stable and preserve approximately the requested closed-loop attack/release.
+fet(ratio, attack, release) = loop ~ _
+with {
+    loop(previous,x) = x * ba.db2linear(gain)
+    with {
+        gain = previous : abs : ar(attack*ratio,release*ratio) : level_db
+            // Keep the input-referred knee near 3 dB as feedback ratio rises.
+            : gain_computer(ratio-1,-18,3/ratio)
+            : si.smooth(ba.tau2pole(attack/2));
+    };
+};
+
+// Optical-cell-inspired fast response and slow charge storage. A brief peak
+// scarcely charges the slow branch; sustained reduction leaves a longer tail.
+// Recovery scales both releases without resetting either envelope.
+opto(ratio, threshold, recovery, x) = x * ba.db2linear(-reduction)
+with {
+    demand = x : abs : si.smooth(ba.tau2pole(0.005)) : level_db
+        : gain_computer(1-1/ratio,threshold,6) : *(-1);
+    fast = demand : ar(0.010,0.060*recovery);
+    stored = demand : ar(0.350,2.5*recovery);
+    reduction = max(fast,0.5*stored);
+};
+
+// First-order antiderivative antialiasing for f(x)=x/sqrt(1+x*x).
+// Rationalising the divided difference avoids cancellation at equal samples.
+// Mild, odd-harmonic colour with unity small-signal gain; no DC injection.
+// Both colour endpoints and the parallel dry path share the half-sample FIR.
+// This is an original saturator, not a transformer or transistor simulation.
+half_sample(x) = (x+x')*0.5;
+colour(amount,x) = (1-amount)*half_sample(x) + amount*saturated/drive
+with {
+    drive = 1+3*amount;
+    z = x*drive;
+    saturated = (z+z') / (sqrt(1+z*z)+sqrt(1+z'*z'));
+};
+
+blend(mix,dry,wet) = dry + mix*(wet-dry);

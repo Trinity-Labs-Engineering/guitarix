@@ -1,5 +1,12 @@
 Attribution for the mono Faust additions
 
+Compressor gain computer: Bart Brouns, adapted from compressors.lib 1.6.0
+(GPLv3; current upstream identifies GPL-3.0-only). The Artemis studio, FET and
+optical behavioural models, control wrappers and rationalised antialiasing
+integration are Copyright (C) 2026 Artemis contributors, GPL-3.0-only.
+Source identity and changes are documented in artemis_compressors.lib and
+FAUST_COMPRESSORS.md. See ../../COPYING for the GPL v3 text.
+
 Spring: Daniel Leonov (Faust springreverb_demo declares MIT).
 Phase 90: David Braun (MIT).
 Fulltone OCD: David Braun (MIT); artemis_ocd.lib retains the upstream

@@ -498,7 +498,7 @@ void __rt_func MonoModuleChain::process(int count, float *input, float *output) 
     memcpy(output, input, count*sizeof(float));
     route_input_gate.process(output, count);
     // A small set of input-dependent resident processors (currently the
-    // dynamics pair) must observe the live signal even while their audible
+    // compressors and expander) must observe the live signal even while their audible
     // output is bypassed. Reuse one stack buffer for every such processor;
     // nothing from the background pass is published to the chain.
     float resident_bypass_output[count];
