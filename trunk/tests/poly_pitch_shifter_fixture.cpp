@@ -524,6 +524,21 @@ void operator delete[](void *memory) noexcept { std::free(memory); }
 
 int main(int argc, char** argv)
 {
+    if (argc == 6 && std::string(argv[1]) == "render-input") {
+        const int rate = std::atoi(argv[2]), quality = std::atoi(argv[4]);
+        const double ratio = std::pow(2., std::atof(argv[3]) / 12.);
+        std::vector<float> input;
+        float chunk[4096];
+        while (std::cin.read(reinterpret_cast<char*>(chunk), sizeof(chunk)) || std::cin.gcount())
+            input.insert(input.end(), chunk, chunk + std::cin.gcount() / sizeof(float));
+        gx_engine::PolyphonicPitchShifter shifter;
+        shifter.prepare(rate, quality);
+        shifter.set_bass_mode(std::atoi(argv[5]) != 0);
+        std::vector<float> output(input.size());
+        render(shifter, input, output, ratio, 16);
+        std::cout.write(reinterpret_cast<const char*>(output.data()), output.size() * sizeof(float));
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "regressions") {
         test_bass_window_evidence();
         test_chord_articulation_latency();

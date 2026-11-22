@@ -33,8 +33,8 @@ The legacy quality parameter selects the base window lengths:
 | 1 (Houston's selection) | 30 ms, TONE3000 default | 16 ms |
 | 2 (realtime) | 20 ms | 11 ms |
 
-All four effects expose `bass_mode`: **Guitar** (0, default) keeps the selected
-base window; **Bass** (1) allows extra range for low notes. Houston places the
+All pitch effects expose `bass_mode`: **Guitar** (0, default) uses the selected
+base window with bounded chord adaptation; **Bass** (1) allows extra range for low notes. Houston places the
 Guitar/Bass toggle in the pedal focus footer and saves it with the preset.
 Existing presets without this setting use Guitar, including expanded presets
 whose saved control definitions predate the switch. Select Bass for bass parts
@@ -42,8 +42,8 @@ that need the extended range. The control changes delay geometry, not note
 quantisation or the harmoniser's musical key/interval rules.
 
 In Bass mode, a low-pass cycle estimator requires two consistent periods, then
-requests 2.4 periods of delay range (up to 100 ms) and 1.5 periods of correlation
-(up to 45 ms). Startup and uncertain periods keep the base window or briefly
+requests 2.4 periods of delay range (up to 100 ms). Correlation now uses 45 ms of
+past input in both modes. Startup and uncertain periods keep the base window or briefly
 retain the last confirmed range; uncertainty never requests maximum latency.
 A 5% resizing margin suppresses crossing jitter. A confirmed higher note
 restores the base window immediately; without further confirmed periods, the
@@ -58,6 +58,64 @@ lag search that put bass drop D almost a semitone sharp at +12 in the harmonic
 regression signal. Low B, drop D and low E are checked at 44.1/48/96 kHz with
 sines and harmonic-rich notes, shifts from -12 through +24, and varying blocks.
 Fixed Pitch and Dual Pitch still do not classify notes or quantise to a key.
+
+## Sustained chords
+
+The shared engine used by Pitch Shift, Dual Pitch and both harmonisers now
+matches 45 ms of input history, independently of the moving audio-delay window.
+A mild 800 Hz shelf in the **control signal only** gives upper strings and
+harmonics more influence on splice selection. The crossfade gain still uses
+the correlation of the original audio, so weighting the search does not alter
+the wet spectrum or introduce a gain boost.
+
+After startup, two consecutive drift searches below 0.96 correlation request
+one-third more landing range, capped at 40 ms. Houston's 30 ms setting can
+therefore extend to 40 ms on a sustained, poorly matching chord; well-matching
+notes keep the short window. The legacy 20 ms mode extends only to 26.7 ms,
+and the 60 ms mode needs no further chord extension. The request stays latched
+until a new attack or silence, avoiding repeated expansion/contraction as a
+better match becomes available. Geometry changes still occur only between
+searches and fades. Bass mode can separately earn its longer low-note range.
+
+This is a bounded quality/latency trade: the nominal mean for a 40 ms window
+is 21 ms, versus the 30 ms base window's 16 ms. Onset re-sync remains enabled,
+and the previous quiet-articulation and muted-tail regressions still pass.
+It does not restore the previous unconditional 100 ms uncertainty fallback.
+The 45 ms correlation history is not an additional audio delay.
+
+On the repository's four recorded guitar chords, sustained energy outside the
+shifted input partials fell by an average 2.6–5.6 dB across shifts of ±2, ±7 and
+±12 semitones, compared with commit `565735f3`. The measurement uses the dry
+take's spectral peaks and allows 3 Hz or 0.3% around each shifted partial;
+these are offline measurements, not a listening assessment. Synthetic tests
+also cover harmonic-rich close dyads and six-string minor chords in both modes
+at 44.1/48/96 kHz, with level preservation as well as unwanted-frequency energy.
+
+## Virtual Capo
+
+`virtual_capo` is a separate, fully wet mono effect. Its `semitone` control
+transposes every string together from −12 to +12 in whole-semitone steps
+(default +2); `bass_mode` selects Guitar/Bass. It does not identify a key or
+generate per-note harmonies. Put it before drive/amp processing for a virtual
+retuning/capo effect.
+
+It uses the shared improvements above with a 60 ms base landing range, giving
+complex chords more opportunity to find a compatible splice. The nominal mean
+delay is 31 ms, with variable wet delay and attack re-sync as in the other
+effects; Bass can extend further for low notes. This deliberately favours
+sustained chord quality over the faster pitch effects. The synthetic minor
+chord regression requires lower unwanted-frequency energy than the fast mode
+at down/up tuning, fifth and octave shifts. Very close or dissonant chords at
+large shifts can still compromise individual partials in this time-domain
+engine; the Capo is not a claim of artifact-free polyphony.
+
+Houston lists it in **Pitch**, with a signed semitone readout and the same
+Guitar/Bass footer toggle, preset persistence and expression assignment support.
+It has no dry blend that could mix the original tuning into the transposition.
+All allocation remains in sample-rate setup; reset, instrument changes and
+in-place processing are covered by the native plugin fixture.
+
+## Mixing and lifecycle
 
 The dry path is immediate unless the legacy latency-compensation option is
 enabled, in which case it uses the fixed base-window nominal delay above. This
@@ -121,6 +179,11 @@ keep that chord at the base window; the tested dyad responds to quiet markers
 within 30 ms and has no audible tail after 40 ms. These are synthetic DSP
 measurements, not end-to-end device latency or a hardware listening assessment.
 
+`tests/test_pitch_chords.py` adds spectral and level checks for sustained
+harmonic-rich chords and the production Virtual Capo plugin. It also exercises
+the Capo's bass tuning, absence of dry leakage, arbitrary block sizes, in-place
+processing, scene reset and allocation-free callbacks.
+
 During the initial port, the original TONE3000 source compiled with JUCE and this
 adapter produced bit-identical output for 1,116 scenarios / 65,007,360 samples:
 all three windows, 44.1/48/96 kHz, sine/chords/attacks/noise plus bass, shifts
@@ -132,7 +195,7 @@ bit-for-bit, covering JUCE's ties-to-even correlation-step rounding.
 
 The later independent-level correction replaces the startup dry-to-wet blend
 with a wet fade from silence and scales unready fallback audio by Dry. That correction alone left pitch search and interpolation unchanged. The later
-bass adaptation described above intentionally changes search geometry, so the
-initial port's bit-identical comparison is historical, not a claim for current
-bass output. Mix regressions cover both zero, each path alone, intermediate
+bass and chord adaptations described above intentionally change search geometry
+and correlation, so the initial port's bit-identical comparison is historical,
+not a claim for current output. Mix regressions cover both zero, each path alone, intermediate
 levels, startup, reset, and an unprepared engine, including in-place buffers.

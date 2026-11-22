@@ -46,9 +46,8 @@
 
 namespace gx_engine {
 
-// Tuning, all in ms so every rate behaves the same. The values are the ones
-// upstream's plugin/docs/pitch-shift.md bench settled on, plus bounded bass
-// window adaptation below; none is exposed.
+// Tuning in ms so every rate behaves the same. The upstream splice geometry
+// is extended with sustained-chord matching and bounded instrument adaptation.
 namespace tone3000_pitch {
 // A drift splice crossfades over kFadeMs when its lag matches well and
 // stretches toward kFadeMaxMs as the match worsens (ncc from kFadeNccHi
@@ -63,7 +62,14 @@ constexpr double kFadeMinMs = 6.0;
 constexpr double kFadeNccHi = 0.95;
 constexpr double kFadeNccLo = 0.6;
 constexpr double kOnsetFadeMs = 2.0;     // crossfade of an onset re-sync
-constexpr double kMaxCorrMs = 25.0;      // correlation window (capped at the buffer)
+// Correlation uses past input, independently of the moving audio delay. A
+// longer history keeps a chord's beating partials from taking turns steering
+// the splice; it does not add audio latency.
+constexpr double kMaxCorrMs = 45.0;
+constexpr double kCorrelationTiltHz = 800.0;
+constexpr double kCorrelationTiltGain = 1.0;
+constexpr double kChordWindowMs = 40.0;
+constexpr double kChordMatch = 0.96;
 constexpr double kOnsetSpanMs = 4.0;     // an onset re-sync lands within this of the floor
 constexpr double kRefractoryMs = 40.0;   // one re-sync per attack
 constexpr double kDetectorHpfHz = 600.0; // attacks are HF-rich, low fundamentals never ripple it
@@ -164,6 +170,7 @@ struct State {
   // The adapter is mono, as is Guitarix's existing Pitch Shift effect.
   Ring ring;
   MirroredRing control;
+  double correlationLow = 0.0, correlationCoefficient = 0.0;
   int primeLeft = 0, blendLength = 1, blendLeft = 0;
   float startupGain = 0.0f, blendStep = 1.0f;
 
@@ -180,6 +187,12 @@ struct State {
   int64_t bassCrossing = -1, bassConfirmed = 0;
   bool bassPositive = false;
   bool bassEnabled = false;
+  // Two poor drift matches on a held sound earn a little more landing range.
+  // Latch until a new attack/silence: shrinking as soon as the wider search
+  // finds a good match would continuously alternate between the two windows.
+  bool chordWide = false;
+  int chordVotes = 0;
+  double chordEnvelope = 0.0;
   int fadeLen = 0, fadeMaxLen = 0, fadeMinLen = 0, fadeLo = 0, fadeHi = 0, onsetFadeLen = 0;
   int onsetSpan = 0, refractory = 0, cellLen = 1, coarseStep = 1, searchLead = 1, searchLeadNow = 1;
 
@@ -198,6 +211,7 @@ struct State {
   // stays valid because both segments move together on a sustained note.
   struct Search {
     bool active = false, ready = false;
+    bool drift = false;
     int lo = 0, hi = 0, next = 0, perSample = 1;
     double bestScore = -1e9, bestNcc = 0.0;
     int bestDelay = 0;
@@ -279,6 +293,10 @@ struct State {
   void reset() {
     ring.clear();
     control.clear();
+    correlationLow = 0.0;
+    chordWide = false;
+    chordVotes = 0;
+    chordEnvelope = 0.0;
     written = 0;
     ratio = 1.0;
     dMax = baseMax; corrLen = baseCorr;
@@ -343,7 +361,10 @@ struct State {
     }
     // Geometry never changes halfway through a search or crossfade. Changes
     // are sample-driven, hence independent of the host's callback block size.
-    const int nextMax = ratio == 1.0 || !bassEnabled ? baseMax : desiredMax;
+    const int chordMax = chordWide ? std::max(baseMax, std::min(baseMax * 4 / 3,
+      static_cast<int>(sampleRate * kChordWindowMs * 0.001))) : baseMax;
+    const int nextMax = ratio == 1.0 ? baseMax
+      : std::max(chordMax, bassEnabled ? desiredMax : baseMax);
     const int nextCorr = ratio == 1.0 || !bassEnabled ? baseCorr : desiredCorr;
     if (!fading && !search.active && !search.ready && (nextMax != dMax || nextCorr != corrLen)) {
       const int previousFade = fadeHi, previousLead = searchLeadNow;
@@ -391,6 +412,7 @@ struct State {
   void beginSearch(int lo, int hi, int lead) {
     search.active = true;
     search.ready = false;
+    search.drift = lead > 0;
     search.now0 = written - 1;
     search.a0 = static_cast<int64_t>(std::floor(rA));
     search.lo = lo;
@@ -434,6 +456,14 @@ struct State {
       search.resultJump = (search.now0 - search.bestDelay) - search.a0;
       search.active = false;
       search.ready = true;
+      if (search.drift && chordEnvelope > 1e-5 && written > sampleRate * 0.1) {
+        if (search.bestNcc < kChordMatch) {
+          chordVotes = std::min(2, chordVotes + 1);
+          if (chordVotes == 2) chordWide = true;
+        } else {
+          chordVotes = 0;
+        }
+      }
     }
   }
 
@@ -450,7 +480,16 @@ struct State {
     fading = true;
     fade = 0.0;
     fadeInc = 1.0 / fadeSamples;
-    fadeNcc = std::max(0.0, std::min(1.0, search.bestNcc));
+    // Search uses a spectrally balanced signal, but the fade's level law must
+    // describe the actual audio. Otherwise the search emphasis itself pumps
+    // the level of bass-heavy chords through every crossfade.
+    double xx = 0.0, xy = 0.0, yy = 0.0;
+    for (int i = 1; i <= corrLen; ++i) {
+      const double x = ring.at(search.a0 - i);
+      const double y = ring.at(search.now0 - search.bestDelay - i);
+      xx += x*x; xy += x*y; yy += y*y;
+    }
+    fadeNcc = std::max(0.0, std::min(1.0, xy / (std::sqrt(xx*yy) + 1e-9)));
   }
 
   // Runs the detector on one control sample; true on a pick attack.
@@ -537,16 +576,18 @@ public:
         auto& s = state;
         const double sampleRate = std::max(8000, new_sample_rate);
         s.sampleRate = sampleRate;
-        // Houston selects mode 1: 30 ms, with extra headroom in Bass mode.
+        // Houston's pitch effects select mode 1: 30 ms, with bounded extra
+        // chord range and Bass headroom. Virtual Capo selects mode 0: 60 ms.
         // Preserve the legacy quality setting for existing Guitarix presets.
         const double windowMs = quality <= 0 ? 60.0 : quality >= 2 ? 20.0 : 30.0;
         s.dMin = static_cast<int>(sampleRate * kMinDelayMs * 0.001);
         s.dMax = static_cast<int>(sampleRate * windowMs * 0.001);
-        s.corrLen = std::min(s.dMax, static_cast<int>(sampleRate * kMaxCorrMs * 0.001));
+        s.corrLen = static_cast<int>(sampleRate * kMaxCorrMs * 0.001);
         s.baseMax = s.dMax; s.baseCorr = s.corrLen;
         s.maxWindow = static_cast<int>(sampleRate * kBassWindowMs * 0.001);
         s.maxCorr = static_cast<int>(sampleRate * kBassCorrMs * 0.001);
         s.bassCoefficient = 1 - std::exp(-2.0 * kPi * 55.0 / sampleRate);
+        s.correlationCoefficient = 1 - std::exp(-2.0 * kPi * kCorrelationTiltHz / sampleRate);
         s.bassRelease = std::exp(-1.0 / (sampleRate * 0.060));
         s.fadeLen = std::max(8, static_cast<int>(sampleRate * kFadeMs * 0.001));
         s.fadeMaxLen = std::max(s.fadeLen, static_cast<int>(sampleRate * kFadeMaxMs * 0.001));
@@ -625,7 +666,11 @@ public:
           const int64_t now = s.written++;
           const float raw = input[i];
           s.ring.write(now, raw);
-          s.control.write(now, raw);
+          // Give upper strings/harmonics a say in the lag search, instead of
+          // aligning just the loudest low partial. This is control-only: wet
+          // and dry audio retain their original spectrum.
+          s.correlationLow += s.correlationCoefficient * (raw - s.correlationLow);
+          s.control.write(now, static_cast<float>(raw + kCorrelationTiltGain * (raw - s.correlationLow)));
           s.followBass(raw);
           const double leadDrift = drift * (s.searchLeadNow + 4);
           const int leadDriftI = static_cast<int>(std::ceil(leadDrift));
@@ -634,6 +679,11 @@ public:
           const double delay = static_cast<double>(now) - s.rA;
           const int guard = s.lowGuard();
           const bool onset = s.detectOnset(raw);
+          s.chordEnvelope = std::max(std::abs(static_cast<double>(raw)), s.chordEnvelope * s.bassRelease);
+          if (onset || s.chordEnvelope < 1e-5) {
+            s.chordWide = false;
+            s.chordVotes = 0;
+          }
           // Where a splice may land (delay at splice time). Downshift: anywhere
           // from the floor up to where the shortest fade and the next search's
           // lead still fit before dMax. Upshift: the mirror image above the

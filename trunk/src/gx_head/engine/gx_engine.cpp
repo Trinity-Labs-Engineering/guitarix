@@ -569,6 +569,7 @@ void GxEngine::load_static_plugins() {
 	pl.add(gx_effects::duck_delay::plugin(),      PLUGIN_POS_RACK, PGN_GUI);
 	pl.add(pluginlib::reversedelay::plugin(),     PLUGIN_POS_RACK, PGN_GUI);
 	pl.add(pluginlib::dual_pitch::plugin(),       PLUGIN_POS_RACK, PGN_GUI);
+	pl.add(pluginlib::virtual_capo::plugin(),     PLUGIN_POS_RACK, PGN_GUI);
     pl.add(pluginlib::audition_effects::tone_machine(), PLUGIN_POS_RACK, PGN_GUI);
     pl.add(pluginlib::audition_effects::super_fuzz(), PLUGIN_POS_RACK, PGN_GUI);
     pl.add(pluginlib::audition_effects::muff(), PLUGIN_POS_RACK, PGN_GUI);
