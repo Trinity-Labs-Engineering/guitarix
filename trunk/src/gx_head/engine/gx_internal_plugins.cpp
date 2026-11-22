@@ -2813,6 +2813,7 @@ smbPitchShift::smbPitchShift(EngineControl& engine_, sigc::slot<void> sync_):
   a(1.0f), b(1.0f), c(1.0f), d(1.0f), l(0.0f),
   wet(50.0f),
   dry(0.0f),
+  bass_mode(0.0f),
   octave(0),
   sampleRate(48000),
   latency(0),
@@ -2945,6 +2946,7 @@ void always_inline smbPitchShift::PitchShift(int count, float *indata, float *ou
     else if (octave == 2) octave_semitones = -12;
     const double ratio = pow(2.0,
         (semitones + octave_semitones)*(1.0/12.0));
+    pitch_shifter.set_bass_mode(bass_mode >= 0.5f);
     pitch_shifter.process(indata, outdata, count, ratio,
         wet_gain, dry_gain, l >= 0.5f, a, b, c, d);
 }
@@ -2960,6 +2962,8 @@ int smbPitchShift::register_par(const ParamReg& reg)
     reg.registerIntVar("smbPitchShift.latency",N_("latency settings"),"B",N_("latency settings"),&latency, 0, 0, 0, latency_set);
     reg.registerFloatVar("smbPitchShift.wet", N_("Wet"), "S", N_("Wet level: 0 = off, 50 = unity, 100 = +6 dB"), &wet, 50.0, 0.0, 100.0, 1, 0);
     reg.registerFloatVar("smbPitchShift.dry", N_("Dry"), "S", N_("Dry level: 0 = off, 50 = unity, 100 = +6 dB"), &dry, 0.0, 0.0, 100.0, 1, 0);
+    static const value_pair instruments[] = {{"Guitar", "Guitar"}, {"Bass", "Bass"}, {nullptr, nullptr}};
+    reg.registerFloatVar("smbPitchShift.bass_mode", N_("Instrument"), "S", N_("Bass allows a longer delay for low notes"), &bass_mode, 0, 0, 1, 1, instruments);
     reg.registerFloatVar("smbPitchShift.a", N_("low"), "S", N_("Sub"), &a, 1.0, 0.0, 2.0, 0.01, 0);
     reg.registerFloatVar("smbPitchShift.b", N_("middle low"), "S", N_("Low"), &b, 1.0, 0.0, 2.0, 0.01, 0);
     reg.registerFloatVar("smbPitchShift.c", N_("middle treble"), "S", N_("Mid"), &c, 1.0, 0.0, 2.0, 0.01, 0);
@@ -2996,6 +3000,7 @@ int smbPitchShift::load_ui_f(const UiBuilder& b, int form)
     b.create_selector_no_caption("smbPitchShift.octave");
     b.create_selector_no_caption("smbPitchShift.l");
     b.create_selector_no_caption("smbPitchShift.latency");
+    b.create_selector_no_caption("smbPitchShift.bass_mode");
     b.insertSpacer();
     }
     b.closeBox();

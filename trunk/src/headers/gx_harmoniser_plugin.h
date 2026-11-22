@@ -16,6 +16,7 @@ template<bool Dual> class Harmoniser : public PluginDef {
     PolyphonicPitchShifter voices[Dual ? 2 : 1];
     float tonic = 3, mode = 0, interval1 = 2, interval2 = 4;
     float wet = 50, mix = 50, dry = 50;
+    float bass_mode = 0;
     float gate[2] = {0, 0}, gate_step = 1.0f / 240;
     int held_note = -1;
     // A single lock-free snapshot for the non-realtime status endpoint. No
@@ -52,6 +53,7 @@ template<bool Dual> class Harmoniser : public PluginDef {
         const float balance = level(self.mix) * 0.01f;
         const float gains[] = {Dual ? balance : level(self.wet) * 0.02f, 1 - balance};
         const float dry_gain = level(self.dry) * 0.02f;
+        for (auto& voice : self.voices) voice.set_bass_mode(self.bass_mode >= 0.5f);
         float original[256], shifted[256];
         for (int offset = 0; offset < count;) {
             // Split on detector boundaries so results do not depend on JACK's
@@ -107,6 +109,8 @@ template<bool Dual> class Harmoniser : public PluginDef {
             add("mix", "Voice Mix", "0 = only Voice 2, 100 = only Voice 1", &self.mix, 50, 0, 100);
         } else add("wet", "Wet", "0 = off, 50 = unity, 100 = +6 dB", &self.wet, 50, 0, 100);
         add("dry", "Dry", "0 = off, 50 = unity, 100 = +6 dB", &self.dry, 50, 0, 100);
+        static const value_pair instruments[] = {{"Guitar", "Guitar"}, {"Bass", "Bass"}, {nullptr, nullptr}};
+        add("bass_mode", "Instrument", "Bass allows a longer delay for low notes", &self.bass_mode, 0, 0, 1, instruments);
         return 0;
     }
     static int ui(const UiBuilder& builder, int form) {
@@ -119,6 +123,7 @@ template<bool Dual> class Harmoniser : public PluginDef {
         if (Dual) builder.create_small_rackknobr((prefix + "voice2").c_str(), "Voice 2");
         builder.create_small_rackknob((prefix + (Dual ? "mix" : "wet")).c_str(), Dual ? "Voice Mix" : "Wet");
         builder.create_small_rackknob((prefix + "dry").c_str(), "Dry");
+        builder.create_selector((prefix + "bass_mode").c_str(), "Instrument");
         builder.closeBox();
         return 0;
     }

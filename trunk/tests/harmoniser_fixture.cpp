@@ -102,8 +102,8 @@ int main(int argc, char** argv) {
         std::cout << "tracker-ok\n";
         return 0;
     }
-    // render dual rate frequency tonic mode interval1 interval2 mix wet dry block inplace kind
-    assert((command=="render" || command=="render-input") && argc==15);
+    // render dual rate frequency tonic mode interval1 interval2 mix wet dry block inplace kind bass_mode
+    assert((command=="render" || command=="render-input") && argc==16);
     const bool dual=std::atoi(argv[2]);
     const int rate=std::atoi(argv[3]), block=std::atoi(argv[12]), kind=std::atoi(argv[14]);
     const double frequency=std::atof(argv[4]);
@@ -112,13 +112,14 @@ int main(int argc, char** argv) {
     const std::string prefix=dual ? "dual_harmoniser." : "harmoniser.";
     ParamReg reg{plugin,reg_float,nullptr,nullptr};
     plugin->register_params(reg);
-    assert(controls.size()==(dual ? 6u : 5u));
+    assert(controls.size()==(dual ? 7u : 6u));
     *controls.at(prefix+"tonic")=std::atof(argv[5]);
     *controls.at(prefix+"mode")=std::atof(argv[6]);
     *controls.at(prefix+(dual ? "voice1" : "interval"))=std::atof(argv[7]);
     if (dual) { *controls.at(prefix+"voice2")=std::atof(argv[8]); *controls.at(prefix+"mix")=std::atof(argv[9]); }
     else *controls.at(prefix+"wet")=std::atof(argv[10]);
     *controls.at(prefix+"dry")=std::atof(argv[11]);
+    *controls.at(prefix+"bass_mode")=std::atof(argv[15]);
     plugin->set_samplerate(rate,plugin);
     std::vector<float> input(rate*2), output(rate*2), repeat(rate*2);
     if (command == "render-input") {

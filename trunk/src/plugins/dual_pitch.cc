@@ -12,6 +12,7 @@ class DualPitch : public PluginDef {
     gx_engine::PolyphonicPitchShifter voices[2];
     float semitone1 = -12, semitone2 = 12;
     float level1 = 50, level2 = 50, dry = 0;
+    float bass_mode = 0;
 
     static void init(unsigned int rate, PluginDef* plugin) {
         auto& self = *static_cast<DualPitch*>(plugin);
@@ -35,6 +36,7 @@ class DualPitch : public PluginDef {
         auto& self = *static_cast<DualPitch*>(plugin);
         const double ratio1 = std::pow(2.0, self.semitone1 / 12.0);
         const double ratio2 = std::pow(2.0, self.semitone2 / 12.0);
+        for (auto& voice : self.voices) voice.set_bass_mode(self.bass_mode >= 0.5f);
         // Preserve the original input for both voices, including in-place calls.
         // Fixed scratch storage supports arbitrary host block sizes without allocation.
         float original[256], second[256];
@@ -57,6 +59,8 @@ class DualPitch : public PluginDef {
         reg.registerFloatVar("dual_pitch.level1", "V1 Level", "S", trim, &self.level1, 50, 0, 100, 1, 0);
         reg.registerFloatVar("dual_pitch.level2", "V2 Level", "S", trim, &self.level2, 50, 0, 100, 1, 0);
         reg.registerFloatVar("dual_pitch.dry", "Dry", "S", trim, &self.dry, 0, 0, 100, 1, 0);
+        static const value_pair instruments[] = {{"Guitar", "Guitar"}, {"Bass", "Bass"}, {nullptr, nullptr}};
+        reg.registerFloatVar("dual_pitch.bass_mode", "Instrument", "S", "Bass allows a longer delay for low notes", &self.bass_mode, 0, 0, 1, 1, instruments);
         return 0;
     }
 
@@ -68,6 +72,7 @@ class DualPitch : public PluginDef {
         builder.create_small_rackknob("dual_pitch.level1", "V1 Level");
         builder.create_small_rackknob("dual_pitch.level2", "V2 Level");
         builder.create_small_rackknob("dual_pitch.dry", "Dry");
+        builder.create_selector("dual_pitch.bass_mode", "Instrument");
         builder.closeBox();
         return 0;
     }

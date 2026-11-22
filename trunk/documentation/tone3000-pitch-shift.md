@@ -33,16 +33,25 @@ The legacy quality parameter selects the base window lengths:
 | 1 (Houston's selection) | 30 ms, TONE3000 default | 16 ms |
 | 2 (realtime) | 20 ms | 11 ms |
 
-The bass correction adapts these windows instead of forcing bass into the
-short guitar splice range. A low-pass cycle estimator requires two consistent
-periods, then requests at least 2.4 periods of delay range (up to 100 ms) and
-1.5 periods of correlation (up to 45 ms). Until the period is known, or changes
-substantially, it requests the larger range. Higher notes return to the chosen
-base window. Geometry changes only between searches/fades; increasing the
-range preserves the current upshift fade/search safety margins. No sample-rate
+All four effects expose `bass_mode`: **Guitar** (0, default) keeps the selected
+base window; **Bass** (1) allows extra range for low notes. Houston places the
+Guitar/Bass toggle in the pedal focus footer and saves it with the preset.
+Existing presets without this setting use Guitar, including expanded presets
+whose saved control definitions predate the switch. Select Bass for bass parts
+that need the extended range. The control changes delay geometry, not note
+quantisation or the harmoniser's musical key/interval rules.
+
+In Bass mode, a low-pass cycle estimator requires two consistent periods, then
+requests 2.4 periods of delay range (up to 100 ms) and 1.5 periods of correlation
+(up to 45 ms). Startup and uncertain periods keep the base window or briefly
+retain the last confirmed range; uncertainty never requests maximum latency.
+A 5% resizing margin suppresses crossing jitter. A confirmed higher note
+restores the base window immediately; without further confirmed periods, the
+request expires after 120 ms. Geometry changes only between searches/fades;
+increasing the range preserves the current upshift fade/search safety margins. No sample-rate
 reset, memory allocation or hard tap jump is needed. The extra buffer is
-allocated by `prepare()`. Both Pitch variants and both harmonisers use this
-same implementation.
+allocated by `prepare()`. The estimator stays warm in Guitar mode, and live
+mode changes use the same safe boundaries without resetting audio history.
 
 Bass wet delay is consequently longer and variable. This fixes the constrained
 lag search that put bass drop D almost a semitone sharp at +12 in the harmonic
@@ -74,17 +83,18 @@ a fresh instance regardless of the preceding scene.
 ## Dual Pitch
 
 The additional `dual_pitch` plugin runs two independent instances of the same
-engine at the adaptive 30 ms base setting. `voice1` and `voice2` each span −12 to +12 semitones,
+engine at the 30 ms base setting, with a shared Guitar/Bass selection.
+`voice1` and `voice2` each span −12 to +12 semitones,
 in whole-semitone steps. `level1`, `level2`, and `dry` are independent 0–100 trims
 with the same off/unity/+6 dB mapping as the original plugin. Defaults are −12
 and +12 semitones, both voices at unity, and dry off. The original `smbPitchShift`
-plugin remains available unchanged.
+plugin remains available with its own Guitar/Bass selection.
 
 Both voices consume the original input; neither processes the other voice.
 The audio callback uses bounded stack scratch buffers for arbitrary block sizes,
 including in-place calls. Sample-rate setup prepares both engines, and scene
-reset clears both without allocating. Houston exposes five matching controls,
-including expression assignments, on the Dual Pitch pedal artwork.
+reset clears both without allocating. Houston exposes five matching knobs,
+including expression assignments, plus the instrument toggle in the footer.
 
 ## Regression checks
 
@@ -101,6 +111,15 @@ timing, block partitioning, in-place processing, deterministic scene reset,
 and allocation-free processing/reset. As in upstream, large shifts of
 dissonant chords can compromise individual note pitches. Scene contract tests
 also cover the existing `PluginDef::clear_state` callback registration.
+
+The instrument-mode regressions also check a sustained open-E chord, a beating
+G3/G#3 dyad, quiet articulation markers and muted tails at 44.1/48/96 kHz,
+stale bass estimates, and live mode changes at several callback sizes. The
+previous uncertainty fallback repeatedly expanded the open-E window from
+30 to 100 ms and could replay a muted dyad almost 100 ms later. Both modes now
+keep that chord at the base window; the tested dyad responds to quiet markers
+within 30 ms and has no audible tail after 40 ms. These are synthetic DSP
+measurements, not end-to-end device latency or a hardware listening assessment.
 
 During the initial port, the original TONE3000 source compiled with JUCE and this
 adapter produced bit-identical output for 1,116 scenarios / 65,007,360 samples:

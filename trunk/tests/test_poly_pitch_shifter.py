@@ -33,7 +33,7 @@ class PolyPitchShifterTests(unittest.TestCase):
                                 self.assertLess(abs(1200*np.log2(peak/expected)),12,(peak,expected))
                                 self.assertGreater(np.sqrt(np.mean(audio**2)),.25)
 
-    def run_cpp_fixture(self, source: Path | str, expected_stdout: str) -> None:
+    def run_cpp_fixture(self, source: Path | str, expected_stdout: str, *arguments: str) -> None:
         compiler = os.environ.get("CXX", "c++")
         if shutil.which(compiler) is None:
             self.skipTest(f"C++ compiler is unavailable: {compiler}")
@@ -64,7 +64,7 @@ class PolyPitchShifterTests(unittest.TestCase):
                 check=True,
             )
             completed = subprocess.run(
-                [str(executable)],
+                [str(executable), *arguments],
                 capture_output=True,
                 text=True,
                 timeout=20,
@@ -108,6 +108,9 @@ class PolyPitchShifterTests(unittest.TestCase):
     def test_tone3000_pitch_audio_and_realtime_contract(self) -> None:
         self.run_cpp_fixture(FIXTURE, "poly-pitch-shifter-ok")
 
+    def test_chord_latency_bass_evidence_and_live_mode_changes(self) -> None:
+        self.run_cpp_fixture(FIXTURE, "pitch-window-ok", "regressions")
+
     def test_plugin_wet_dry_gain_mapping_and_unavailable_dsp(self) -> None:
         # Compile the production audio method with its real DSP and a small
         # field-only host stub; this checks the plugin's percent-to-gain
@@ -130,7 +133,7 @@ class PolyPitchShifterTests(unittest.TestCase):
                 bool ready = false;
                 float semitones = 7.0f;
                 float a = 1.0f, b = 1.0f, c = 1.0f, d = 1.0f, l = 0.0f;
-                float wet = 50.0f, dry = 0.0f;
+                float wet = 50.0f, dry = 0.0f, bass_mode = 0.0f;
                 int octave = 0;
                 void PitchShift(int count, float *indata, float *outdata);
             };

@@ -1290,6 +1290,7 @@ private:
     float a,b,c,d,l;
     float wet;
     float dry;
+    float bass_mode;
     int   octave, sampleRate;
     int latency;
     

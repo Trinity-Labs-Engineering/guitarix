@@ -21,7 +21,7 @@ float* reg_float(const char* id, const char*, const char*, const char*, float* v
                  float initial, float low, float high, float step, const value_pair*) {
     controls[id] = value; *value = initial;
     const bool pitch = std::string(id).find("voice") != std::string::npos;
-    assert(low == (pitch ? -12 : 0)); assert(high == (pitch ? 12 : 100)); assert(step == 1);
+    assert(low == (pitch ? -12 : 0)); assert(high == (pitch ? 12 : std::string(id) == "dual_pitch.bass_mode" ? 1 : 100)); assert(step == 1);
     return value;
 }
 void set(const char* id, float value) { *controls.at(id) = value; }
@@ -52,9 +52,10 @@ double amplitude(const std::vector<float>& signal, double freq, int rate) {
 int main() {
     auto* p=pluginlib::dual_pitch::plugin();
     ParamReg reg {p, reg_float, nullptr, nullptr};
-    assert(p->register_params(reg)==0 && controls.size()==5);
+    assert(p->register_params(reg)==0 && controls.size()==6);
     for (int rate : {44100,48000,96000}) {
         p->set_samplerate(rate,p); p->activate_plugin(true,p);
+        set("dual_pitch.bass_mode", 0);
         std::vector<float> input(2*rate);
         for (size_t i=0;i<input.size();++i) input[i]=.1f*std::sin(2*3.141592653589793*440*i/rate);
         const auto one=run(p,input,50,0,0), two=run(p,input,0,50,0);
@@ -72,6 +73,7 @@ int main() {
         p->clear_state(p); p->activate_plugin(false,p); p->activate_plugin(true,p);
         assert(allocations==before);
         near(run(p,input,50,0,0),one);
+        set("dual_pitch.bass_mode", 1);
         for (double frequency : {30.867706,36.708096,41.203445}) {
             for (size_t i=0;i<input.size();++i) input[i]=.1f*std::sin(2*3.141592653589793*frequency*i/rate);
             const auto down=run(p,input,50,0,0), up=run(p,input,0,50,0);

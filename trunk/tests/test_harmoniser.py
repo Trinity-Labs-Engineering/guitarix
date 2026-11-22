@@ -34,9 +34,9 @@ class HarmoniserTests(unittest.TestCase):
         cls.temporary.cleanup()
 
     def render(self, *, dual=0, rate=48000, frequency=220, tonic=3, mode=0,
-               interval=2, interval2=4, mix=50, wet=50, dry=0, block=32, inplace=0, kind=0, audio=None):
+               interval=2, interval2=4, mix=50, wet=50, dry=0, block=32, inplace=0, kind=0, audio=None, bass_mode=0):
         result = subprocess.run([str(self.executable), 'render-input' if audio is not None else 'render', *map(str, (
-            dual, rate, frequency, tonic, mode, interval, interval2, mix, wet, dry, block, inplace, kind,
+            dual, rate, frequency, tonic, mode, interval, interval2, mix, wet, dry, block, inplace, kind, bass_mode,
         ))], input=None if audio is None else np.asarray(audio,dtype=np.float32).tobytes(), check=True, capture_output=True, timeout=30)
         return np.frombuffer(result.stdout, dtype=np.float32)
 
@@ -100,7 +100,7 @@ class HarmoniserTests(unittest.TestCase):
             for dual, mix in ((0,50),(1,100),(1,0)):
                 for interval, shift in ((-5,-21),(-3,-17),(-1,-14),(1,14),(3,17),(5,21)):
                     with self.subTest(rate=rate, dual=dual, mix=mix, interval=interval):
-                        self.assert_frequency(self.render(rate=rate, frequency=36.708096, dual=dual,
+                        self.assert_frequency(self.render(rate=rate, frequency=36.708096, dual=dual, bass_mode=1,
                             mix=mix, interval=interval, interval2=interval, kind=1),rate,36.708096*2**(shift/12))
 
     def test_chromatic_compound_intervals_and_dual_blend(self):
@@ -161,7 +161,7 @@ class HarmoniserTests(unittest.TestCase):
                                          +.15*np.sin(3*angle))/1.5
                             wet = self.render(rate=rate, dual=dual, interval=interval,
                                               interval2=interval, audio=audio,
-                                              tonic=7, mode=5, dry=0, inplace=1)
+                                              tonic=7, mode=5, dry=0, inplace=1, bass_mode=1)
                             # At these bass pitches a one-sample history step is
                             # far above ordinary waveform curvature, including
                             # the first wet attack and subsequent splice fades.
@@ -303,7 +303,7 @@ class HarmoniserTests(unittest.TestCase):
             for dual,mix in ((0,50),(1,0),(1,100)):
                 # Bass D1 in C major selects an upward minor third: D -> F.
                 self.assert_frequency(self.render(rate=rate,dual=dual,mix=mix,frequency=36.708096,
-                    interval=2,interval2=2,kind=1),rate,43.653529)
+                    interval=2,interval2=2,kind=1,bass_mode=1),rate,43.653529)
 
     def test_blended_notes_renew_the_lock_without_silence(self):
         for rate in (44100,48000,96000):

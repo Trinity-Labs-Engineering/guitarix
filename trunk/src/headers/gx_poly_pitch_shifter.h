@@ -101,6 +101,8 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr double kMinDelayMs = 2.0;
 constexpr double kBassWindowMs = 100.0;
 constexpr double kBassCorrMs = 45.0;
+constexpr double kBassHoldMs = 120.0;
+constexpr double kBassGeometryHysteresis = 0.05;
 
 struct State {
   // Power-of-two ring indexed by absolute sample number; sample i lives at
@@ -175,8 +177,9 @@ struct State {
   int baseMax = 0, desiredMax = 0, maxWindow = 0, baseCorr = 0, maxCorr = 0, desiredCorr = 0;
   std::array<double, 4> bassFilter{};
   double bassCoefficient = 0, bassPeak = 0, bassRelease = 0, bassPeriod = 0;
-  int64_t bassCrossing = -1;
+  int64_t bassCrossing = -1, bassConfirmed = 0;
   bool bassPositive = false;
+  bool bassEnabled = false;
   int fadeLen = 0, fadeMaxLen = 0, fadeMinLen = 0, fadeLo = 0, fadeHi = 0, onsetFadeLen = 0;
   int onsetSpan = 0, refractory = 0, cellLen = 1, coarseStep = 1, searchLead = 1, searchLeadNow = 1;
 
@@ -279,9 +282,9 @@ struct State {
     written = 0;
     ratio = 1.0;
     dMax = baseMax; corrLen = baseCorr;
-    desiredMax = maxWindow; desiredCorr = maxCorr;
+    desiredMax = baseMax; desiredCorr = baseCorr;
     bassFilter.fill(0); bassPeak = bassPeriod = 0;
-    bassCrossing = -1; bassPositive = false;
+    bassCrossing = -1; bassConfirmed = 0; bassPositive = false;
     updateFadeRange();
     startupGain = 0.0f;
     blendLeft = 0;
@@ -303,7 +306,8 @@ struct State {
   void followBass(double input) {
     // Only size the splice search here; fixed Pitch/Dual Pitch do not quantise
     // notes. Low-pass zero crossings estimate the longest dominant cycle.
-    // Start with bass-safe geometry until two consistent cycles are available.
+    // Enlarge only after two consistent cycles. Uncertain crossings are common
+    // in chords and at startup; they are not evidence for a 100 ms bass window.
     for (auto& pole : bassFilter) {
       pole += bassCoefficient * (input - pole);
       input = pole;
@@ -315,21 +319,32 @@ struct State {
       const double period = static_cast<double>(written - bassCrossing);
       if (bassCrossing >= 0 && period >= sampleRate / 1800 && period <= sampleRate / 28) {
         if (bassPeriod > 0 && std::abs(period - bassPeriod) < bassPeriod * 0.15) {
-          desiredMax = std::max(baseMax, std::min(maxWindow, static_cast<int>(std::ceil(period * 2.4))));
-          desiredCorr = std::max(baseCorr, std::min(maxCorr, static_cast<int>(std::ceil(period * 1.5))));
-        } else {
-          // A new low note must not inherit a preceding high note's short
-          // range while its period is still being acquired.
-          desiredMax = maxWindow; desiredCorr = maxCorr;
+          bassConfirmed = written;
+          const int window = std::max(baseMax, std::min(maxWindow, static_cast<int>(std::ceil(period * 2.4))));
+          const int correlation = std::max(baseCorr, std::min(maxCorr, static_cast<int>(std::ceil(period * 1.5))));
+          // Crossing jitter must not continuously resize the splice search.
+          // Always allow a confirmed higher note to restore the base window.
+          if (window == baseMax || std::abs(window - desiredMax) > desiredMax * kBassGeometryHysteresis)
+            desiredMax = window;
+          if (correlation == baseCorr || std::abs(correlation - desiredCorr) > desiredCorr * kBassGeometryHysteresis)
+            desiredCorr = correlation;
         }
         bassPeriod = period;
+      } else {
+        bassPeriod = 0;
       }
       bassCrossing = written;
     }
+    // Brief ambiguity can retain a confirmed bass range, but silence/noise
+    // must not leave the next phrase using a stale, long delay indefinitely.
+    if (written - bassConfirmed > sampleRate * kBassHoldMs * 0.001) {
+      desiredMax = baseMax;
+      desiredCorr = baseCorr;
+    }
     // Geometry never changes halfway through a search or crossfade. Changes
     // are sample-driven, hence independent of the host's callback block size.
-    const int nextMax = ratio == 1.0 ? baseMax : desiredMax;
-    const int nextCorr = ratio == 1.0 ? baseCorr : desiredCorr;
+    const int nextMax = ratio == 1.0 || !bassEnabled ? baseMax : desiredMax;
+    const int nextCorr = ratio == 1.0 || !bassEnabled ? baseCorr : desiredCorr;
     if (!fading && !search.active && !search.ready && (nextMax != dMax || nextCorr != corrLen)) {
       const int previousFade = fadeHi, previousLead = searchLeadNow;
       dMax = nextMax; corrLen = nextCorr;
@@ -522,7 +537,7 @@ public:
         auto& s = state;
         const double sampleRate = std::max(8000, new_sample_rate);
         s.sampleRate = sampleRate;
-        // Houston selects mode 1: use a 30 ms base with adaptive bass headroom.
+        // Houston selects mode 1: 30 ms, with extra headroom in Bass mode.
         // Preserve the legacy quality setting for existing Guitarix presets.
         const double windowMs = quality <= 0 ? 60.0 : quality >= 2 ? 20.0 : 30.0;
         s.dMin = static_cast<int>(sampleRate * kMinDelayMs * 0.001);
@@ -566,6 +581,11 @@ public:
         state.reset();
         tone_low = tone_low_mid = tone_high_mid = 0.0f;
     }
+
+    // Apply from the audio callback. The follower keeps its estimate warm in
+    // Guitar mode; geometry changes at the next safe splice boundary, without
+    // allocating, clearing audio history or jumping either read tap.
+    void set_bass_mode(bool enabled) { state.bassEnabled = enabled; }
 
     // Keep the legacy fixed dry-compensation delay. Moving it with the adaptive
     // wet window would create discontinuities in an otherwise untouched dry path.

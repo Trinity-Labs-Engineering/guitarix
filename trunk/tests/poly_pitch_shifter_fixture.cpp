@@ -388,6 +388,118 @@ void test_attack_resync()
     }
 }
 
+void test_bass_window_evidence()
+{
+    using namespace gx_engine::tone3000_pitch;
+    for (int rate : {44100, 48000, 96000}) {
+        State s;
+        s.sampleRate = rate;
+        s.baseMax = static_cast<int>(rate * .030);
+        s.baseCorr = static_cast<int>(rate * .025);
+        s.maxWindow = static_cast<int>(rate * .100);
+        s.maxCorr = static_cast<int>(rate * .045);
+        s.bassCoefficient = 1 - std::exp(-pi2 * 55 / rate);
+        s.bassRelease = std::exp(-1.0 / (rate * .060));
+        s.reset();
+        s.ratio = .5;
+        s.bassEnabled = true;
+        const auto feed = [&](float sample) { ++s.written; s.followBass(sample); };
+        for (int i = 0; i < rate / 4; ++i) {
+            feed(0);
+            assert(s.dMax == s.baseMax && s.corrLen == s.baseCorr);
+        }
+        // A confirmed low B earns a longer window; the same signal in Guitar
+        // mode stays short. Reset and silence must not retain that bass delay.
+        for (int i = 0; i < rate / 2; ++i)
+            feed(.5f * std::sin(pi2 * 30.867706 * i / rate));
+        assert(s.dMax > rate * .075 && s.dMax < rate * .082);
+        assert(s.corrLen == s.maxCorr);
+        s.bassEnabled = false;
+        feed(0);
+        assert(s.dMax == s.baseMax && s.corrLen == s.baseCorr);
+        s.bassEnabled = true;
+        feed(0);
+        assert(s.dMax > rate * .075);
+        for (int i = 0; i < rate / 2; ++i) feed(0);
+        assert(s.dMax == s.baseMax && s.corrLen == s.baseCorr);
+
+        s.reset();
+        s.ratio = .5;
+        const double chord[] = {82.406889, 123.470825, 164.813778,
+                                207.652349, 246.941651, 329.627557};
+        for (int i = 0; i < 4 * rate; ++i) {
+            float sample = 0;
+            for (int note = 0; note < 6; ++note)
+                sample += .5f / 6 * std::sin(pi2 * chord[note] * i / rate + note * .31);
+            feed(sample);
+            assert(s.dMax == s.baseMax && s.corrLen == s.baseCorr);
+        }
+    }
+}
+
+void test_chord_articulation_latency()
+{
+    // A quiet step marks response time without triggering the attack detector;
+    // muting the same chord checks that old audio cannot return 100 ms later.
+    for (int rate : {44100, 48000, 96000}) {
+        std::vector<float> input(2 * rate), reference(input.size()), output(input.size());
+        for (int i = 0; i < int(input.size()); ++i)
+            input[i] = .25f * (std::sin(pi2 * 196 * i / rate)
+                + std::sin(pi2 * 207.652349 * i / rate + .31));
+        for (bool bass : {false, true}) for (double semitones : {2.0, 12.0}) {
+            gx_engine::PolyphonicPitchShifter shifter;
+            shifter.prepare(rate, 1);
+            shifter.set_bass_mode(bass);
+            const double ratio = std::pow(2., semitones / 12);
+            render(shifter, input, reference, ratio);
+            for (int hold_ms : {500, 700, 1000, 1250}) {
+                const int hold = rate * hold_ms / 1000;
+                auto marked = input;
+                for (int i = hold; i < int(marked.size()); ++i) marked[i] += .001f;
+                shifter.reset();
+                render(shifter, marked, output, ratio, 37);
+                int response = hold;
+                while (response < int(output.size()) && std::abs(output[response] - reference[response]) < .0001f)
+                    ++response;
+                assert(response - hold < rate * .030);
+
+                std::fill(marked.begin() + hold, marked.end(), 0);
+                shifter.reset();
+                render(shifter, marked, output, ratio, 16);
+                for (int i = hold + static_cast<int>(rate * .040); i < int(output.size()); ++i)
+                    assert(std::abs(output[i]) < .0001f);
+            }
+        }
+    }
+}
+
+void test_live_instrument_mode_changes()
+{
+    const int rate = 48000, segment = rate / 4;
+    const auto input = sine(2 * rate, rate, 41.203445);
+    for (double ratio : {.5, 2.0, 4.0}) {
+        std::vector<float> expected(input.size()), output(input.size());
+        for (int block : {1, 16, 127, 4097}) {
+            gx_engine::PolyphonicPitchShifter shifter;
+            shifter.prepare(rate, 1);
+            for (int position = 0; position < int(input.size());) {
+                const int count = std::min(block, segment - position % segment);
+                count_allocations = true;
+                shifter.set_bass_mode((position / segment) % 2 == 0);
+                process(shifter, input.data() + position, output.data() + position, count, ratio);
+                position += count;
+            }
+            assert(callback_allocations == 0);
+            if (block == 1) expected = output;
+            else assert_equal(output, expected);
+            for (int i = 1; i < int(output.size()); ++i) {
+                assert(std::isfinite(output[i]));
+                assert(std::abs(output[i] - output[i - 1]) < .12f);
+            }
+        }
+    }
+}
+
 } // namespace
 
 void *operator new(size_t size)
@@ -412,6 +524,13 @@ void operator delete[](void *memory) noexcept { std::free(memory); }
 
 int main(int argc, char** argv)
 {
+    if (argc == 2 && std::string(argv[1]) == "regressions") {
+        test_bass_window_evidence();
+        test_chord_articulation_latency();
+        test_live_instrument_mode_changes();
+        std::cout << "pitch-window-ok\n";
+        return 0;
+    }
     if (argc == 7 && std::string(argv[1]) == "render") {
         const int rate = std::atoi(argv[2]), kind = std::atoi(argv[5]), quality = std::atoi(argv[6]);
         const double frequency = std::atof(argv[3]), ratio = std::pow(2., std::atof(argv[4]) / 12.);
@@ -420,6 +539,7 @@ int main(int argc, char** argv)
             input[i] += .25 * std::sin(pi2 * 2 * frequency * i / rate) + .125 * std::sin(pi2 * 3 * frequency * i / rate);
         gx_engine::PolyphonicPitchShifter shifter;
         shifter.prepare(rate, quality);
+        shifter.set_bass_mode(true);
         std::vector<float> output(input.size()), repeat(input.size());
         render(shifter, input, output, ratio, 37);
         shifter.reset();
