@@ -129,14 +129,14 @@ private:
     gx_resample::StreamingResampler resamp;
     bool read_sndfile(Audiofile& audio, int nchan, int samplerate, const float *gain,
 		      unsigned int *delay, unsigned int offset, unsigned int length,
-		      const Gainline& points);
+		      const Gainline& points, bool normalize_mono = false);
 public:
     GxConvolver(): GxConvolverBase(), resamp() {}
     bool configure(
         string fname, float gain, float lgain,
         unsigned int delay, unsigned int ldelay, unsigned int offset,
         unsigned int length, unsigned int size, unsigned int bufsize,
-        const Gainline& gainline);
+        const Gainline& gainline, bool normalize_mono = false);
     bool compute(int count, float* input1, float *input2, float *output1, float *output2);
     bool configure(string fname, float gain, unsigned int delay, unsigned int offset,
 		   unsigned int length, unsigned int size, unsigned int bufsize,

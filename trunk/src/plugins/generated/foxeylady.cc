@@ -11,6 +11,7 @@ namespace foxeylady {
 
 class Dsp: public PluginDef {
 private:
+	FAUSTFLOAT wet_gain = 0.1;
 	int fSampleRate;
 	FAUSTFLOAT fVslider0;
 	double fRec0[2];
@@ -329,9 +330,9 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 	}
 	smpCl.down(bufCl, output0);
 
-	// Compensate the fixed input boost after clipping.
+	// Apply calibration after clipping, before the dry blend.
 	for (int i = 0; i < count; ++i) {
-		output0[i] *= FAUSTFLOAT(0.1);
+		output0[i] *= wet_gain;
 	}
 
 }
@@ -343,6 +344,7 @@ void __rt_func Dsp::compute_static(int count, FAUSTFLOAT *input0, FAUSTFLOAT *ou
 
 int Dsp::register_par(const ParamReg& reg)
 {
+	reg.registerFloatVar("foxeylady.wet_gain",N_("Wet Gain"),"S",N_("Post-clip calibration"),&wet_gain, 0.1, 0.0, 1.0, 0.001, 0);
 	reg.registerFloatVar("foxeylady.Fuzz",N_("Fuzz"),"S","",&fVslider0, 0.5, 0.0, 1.0, 0.01, 0);
 	reg.registerFloatVar("foxeylady.Level",N_("Level"),"S","",&fVslider1, 0.5, 0.0, 1.0, 0.01, 0);
 	return 0;

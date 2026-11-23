@@ -325,6 +325,7 @@ class GxJConvSettings {
     guint           fDelay;      // delay when to apply reverb
     Gainline        gainline;
     bool            fGainCor;
+    bool            fNormalize = false;
     void read_gainline(gx_system::JsonParser& jp);
     inline void setIRDir(string name)             { fIRDir = name; }
     friend class ConvolverAdapter;
@@ -341,12 +342,14 @@ class GxJConvSettings {
     inline guint           getLength() const      { return fLength; }
     inline guint           getDelay() const       { return fDelay; }
     inline bool            getGainCor() const     { return fGainCor; }
+    inline bool            getNormalize() const   { return fNormalize; }
     inline const Gainline& getGainline() const    { return gainline; }
     const std::string& getIRDir() const           { return fIRDir; }
     void setFullIRPath(string name);
     inline void setIRFile(string name)            { fIRFile = name; }
     inline void setGain(float gain)               { fGain       = gain; }
     inline void setGainCor(bool gain)             { fGainCor    = gain; }
+    inline void setNormalize(bool normalize)      { fNormalize = normalize; }
     inline void setOffset(guint offs)             { fOffset     = offs; }
     inline void setLength(guint leng)             { fLength     = leng; }
     inline void setDelay(guint del)               { fDelay      = del;  }
@@ -483,7 +486,7 @@ public:
 // Scene-aware equivalent of jconv_post_mono; keep its interactive transfer.
 class SceneConvolverMonoPost {
     float gain_db = 0.0f;
-    float wet_dry = 100.0f;
+    float wet_dry = 50.0f;
     double gain_state = 0.0;
     std::atomic<bool> suspended{false};
     std::atomic<bool> snap_pending{false};

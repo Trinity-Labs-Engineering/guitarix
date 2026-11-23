@@ -10,6 +10,7 @@ namespace bmp {
 
 class Dsp: public PluginDef {
 private:
+	FAUSTFLOAT wet_gain = 0.1;
 	gx_resample::FixedRateResampler smp;
 	int sample_rate;
 	int fSampleRate;
@@ -220,9 +221,9 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 		fRec7[1] = fRec7[0];
 	}
 	smp.down(buf, output0);
-	// Compensate the fixed input boost after clipping.
+	// Apply calibration after clipping, before the dry blend.
 	for (int i = 0; i < count; ++i) {
-		output0[i] *= FAUSTFLOAT(0.1);
+		output0[i] *= wet_gain;
 	}
 
 }
@@ -234,6 +235,7 @@ void __rt_func Dsp::compute_static(int count, FAUSTFLOAT *input0, FAUSTFLOAT *ou
 
 int Dsp::register_par(const ParamReg& reg)
 {
+	reg.registerFloatVar("bmp.wet_gain",N_("Wet Gain"),"S",N_("Post-clip calibration"),&wet_gain, 0.1, 0.0, 1.0, 0.001, 0);
 	reg.registerFloatVar("bmp.Sustain",N_("Sustain"),"S","",&fVslider1, 0.5, 0.0, 1.0, 0.01, 0);
 	reg.registerFloatVar("bmp.Tone",N_("Tone"),"S","",&fVslider0, 0.5, 0.0, 1.0, 0.01, 0);
 	reg.registerFloatVar("bmp.Volume",N_("Volume"),"S","",&fVslider2, 0.5, 0.0, 1.0, 0.01, 0);

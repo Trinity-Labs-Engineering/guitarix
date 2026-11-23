@@ -9,6 +9,57 @@ TRUNK = Path(__file__).resolve().parents[1]
 
 
 class SceneIrGainTests(unittest.TestCase):
+    def test_imported_kernel_frequency_gain_and_explicit_trim(self):
+        source = (TRUNK / "src/gx_head/engine/gx_convolver.cpp").read_text()
+        start = source.index("static bool normalize_mono_ir(")
+        normalize = source[start:source.index("\n}", start) + 2]
+        fixture = r'''
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <limits>
+#include <vector>
+#include <fftw3.h>
+''' + normalize + r'''
+int main() {
+    for (float level : {0.f, .125f, 1.f, 8.f}) {
+        std::vector<float> taps(128);
+        taps[48] = -level;
+        assert(normalize_mono_ir(taps, .5f));
+        assert(taps[48] == -.5f * std::min(level, 1.f));
+    }
+    // Equal taps add in phase at DC. Alternating taps peak at Nyquist.
+    for (float sign : {1.f, -1.f}) {
+        std::vector<float> taps(16, .5f);
+        for (size_t i = 1; i < taps.size(); i += 2) taps[i] *= sign;
+        assert(normalize_mono_ir(taps, 1.f));
+        for (float tap : taps) assert(std::abs(std::abs(tap) - 1.f/16) < 1e-7);
+    }
+    // An interior resonance with an off-bin centre frequency spans more
+    // than one file-read chunk. Check magnitude and preservation of phase.
+    std::vector<float> original(34001);
+    const double omega = 2 * std::acos(-1.) * 731.3 / 48000;
+    for (size_t i = 0; i < original.size(); ++i) original[i] = .5 * std::cos(i * omega);
+    auto taps = original;
+    assert(normalize_mono_ir(taps, 1.f));
+    double real = 0, imag = 0;
+    for (size_t i = 0; i < taps.size(); ++i) {
+        assert(std::abs(taps[i] * original[0] - taps[0] * original[i]) < 1e-9);
+        real += taps[i] * std::cos(i * omega);
+        imag += taps[i] * std::sin(i * omega);
+    }
+    assert(std::abs(std::hypot(real, imag) - 1.) < .015);
+    taps = {std::numeric_limits<float>::quiet_NaN()};
+    assert(!normalize_mono_ir(taps, 1.f));
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="gx-ir-kernel-") as directory:
+            cpp, binary = Path(directory) / "fixture.cpp", Path(directory) / "fixture"
+            cpp.write_text(fixture)
+            subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-O2", str(cpp),
+                            "-lfftw3f", "-o", str(binary)], check=True)
+            subprocess.run([str(binary)], check=True, timeout=10)
+
     def test_interactive_equivalence_and_guarded_gain_changes(self):
         header = (TRUNK / "src/headers/gx_internal_plugins.h").read_text()
         definition = "class SceneConvolverMonoPost" + header.split("class SceneConvolverMonoPost", 1)[1].split("\n};", 1)[0] + "\n};"
@@ -45,6 +96,7 @@ int main() {
             old.register_par(ParamReg{nullptr, reg_float});
             float* old_level = controls.at("jconv_mono.gain");
             float* old_mix = controls.at("jconv_mono.wet_dry");
+            assert(*mix == 50.f && *old_mix == 50.f);
             std::vector<float> dry(count), wet(count), actual(count), expected(count);
             for (int i = 0; i < count; ++i) {
                 dry[i] = .1f + .01f * std::sin(.4f*i);

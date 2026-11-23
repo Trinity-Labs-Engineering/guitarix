@@ -37,7 +37,7 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *input
 int Dsp::register_par(const ParamReg& reg)
 {
 	reg.registerFloatVar("jconv_mono.gain",N_("Gain"),"S",N_("gain trim for processed signal (unit: dB)"),&fVslider0, 0.0, -2e+01, 2e+01, 0.1, 0);
-	reg.registerFloatVar("jconv_mono.wet_dry",N_("wet/dry"),"S",N_("percentage of processed signal in output signal"),&fVslider1, 1e+02, 0.0, 1e+02, 1.0, 0);
+	reg.registerFloatVar("jconv_mono.wet_dry",N_("wet/dry"),"S",N_("percentage of processed signal in output signal"),&fVslider1, 5e+01, 0.0, 1e+02, 1.0, 0);
 	return 0;
 }
 

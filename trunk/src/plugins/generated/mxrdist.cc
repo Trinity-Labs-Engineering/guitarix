@@ -143,9 +143,9 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 		double fTemp3 = fConst15 * (fTemp2 + 4.7e+03);
 		double fTemp4 = fConst15 * (fTemp2 + 1.0047e+06);
 		fRec2[0] = -((fRec2[1] * (1.0 - fTemp3) - fConst10 * (fTemp0 * (fTemp4 + 1.0) + fVec0[1] * (1.0 - fTemp4))) / (fTemp3 + 1.0));
-		fRec0[0] = fTemp1 - (opamp2(fRec2[0] - fTemp1) + fConst6 * (fConst4 * fRec0[1] + fConst2 * fRec0[2]));
+		fRec0[0] = asymhardclip2(fTemp1 - opamp2(fRec2[0] - fTemp1)) - fConst6 * (fConst4 * fRec0[1] + fConst2 * fRec0[2]);
 		fRec4[0] = fSlow1 + 0.993 * fRec4[1];
-		buf[i0] = FAUSTFLOAT(fConst16 * fRec4[0] * (fRec0[0] - fRec0[2]));
+		buf[i0] = FAUSTFLOAT(0.685 * fConst16 * fRec4[0] * (fRec0[0] - fRec0[2]));
 		fRec1[2] = fRec1[1];
 		fRec1[1] = fRec1[0];
 		fVec0[1] = fVec0[0];

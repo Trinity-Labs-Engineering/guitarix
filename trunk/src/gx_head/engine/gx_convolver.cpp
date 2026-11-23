@@ -21,6 +21,8 @@
 /* ------- This is the guitarix convolver, part of gx_engine_audio ------- */
 
 #include "engine.h"
+#include <fftw3.h>
+#include <limits>
 
 /****************************************************************
  ** some pieces in this file are copied from jconvolver
@@ -250,6 +252,46 @@ bool GxConvolverBase::checkstate() {
  ** GxConvolver
  */
 
+// Measure the peak frequency response of the effective mono kernel. A WAV
+// can have every sample below full scale and still boost a sustained note
+// many times over. Bake one attenuation into the taps before partitioning.
+static bool normalize_mono_ir(std::vector<float>& taps, float gain) {
+    if (taps.empty() || !std::isfinite(gain)) return false;
+    double absolute_sum = 0;
+    double largest = 0;
+    for (float tap : taps) {
+        if (!std::isfinite(tap)) return false;
+        const double magnitude = std::abs(double(tap));
+        absolute_sum += magnitude;
+        largest = std::max(largest, magnitude);
+    }
+    double peak = 1;
+    if (absolute_sum > 1) {
+        // Fourfold zero padding samples resonances between the natural DFT
+        // bins. Scaling the FFT input also accommodates hot floating-point IRs.
+        size_t size = 4;
+        while (size / 4 < taps.size()) {
+            if (size > std::numeric_limits<int>::max() / 2) return false;
+            size *= 2;
+        }
+        std::vector<float> spectrum(size);
+        for (size_t i = 0; i < taps.size(); ++i) spectrum[i] = taps[i] / largest;
+        auto plan = fftwf_plan_r2r_1d(int(size), spectrum.data(), spectrum.data(),
+                                     FFTW_R2HC, FFTW_ESTIMATE);
+        if (!plan) return false;
+        fftwf_execute(plan);
+        fftwf_destroy_plan(plan);
+        double maximum = std::max(std::abs(spectrum[0]), std::abs(spectrum[size / 2]));
+        for (size_t k = 1; k < size / 2; ++k) {
+            maximum = std::max(maximum, std::hypot(double(spectrum[k]), double(spectrum[size - k])));
+        }
+        peak = std::max(1.0, maximum * largest);
+    }
+    const double scale = gain / peak;
+    for (float& tap : taps) tap = float(tap * scale);
+    return true;
+}
+
 /*
 ** GxConvolver::read_sndfile()
 **
@@ -277,11 +319,9 @@ bool GxConvolverBase::checkstate() {
 bool GxConvolver::read_sndfile(
     Audiofile& audio, int nchan, int samplerate, const float *gain,
     unsigned int *delay, unsigned int offset, unsigned int length,
-    const Gainline& points) {
+    const Gainline& points, bool normalize_mono) try {
     int nfram;
-    float *buff;
-    float *rbuff = 0;
-    float *bufp;
+    std::vector<float> mono_ir, resampled;
     // keep BSIZE big enough so that resamp.flush() doesn't cause overflow
     // (> 100 should be enough, and should be kept bigger anyhow)
     const unsigned int BSIZE = 0x8000; //  0x4000;
@@ -292,32 +332,18 @@ bool GxConvolver::read_sndfile(
         audio.close();
         return false;
     }
-    try {
-        buff = new float[BSIZE * audio.chan()];
-    } catch(...) {
-        audio.close();
-        gx_print_error("convolver", "out of memory");
-        return false;
-    }
+    std::vector<float> buff(BSIZE * audio.chan());
+    float *bufp = buff.data();
     if (samplerate != audio.rate()) {
         gx_print_info(
 	    "convolver", Glib::ustring::compose(
 		_("resampling from %1 to %2"), audio.rate(), samplerate));
         if (!resamp.setup(audio.rate(), samplerate, audio.chan())) {
             gx_print_error("convolver", "resample failure");
-            assert(false);
-	    return false;
-        }
-        try {
-            rbuff = new float[resamp.get_max_out_size(BSIZE)*audio.chan()];
-        } catch(...) {
-            audio.close();
-            gx_print_error("convolver", "out of memory");
             return false;
         }
-        bufp = rbuff;
-    } else {
-        bufp = buff;
+        resampled.resize(size_t(resamp.get_max_out_size(BSIZE)) * audio.chan());
+        bufp = resampled.data();
     }
     bool done = false;
     unsigned int idx = 0; // current index in gainline point array
@@ -337,12 +363,9 @@ bool GxConvolver::read_sndfile(
         unsigned int cnt;
         nfram = (length > BSIZE) ? BSIZE : length;
         if (length) {
-            nfram = audio.read(buff, nfram);
-            if (nfram < 0) {
+            nfram = audio.read(buff.data(), nfram);
+            if (nfram <= 0) {
                 gx_print_error("convolver", "Error reading file");
-                audio.close();
-                delete[] buff;
-                delete[] rbuff;
                 return false;
             }
             for (int ix = 0; ix < nfram; ix++) {
@@ -351,24 +374,26 @@ bool GxConvolver::read_sndfile(
                 }
 
                 for (int ichan = 0; ichan < min(audio.chan(), nchan); ichan++) {
-                    buff[ix*audio.chan()+ichan] *= pow(10, gp + ix*fct) *  gain[ichan];
+                    buff[ix*audio.chan()+ichan] *= pow(10, gp + ix*fct) * (normalize_mono ? 1.0 : gain[ichan]);
                 }
             }
             offset += nfram;
             gp += nfram*fct;
             cnt = nfram;
-            if (rbuff) {
-                cnt = resamp.process(nfram, buff, rbuff);
+            if (!resampled.empty()) {
+                cnt = resamp.process(nfram, buff.data(), bufp);
             }
         } else {
-            if (rbuff) {
-                cnt = resamp.flush(rbuff);
+            if (!resampled.empty()) {
+                cnt = resamp.flush(bufp);
                 done = true;
             } else {
                 break;
             }
         }
-        if (cnt) {
+        if (normalize_mono) {
+            for (unsigned int i = 0; i < cnt; ++i) mono_ir.push_back(bufp[i * audio.chan()]);
+        } else if (cnt) {
 
             for (int ichan = 0; ichan < nchan; ichan++) {
                 int rc;
@@ -379,30 +404,32 @@ bool GxConvolver::read_sndfile(
                                         delay[ichan], delay[ichan] + cnt);
                 }
                 if (rc) {
-                    audio.close();
-                    delete[] buff;
-                    delete[] rbuff;
                     gx_print_error("convolver", "out of memory");
                     return false;
                 }
                 delay[ichan] += cnt;
             }
-            length -= nfram;
         }
+        length -= nfram;
     }
 
-    audio.close();
-    delete[] buff;
-    delete[] rbuff;
-    
+    if (normalize_mono && (mono_ir.size() > std::numeric_limits<unsigned int>::max() - delay[0] ||
+        !normalize_mono_ir(mono_ir, gain[0]) ||
+        impdata_create(0, 0, 1, mono_ir.data(), delay[0], delay[0] + mono_ir.size()))) {
+        gx_print_error("convolver", "Unable to prepare normalized impulse response");
+        return false;
+    }
     return true;
+} catch (const std::bad_alloc&) {
+    gx_print_error("convolver", "out of memory");
+    return false;
 }
 
 bool GxConvolver::configure(
     string fname, float gain, float lgain,
     unsigned int delay, unsigned int ldelay, unsigned int offset,
     unsigned int length, unsigned int size, unsigned int bufsize,
-    const Gainline& points) {
+    const Gainline& points, bool normalize_mono) {
     Audiofile     audio;
     cleanup();
     if (fname.empty() || !samplerate) {
@@ -426,13 +453,14 @@ bool GxConvolver::configure(
 	delay = round(delay * f);
 	ldelay = round(ldelay * f);
     }
+    const unsigned int channels = normalize_mono ? 1 : 2;
 #if ZITA_CONVOLVER_VERSION == 4
-        if (Convproc::configure(2, 2, size, buffersize, bufsize, Convproc::MAXPART, 0.0)) {
+        if (Convproc::configure(channels, channels, size, buffersize, bufsize, Convproc::MAXPART, 0.0)) {
             gx_print_error("convolver", "error in Convproc::configure ");
             return false;
         }        
 #else 
-        if (Convproc::configure(2, 2, size, buffersize, bufsize, Convproc::MAXPART)) {
+        if (Convproc::configure(channels, channels, size, buffersize, bufsize, Convproc::MAXPART)) {
             gx_print_error("convolver", "error in Convproc::configure ");
             return false;
         }
@@ -440,7 +468,7 @@ bool GxConvolver::configure(
 
     float gain_a[2] = {gain, lgain};
     unsigned int delay_a[2] = {delay, ldelay};
-    return read_sndfile(audio, 2, samplerate, gain_a, delay_a, offset, length, points);
+    return read_sndfile(audio, channels, samplerate, gain_a, delay_a, offset, length, points, normalize_mono);
 }
 
 bool __rt_func GxConvolver::compute(int count, float* input1, float *input2,

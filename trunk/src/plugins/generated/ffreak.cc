@@ -10,6 +10,7 @@ namespace ffreak {
 
 class Dsp: public PluginDef {
 private:
+	FAUSTFLOAT wet_gain = 0.1;
 	int fSampleRate;
 	FAUSTFLOAT fVslider0;
 	double fRec0[2];
@@ -461,9 +462,9 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 		}
 		fRec4[1] = fRec4[0];
 	}
-	// Compensate the fixed input boost after clipping.
+	// Apply calibration after clipping, before the dry blend.
 	for (int i = 0; i < count; ++i) {
-		output0[i] *= FAUSTFLOAT(0.1);
+		output0[i] *= wet_gain;
 	}
 
 	for (int i=0; i<count; i++) {
@@ -479,6 +480,7 @@ void __rt_func Dsp::compute_static(int count, FAUSTFLOAT *input0, FAUSTFLOAT *ou
 
 int Dsp::register_par(const ParamReg& reg)
 {
+	reg.registerFloatVar("ffreak.wet_gain",N_("Wet Gain"),"S",N_("Post-clip calibration"),&wet_gain, 0.1, 0.0, 1.0, 0.001, 0);
 	reg.registerFloatVar("ffreak.wet_dry",N_("Dry/Wet"),"S",N_("percentage of processed signal in output signal"),&fsliderdw0, 1e+02, 0.0, 1e+02, 1.0, 0);
 	reg.registerFloatVar("ffreak.Fuzz",N_("Fuzz"),"S","",&fVslider0, 0.5, 0.0, 1.0, 0.01, 0);
 	reg.registerFloatVar("ffreak.Gate",N_("Gate"),"S","",&fVslider2, 0.5, 0.0, 1.0, 0.01, 0);

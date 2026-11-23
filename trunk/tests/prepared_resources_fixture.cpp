@@ -117,6 +117,7 @@ GxJConvSettings ir_settings(const std::string& path) {
     settings.setIRFile(path);
     settings.setGain(1.0f);
     settings.setGainCor(true);
+    settings.setNormalize(true);
     Gainline envelope;
     envelope.push_back({0, 0.0});
     envelope.push_back({-1, 0.0});
@@ -134,7 +135,7 @@ struct GxConvolver {
     unsigned int get_buffersize() const { return buffer; }
     void set_sync(bool) {}
     bool configure(const std::string& path, float, float, unsigned int,
-        unsigned int, unsigned int, unsigned int, int, int, const Gainline&) {
+        unsigned int, unsigned int, unsigned int, int, int, const Gainline&, bool) {
         if (path == "missing") return false;
         id = ++ir_loads; return true;
     }
@@ -160,6 +161,7 @@ public:
     std::vector<CachedIR> ir_cache;
     std::vector<GxJConvSettings> prepared_irs;
     bool convolver_sync = false;
+    bool mono_audio = true;
     boost::mutex activate_mutex;
     Engine engine;
     Plugin plugin;
@@ -248,6 +250,9 @@ int main() {
 
     auto flat = ir_settings("flat");
     assert(flat == flat);
+    auto raw = flat;
+    raw.setNormalize(false);
+    assert(!(flat == raw));
     Gainline envelope;
     envelope.push_back({0, -6.0});
     envelope.push_back({-1, 0.0});

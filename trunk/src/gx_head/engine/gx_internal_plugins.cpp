@@ -455,6 +455,7 @@ GxJConvSettings& GxJConvSettings::operator=(GxJConvSettings const& jcset) {
     fDelay = jcset.fDelay;
     gainline = jcset.gainline;
     fGainCor = jcset.fGainCor;
+    fNormalize = jcset.fNormalize;
     return *this;
 }
 
@@ -477,6 +478,7 @@ void GxJConvSettings::writeJSON(gx_system::JsonWriter& w) const {
     w.write_kv("jconv.IRDir", gx_system::get_options().get_IR_prefixmap().replace_path(fIRDir));
     w.write_kv("jconv.Gain", fGain);
     w.write_kv("jconv.GainCor", fGainCor);
+    w.write_kv("jconv.Normalize", fNormalize);
     w.write_kv("jconv.Offset", fOffset);
     w.write_kv("jconv.Length", fLength);
     w.write_kv("jconv.Delay", fDelay);
@@ -499,7 +501,7 @@ bool GxJConvSettings::operator==(const GxJConvSettings& jcset) const {
     if (fOffset != jcset.fOffset || fLength != jcset.fLength || fDelay != jcset.fDelay) {
         return false;
     }
-    if (fGainCor != jcset.fGainCor) {
+    if (fGainCor != jcset.fGainCor || fNormalize != jcset.fNormalize) {
         return false;
     }
     if (fGainCor && !(std::abs(fGain - jcset.fGain) <=
@@ -529,6 +531,7 @@ void GxJConvSettings::read_gainline(gx_system::JsonParser& jp) {
 }
 
 void GxJConvSettings::readJSON(gx_system::JsonParser& jp) {
+    fNormalize = false;  // Older native settings carry their own gain correction.
     jp.next(gx_system::JsonParser::begin_object);
     do {
         jp.next(gx_system::JsonParser::value_key);
@@ -536,6 +539,7 @@ void GxJConvSettings::readJSON(gx_system::JsonParser& jp) {
         jp.read_kv("jconv.IRDir", fIRDir) ||
         jp.read_kv("jconv.Gain", fGain) ||
         jp.read_kv("jconv.GainCor", fGainCor) ||
+        jp.read_kv("jconv.Normalize", fNormalize) ||
         jp.read_kv("jconv.Offset", fOffset) ||
         jp.read_kv("jconv.Length", fLength) ||
         jp.read_kv("jconv.Delay", fDelay)) {
@@ -764,7 +768,7 @@ std::unique_ptr<GxConvolver> ConvolverAdapter::configure_ir(const GxJConvSetting
     const float gain = settings.getGainCor() ? settings.getGain() : 1.0f;
     if (!prepared->configure(settings.getFullIRPath(), gain, gain,
         settings.getDelay(), settings.getDelay(), settings.getOffset(),
-        settings.getLength(), 0, 0, settings.getGainline())) {
+        settings.getLength(), 0, 0, settings.getGainline(), mono_audio && settings.getNormalize())) {
         return nullptr;
     }
     return prepared;
@@ -1048,7 +1052,7 @@ int SceneConvolverMonoPost::register_par(const ParamReg& reg) {
         0.0, -20.0, 20.0, 0.1, 0);
     reg.registerFloatVar("jconv_mono.wet_dry", N_("wet/dry"), "S",
         N_("percentage of processed signal in output signal"), &wet_dry,
-        100.0, 0.0, 100.0, 1.0, 0);
+        50.0, 0.0, 100.0, 1.0, 0);
     return 0;
 }
 
@@ -1118,7 +1122,7 @@ void ConvolverMonoAdapter::convolver(int count, float *input, float *output, Plu
     if (current && current->is_runnable()) {
         float conv_out[count];
         if (current->compute(count, input, conv_out)) {
-            self.jc_post_mono.compute(count, output, conv_out, output);
+            self.jc_post_mono.compute(count, input, conv_out, output);
             return;
         }
     self.engine.overload(EngineControl::ov_Convolver, self.id);
