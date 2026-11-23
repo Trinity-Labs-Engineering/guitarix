@@ -9,7 +9,7 @@ declare samplerate "96000";
 
 import("stdfaust.lib");
 
-process = pre : fi.iir((b0/a0,b1/a0),(a1/a0)) : clip : *(0.45) with {
+process = pre : fi.iir((b0/a0,b1/a0),(a1/a0)) : clip with {
     LogPot(a, x) = ba.if(a, (exp(a * x) - 1) / (exp(a) - 1), x);
     Inverted(b, x) = ba.if(b, 1 - x, x);
     s = 0.993;

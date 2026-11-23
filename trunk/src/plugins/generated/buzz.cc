@@ -12,7 +12,6 @@ namespace buzz {
 
 class Dsp: public PluginDef {
 private:
-	FAUSTFLOAT wet_gain = 0.1;
 	int fSampleRate;
 	double fConst0;
 	double fConst1;
@@ -204,9 +203,9 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 	}
 	smpCl.down(bufCl, output0);
 
-	// Apply calibration after clipping, before the dry blend.
+	// Compensate the fixed input boost after clipping, then mix with dry audio.
 	for (int i = 0; i < count; ++i) {
-		output0[i] = FAUSTFLOAT(fSlowdw1 * dryinput[i] + fSlowdw0 * (wet_gain * output0[i]));
+		output0[i] = FAUSTFLOAT(fSlowdw1 * dryinput[i] + fSlowdw0 * (0.1 * output0[i]));
 	}
 
 }
@@ -218,7 +217,6 @@ void __rt_func Dsp::compute_static(int count, FAUSTFLOAT *input0, FAUSTFLOAT *ou
 
 int Dsp::register_par(const ParamReg& reg)
 {
-	reg.registerFloatVar("buzz.wet_gain",N_("Wet Gain"),"S",N_("Post-clip calibration"),&wet_gain, 0.1, 0.0, 1.0, 0.001, 0);
 	reg.registerFloatVar("buzz.Level",N_("Level"),"S","",&fVslider1, 0.5, 0.0, 1.0, 0.01, 0);
 	reg.registerFloatVar("buzz.wet_dry",N_("Wet/Dry"),"S",N_("percentage of processed signal in output signal"),&fVslider0, 1e+02, 0.0, 1e+02, 1.0, 0);
 	return 0;

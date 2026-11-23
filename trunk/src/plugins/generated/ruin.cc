@@ -11,7 +11,6 @@ namespace ruin {
 
 class Dsp: public PluginDef {
 private:
-	FAUSTFLOAT wet_gain = 0.1;
 	gx_resample::FixedRateResampler smp;
 	int sample_rate;
 	int fSampleRate;
@@ -177,9 +176,9 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 		}
 	}
 	smp.down(buf, output0);
-	// Apply calibration after clipping, before the dry blend.
+	// Compensate the fixed input boost after clipping.
 	for (int i = 0; i < count; ++i) {
-		output0[i] *= wet_gain;
+		output0[i] *= FAUSTFLOAT(0.1);
 	}
 
 	for (int i=0; i<count; i++) {
@@ -195,7 +194,6 @@ void __rt_func Dsp::compute_static(int count, FAUSTFLOAT *input0, FAUSTFLOAT *ou
 
 int Dsp::register_par(const ParamReg& reg)
 {
-	reg.registerFloatVar("ruin.wet_gain",N_("Wet Gain"),"S",N_("Post-clip calibration"),&wet_gain, 0.1, 0.0, 1.0, 0.001, 0);
 	reg.registerFloatVar("ruin.wet_dry",N_("Dry/Wet"),"S",N_("percentage of processed signal in output signal"),&fsliderdw0, 1e+02, 0.0, 1e+02, 1.0, 0);
 	reg.registerFloatVar("ruin.Intensity",N_("Intensity"),"S","",&fVslider1, 0.5, 0.0, 1.0, 0.01, 0);
 	reg.registerFloatVar("ruin.Level",N_("Level"),"S","",&fVslider0, 0.5, 0.0, 1.0, 0.01, 0);

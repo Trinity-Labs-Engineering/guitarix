@@ -99,16 +99,6 @@ void check_mix(PluginDef* p, int rate) {
     const auto mixed = render(p, input, 256);
     for (size_t i = 0; i < input.size(); ++i)
         assert(std::abs(mixed[i] - 0.5 * (input[i] + wet[i])) < 1e-6);
-    prepare(p, rate);
-    auto trim = controls.find(std::string(p->id) + ".wet_gain");
-    if (trim != controls.end()) {
-        assert(*trim->second == .1f);
-        *trim->second = .3f;
-        *controls.at(std::string(p->id) + ".wet_dry") = 50;
-        const auto calibrated = render(p, input, 256, true);
-        for (size_t i = 0; i < input.size(); ++i)
-            assert(std::abs(calibrated[i] - 0.5 * (input[i] + 3 * wet[i])) < 1e-6);
-    }
 }
 int main(int argc, char**) {
     using Factory = PluginDef* (*)();

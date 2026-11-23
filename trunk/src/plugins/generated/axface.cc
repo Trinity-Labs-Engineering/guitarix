@@ -10,7 +10,6 @@ namespace axface {
 
 class Dsp: public PluginDef {
 private:
-	FAUSTFLOAT wet_gain = 0.1;
 	int fSampleRate;
 	double fConst0;
 	double fConst1;
@@ -333,9 +332,9 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 		fRec1[1] = fRec1[0];
 		fRec0[1] = fRec0[0];
 	}
-	// Apply calibration after clipping, before the dry blend.
+	// Compensate the fixed input boost after clipping.
 	for (int i = 0; i < count; ++i) {
-		output0[i] *= wet_gain;
+		output0[i] *= FAUSTFLOAT(0.1);
 	}
 
 }
@@ -347,7 +346,6 @@ void __rt_func Dsp::compute_static(int count, FAUSTFLOAT *input0, FAUSTFLOAT *ou
 
 int Dsp::register_par(const ParamReg& reg)
 {
-	reg.registerFloatVar("axface.wet_gain",N_("Wet Gain"),"S",N_("Post-clip calibration"),&wet_gain, 0.1, 0.0, 1.0, 0.001, 0);
 	reg.registerFloatVar("axface.Attack",N_("Attack"),"S","",&fVslider0, 0.5, 0.0, 1.0, 0.01, 0);
 	reg.registerFloatVar("axface.Level",N_("Level"),"S","",&fVslider2, 0.5, 0.0, 1.0, 0.01, 0);
 	reg.registerFloatVar("axface.Smooth",N_("Smooth"),"S","",&fVslider1, 0.5, 0.0, 1.0, 0.01, 0);

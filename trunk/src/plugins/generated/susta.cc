@@ -11,7 +11,6 @@ namespace susta {
 
 class Dsp: public PluginDef {
 private:
-	FAUSTFLOAT wet_gain = 0.1;
 	int fSampleRate;
 	FAUSTFLOAT fVslider0;
 	double fRec0[2];
@@ -359,9 +358,9 @@ void always_inline Dsp::compute(int count, FAUSTFLOAT *input0, FAUSTFLOAT *outpu
 	}
 	smpCl.down(bufCl, output0);
 
-	// Apply calibration after clipping, before the dry blend.
+	// Compensate the fixed input boost after clipping.
 	for (int i = 0; i < count; ++i) {
-		output0[i] *= wet_gain;
+		output0[i] *= FAUSTFLOAT(0.1);
 	}
 
 	for (int i=0; i<count; i++) {
@@ -380,7 +379,6 @@ void __rt_func Dsp::compute_static(int count, FAUSTFLOAT *input0, FAUSTFLOAT *ou
 
 int Dsp::register_par(const ParamReg& reg)
 {
-	reg.registerFloatVar("susta.wet_gain",N_("Wet Gain"),"S",N_("Post-clip calibration"),&wet_gain, 0.1, 0.0, 1.0, 0.001, 0);
 	reg.registerFloatVar("susta.Volume",N_("Volume"),"S","",&fsliderV0, 0.5, 0.0, 1, 0.01, 0);
 	reg.registerFloatVar("susta.Sustain",N_("Sustain"),"S","",&fVslider0, 0.5, 0.0, 1.0, 0.01, 0);
 	return 0;

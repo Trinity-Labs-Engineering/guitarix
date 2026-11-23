@@ -42,9 +42,7 @@ mxr_out = fi.iir((b0/a0,b1/a0,b2/a0),(a1/a0,a2/a0)) with {
     a2 = fs*(1.40668739186091e-10*fs - 1.40739073555684e-5) + 0.000351671847965227;
 };
 
-// The output pot follows the shunt diodes. Trim after the circuit so Drive
-// can increase clipping independently of the pedal's listening level.
-process = mxr_in : X3 : clip : mxr_out : *(0.685) with {
+process = mxr_in : X3  : mxr_out   with {
     R1 = 4700 + (1000000 * (1.0 -drive));
     R2 = 1000000 ;
     C = 0.047 * 1e-6;

@@ -1074,9 +1074,6 @@ class Dsp: public PluginDef {
 class Dsp {
 #endif
 private:
-#if %(has_wet_gain)s
-	FAUSTFLOAT wet_gain = %(output_gain)s;
-#endif
 #if %(has_fixedrate)s
 	gx_resample::FixedRateResampler smp;
 #if %(has_stereo)s
@@ -1402,9 +1399,6 @@ void __rt_func Dsp::compute_static(int %(countname)s%(compute_args)s, PluginDef 
 #endif
 int Dsp::register_par(const ParamReg& reg)
 {
-#if %(has_wet_gain)s
-	reg.registerFloatVar("%(plugin_id)s.wet_gain",N_("Wet Gain"),"S",N_("Post-clip calibration"),&wet_gain, %(output_gain)s, 0.0, 1.0, 0.001, 0);
-#endif
 #if %(has_drywetbox)s
 	reg.registerFloatVar("%(plugin_id)s.wet_dry",N_("Dry/Wet"),"S",N_("percentage of processed signal in output signal"),&fsliderdw0, 1e+02, 0.0, 1e+02, 1.0, 0);
 #endif
@@ -2188,14 +2182,12 @@ class Output(object):
         # Apply fixed compensation after nonlinear inserts, before level/mix.
         # Putting this in the Faust graph would attenuate the insert's input.
         output_gain_post = ""
-        has_wet_gain = 0.0 <= self.parser.output_gain < 1.0 and self.options.init_type == "plugin-instance"
         if self.parser.output_gain != 1.0:
-            gain = "wet_gain" if has_wet_gain else "FAUSTFLOAT(%s)" % self.parser.output_gain
-            output_gain_post = "\t// Apply calibration after clipping, before the dry blend.\n"
+            output_gain_post = "\t// Compensate the fixed input boost after clipping.\n"
             output_gain_post += "\tfor (int i = 0; i < count; ++i) {\n"
             for channel in range(self.parser.numOutputs):
                 output = ("outputX%d" if self.parser.has_vector else "output%d") % channel
-                output_gain_post += "\t\t%s[i] *= %s;\n" % (output, gain)
+                output_gain_post += "\t\t%s[i] *= FAUSTFLOAT(%s);\n" % (output, self.parser.output_gain)
             output_gain_post += "\t}\n"
 
         s = StringIO()
@@ -2232,8 +2224,6 @@ class Output(object):
             insert_p_init = insert_p_init,
             insert_p_compute = insert_p_compute,
             output_gain_post = output_gain_post,
-            output_gain = self.parser.output_gain,
-            has_wet_gain = has_wet_gain,
             insert_p_incl = insert_p_incl,
             dry_wetbox_mono_pre = dry_wetbox_mono_pre,
             dry_wetbox_mono_post = dry_wetbox_mono_post,
