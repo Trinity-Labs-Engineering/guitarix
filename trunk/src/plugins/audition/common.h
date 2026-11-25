@@ -56,7 +56,8 @@ struct OnePole : Filter<1> {
 // Both filters retain 16 samples of group delay in their respective input rates.
 class SincHistory {
     static constexpr int phases = 128, taps = 33, size = 256;
-    std::array<double, size> samples{};
+    // Mirror the first taps-1 slots after the ring for contiguous backwards reads.
+    std::array<double, size + taps - 1> samples{};
     std::array<std::array<float,taps>, phases+1> coefficients{};
     int64_t written = 0;
 public:
@@ -75,12 +76,25 @@ public:
         reset();
     }
     void reset() { samples.fill(0); written = 0; }
-    void push(double x) { samples[(written++) & (size-1)] = x; }
+    void push(double x) {
+        const auto slot = written++ & (size-1);
+        samples[slot] = x;
+        if (slot < taps-1) samples[size+slot] = x;
+    }
     double at(double position) const {
         const auto n = static_cast<int64_t>(std::floor(position));
         double phase = (position - double(n)) * phases;
         int p = std::min(phases-1, int(phase)); double fraction = phase-p;
         double y = 0;
+        if (fraction == 0 && n >= taps-1 && n < written && written-n <= size-taps+1) {
+            // Integer-ratio converters land directly on a stored phase. Once
+            // the complete window is live, every tap uses that phase as-is.
+            auto slot = n & (size-1);
+            const double* newest = samples.data() + (slot < taps-1 ? slot+size : slot);
+            for (int k = 0; k < taps; ++k)
+                y += newest[-k] * coefficients[p][k];
+            return y;
+        }
         for (int k = 0; k < taps; ++k) {
             const auto i = n-k;
             if (i >= 0 && i < written && written-i <= size)

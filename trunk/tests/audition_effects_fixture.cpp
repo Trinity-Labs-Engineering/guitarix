@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include "gx_plugin.h"
+#include "plugins/audition/common.h"
 namespace pluginlib { namespace audition_effects {
 PluginDef* tone_machine(); PluginDef* super_fuzz(); PluginDef* muff(); PluginDef* fuzz_machine();
 PluginDef* percolator(); PluginDef* bias_fuzz(); PluginDef* mouse(); PluginDef* tone_king();
@@ -137,7 +138,28 @@ void check_mouse_startup() {
         p->delete_instance(p);
     }
 }
+// An impulse at startup and an impulse spanning the circular-buffer wrap
+// must see the same FIR taps, including exact and interpolated phases.
+static void test_sinc_history_wrap() {
+    audition::SincHistory at_start, at_wrap;
+    at_start.prepare(0.5);
+    at_wrap.prepare(0.5);
+    for (int i = 0; i < 255; ++i)
+        at_wrap.push(0);
+    for (int i = 0; i < 40; ++i) {
+        at_start.push(i == 0 ? 1 : 0);
+        at_wrap.push(i == 0 ? 1 : 0);
+        for (double phase : {0.0, 0.5, 0.123}) {
+            assert(std::abs(at_start.at(i + phase) - at_wrap.at(255 + i + phase)) < 1.e-12);
+        }
+    }
+    at_wrap.reset();
+    at_wrap.push(0);
+    assert(at_wrap.at(0) == 0);
+}
+
 int main(int argc,char** argv) {
+    test_sinc_history_wrap();
     if (argc > 1 && std::string(argv[1]) == "--mouse-startup") {
         check_mouse_startup();
         return 0;

@@ -26,6 +26,7 @@ def build(bld):
         './NeuralAmpModelerCore/NAM/ring_buffer.cpp',
         './NeuralAmpModelerCore/NAM/util.cpp',
         './NeuralAmpModelerCore/NAM/wavenet/a2_fast.cpp',
+        './NeuralAmpModelerCore/NAM/wavenet/a2_planar.cpp',
         './NeuralAmpModelerCore/NAM/wavenet/model.cpp',
         './NeuralAmpModelerCore/NAM/wavenet/slimmable.cpp',
         ]
