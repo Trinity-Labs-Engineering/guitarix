@@ -526,8 +526,11 @@ bool GxJack::gx_jack_init(bool startserver, int wait_after_connect, const gx_sys
 		
 	// create buffer to bypass the insert ports
     insert_buffer = new float[buffer_size];
-    mixed_input.resize(buffer_size);
+    resize_split_buffers(buffer_size);
     previous_split_gain = 0.0f;
+    dry_valid = send_valid = false;
+    aligned_send.store(false);
+    buffered_return.store(false);
     set_split_blend(0);
     if (IS_RT) IS_RT = jack_is_realtime(client) ? true : false;
     gx_jack_callbacks();
@@ -618,6 +621,9 @@ void GxJack::gx_jack_cleanup() {
     jack_port_unregister(client, ports.midi_output.port);
 #endif
     if (!single_client) {
+        if (post_return) jack_port_unregister(client_insert, post_return);
+        if (post_send) jack_port_unregister(client_insert, post_send);
+        post_return = post_send = nullptr;
         jack_port_unregister(client_insert, ports.insert_in.port);
         jack_port_unregister(client_insert, ports.output1.port);
         jack_port_unregister(client_insert, ports.output2.port);
@@ -801,6 +807,22 @@ void GxJack::gx_jack_init_port_connection(const gx_system::CmdlineOptions& opt) 
  ** callback installation and port registration
  */
 
+void GxJack::resize_split_buffers(jack_nframes_t frames) {
+    mixed_input.resize(frames);
+    split_history.resize(frames);
+    previous_dry.resize(frames);
+    previous_left.resize(frames);
+    previous_right.resize(frames);
+    dry_valid = send_valid = false;
+}
+
+int GxJack::split_graph_order(void* arg) {
+    auto& self = *static_cast<GxJack*>(arg);
+    self.buffered_return.store(self.post_return && jack_port_connected(self.post_return), std::memory_order_relaxed);
+    self.aligned_send.store(self.post_send && jack_port_connected(self.post_send), std::memory_order_relaxed);
+    return 0;
+}
+
 // ----- set gxjack.client callbacks and activate gxjack.client
 void GxJack::gx_jack_callbacks() {
     // ----- set the jack callbacks
@@ -854,6 +876,10 @@ void GxJack::gx_jack_callbacks() {
 
     if (!single_client) {
     // register ports for gx_amp_fx
+        if (jack_set_graph_order_callback(client_insert, split_graph_order, this) == 0) {
+            post_return = jack_port_register(client_insert, "post_return", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
+            post_send = jack_port_register(client_insert, "post_send", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+        }
         ports.insert_in.port = jack_port_register(
           client_insert, "in_0", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
         ports.output1.port = jack_port_register(
@@ -1164,7 +1190,27 @@ int __rt_func GxJack::gx_jack_process(jack_nframes_t nframes, void *arg) {
     } 
     float *input = get_float_buf(self.ports.input.port, nframes);
     const float gain = self.split_blend_percent.load(std::memory_order_relaxed) * 0.01f;
-    if (self.split_input && (gain != 0.0f || self.previous_split_gain != 0.0f)) {
+    const bool buffered = self.buffered_return.load(std::memory_order_relaxed);
+    if (buffered) {
+        const auto start = jack_last_frame_time(self.client);
+        const bool contiguous = self.dry_valid && self.dry_end == start;
+        const float step = (gain - self.previous_split_gain) / nframes;
+        for (jack_nframes_t i = 0; i < nframes; ++i) {
+            const float mix = self.previous_split_gain + step * (i + 1);
+            const float dry = contiguous ? self.previous_dry[i] : 0.0f;
+            self.previous_dry[i] = input[i];
+            const float split = contiguous ? self.split_history.get(start - nframes + i) : 0.0f;
+            self.mixed_input[i] = (1.0f - mix) * dry + mix * split;
+        }
+        self.dry_end = start + nframes;
+        self.dry_valid = true;
+        self.previous_split_gain = gain;
+        input = self.mixed_input.data();
+    } else {
+        self.dry_valid = false;
+    }
+    if (!buffered && self.split_input &&
+        (gain != 0.0f || self.previous_split_gain != 0.0f)) {
         // JACK sums all cables on split_in. Keep both shared JACK inputs read-only.
         const float *split = get_float_buf(self.split_input, nframes);
         const float step = (gain - self.previous_split_gain) / nframes;
@@ -1229,6 +1275,28 @@ int __rt_func GxJack::gx_jack_insert_process(jack_nframes_t nframes, void *arg) 
 	    nframes, ibuf, ibuf,
 	    get_float_buf(self.ports.output1.port, nframes),
 	    get_float_buf(self.ports.output2.port, nframes));
+    if (self.buffered_return.load(std::memory_order_relaxed)) {
+        self.split_history.put(jack_last_frame_time(self.client_insert), get_float_buf(self.post_return, nframes), nframes);
+    }
+    if (self.aligned_send.load(std::memory_order_relaxed)) {
+        float* tap = get_float_buf(self.post_send, nframes);
+        float* left = get_float_buf(self.ports.output1.port, nframes);
+        std::copy_n(left, nframes, tap);
+        float* right = get_float_buf(self.ports.output2.port, nframes);
+        const auto start = jack_last_frame_time(self.client_insert);
+        const bool contiguous = self.send_valid && self.send_end == start;
+        for (jack_nframes_t i = 0; i < nframes; ++i) {
+            const float old_left = self.previous_left[i], old_right = self.previous_right[i];
+            self.previous_left[i] = left[i];
+            self.previous_right[i] = right[i];
+            left[i] = contiguous ? old_left : 0.0f;
+            right[i] = contiguous ? old_right : 0.0f;
+        }
+        self.send_end = start + nframes;
+        self.send_valid = true;
+    } else {
+        self.send_valid = false;
+    }
     self.spectrum.push(nframes, get_float_buf(self.ports.output1.port, nframes),
         get_float_buf(self.ports.output2.port, nframes), self.jack_sr.load(std::memory_order_relaxed));
     }
@@ -1492,7 +1560,7 @@ int GxJack::gx_jack_buffersize_callback(jack_nframes_t nframes, void* arg) {
 	delete[] self.insert_buffer;
 	self.insert_buffer = NULL;
     self.insert_buffer = new float[nframes];
-    self.mixed_input.resize(nframes);
+    self.resize_split_buffers(nframes);
     return 0;
 }
 

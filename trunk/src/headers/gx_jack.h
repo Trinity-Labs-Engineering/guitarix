@@ -31,6 +31,7 @@
 #ifndef GUITARIX_AS_PLUGIN
 
 #include "gx_spectrum.h"
+#include "gx_split_period.h"
 
 #include <jack/jack.h>          // NOLINT
 #include <jack/midiport.h>
@@ -244,6 +245,15 @@ private:
     std::atomic<jack_nframes_t> jack_bs;   // jack buffer size
     float               *insert_buffer;
     jack_port_t         *split_input = nullptr;
+    jack_port_t         *post_return = nullptr, *post_send = nullptr;
+    // Post returns cross from the FX callback to the following amp cycle.
+    SplitPeriod         split_history;
+    std::atomic<bool>   buffered_return{false}, aligned_send{false};
+    std::vector<float>  previous_dry, previous_left, previous_right;
+    void                resize_split_buffers(jack_nframes_t frames);
+    jack_nframes_t      dry_end = 0, send_end = 0;
+    bool                dry_valid = false, send_valid = false;
+    static int          split_graph_order(void* arg);
     std::vector<float>  mixed_input;
     std::atomic<int>    split_blend_percent{0};
     float               previous_split_gain = 0.0f;
